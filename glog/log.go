@@ -24,7 +24,7 @@ const (
 )
 
 func SetLogger(l *log.Logger) {
-	l.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	l.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
 	logger = l
 }
 
