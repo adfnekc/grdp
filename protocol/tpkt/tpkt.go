@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io"
 
 	"github.com/tomatome/grdp/core"
 	"github.com/tomatome/grdp/emission"
@@ -165,10 +166,14 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 
 func (t *TPKT) recvHeader(s []byte, err error) {
 	glog.Trace("tpkt recvHeader", hex.EncodeToString(s), err)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		t.Emit("error", err)
 		return
 	}
+	if err == io.EOF {
+		return
+	}
+
 	r := bytes.NewReader(s)
 	version, _ := core.ReadUInt8(r)
 	if version == FASTPATH_ACTION_X224 {

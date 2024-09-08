@@ -10,8 +10,15 @@ type ReadBytesComplete func(result []byte, err error)
 func StartReadBytes(len int, r io.Reader, cb ReadBytesComplete) {
 	b := make([]byte, len)
 	go func() {
-		_, err := io.ReadFull(r, b)
-		//glog.Debug("StartReadBytes Get", n, "Bytes:", hex.EncodeToString(b))
+		var err error
+		for {
+			_, err = io.ReadFull(r, b)
+			//glog.Debug("StartReadBytes Get", n, "Bytes:", hex.EncodeToString(b))
+			if err == io.EOF {
+				continue
+			}
+			break
+		}
 		cb(b, err)
 	}()
 }

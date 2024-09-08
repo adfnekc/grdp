@@ -45,7 +45,7 @@ func Trace(v ...interface{}) {
 		logger.SetPrefix("[TRACE]")
 		s := fmt.Sprintln(v...)
 		if len(s) > 1024 {
-			logger.Output(2, s[:1024]+"......")
+			logger.Output(2, s[:1024]+"[truncate]......")
 			return
 		}
 		logger.Output(2, s)
