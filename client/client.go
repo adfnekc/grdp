@@ -48,6 +48,11 @@ type Client struct {
 	setting *Setting
 }
 
+func init() {
+	logger := log.New(os.Stdout, "", 0)
+	glog.SetLogger(logger)
+	glog.SetLevel(glog.NONE)
+}
 func NewClient(host, user, passwd string, t int, s *Setting) *Client {
 	if s == nil {
 		s = NewSetting()

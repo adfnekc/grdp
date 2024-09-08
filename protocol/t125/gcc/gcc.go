@@ -566,15 +566,73 @@ func MakeConferenceCreateRequest(userData []byte) []byte {
 	per.WriteChoice(0, buff)                        // 00
 	per.WriteObjectIdentifier(t124_02_98_oid, buff) // 05:00:14:7c:00:01
 	per.WriteLength(len(userData)+14, buff)
-	per.WriteChoice(0, buff)                   // 00
-	per.WriteSelection(0x08, buff)             // 08
-	per.WriteNumericString("1", 1, buff)       // 00 10
-	per.WritePadding(1, buff)                  // 00
-	per.WriteNumberOfSet(1, buff)              // 01
-	per.WriteChoice(0xc0, buff)                // c0
-	per.WriteOctetStream(h221_cs_key, 4, buff) // 00 44:75:63:61
+	per.WriteChoice(0, buff)                                                     // 00
+	per.WriteSelection(0x08, buff)                                               // 08
+	per.WriteNumericString("1", per.MinSimpleNumericStringLen, buff)             // 00 10
+	per.WritePadding(1, buff)                                                    // 00
+	per.WriteNumberOfSet(1, buff)                                                // 01
+	per.WriteChoice(0xc0, buff)                                                  // c0
+	per.WriteOctetStream(h221_cs_key, per.MinH221NonStandardIdentifierLen, buff) // 00 44:75:63:61
 	per.WriteOctetStream(string(userData), 0, buff)
 	return buff.Bytes()
+}
+
+func ReadConferenceCreateRequest(data []byte) ([]interface{}, error) {
+	defer func() {
+		if err := recover(); err != nil {
+			glog.Errorf("err in ReadConferenceCreateRequest: %+v", err)
+		}
+	}()
+	r := bytes.NewReader(data)
+
+	per.ReadExcept(0x00, r)                                                   // 00
+	oidMatch := per.MatchObjectIdentifier(r, t124_02_98_oid)                  // 05:00:14:7c:00:01
+	_, err1 := per.ReadLength(r)                                              //length
+	per.ReadExcept(0x00, r)                                                   // 00
+	per.ReadExcept(0x08, r)                                                   // 08
+	per.ReadNumericString(per.MinSimpleNumericStringLen, r)                   // 00 10
+	per.ReadExcept(0x00, r)                                                   // 00
+	per.ReadExcept(0x01, r)                                                   // 01
+	per.ReadExcept(0xC0, r)                                                   // c0
+	per.MacthOctetStream(r, h221_cs_key, per.MinH221NonStandardIdentifierLen) // 00 44:75:63:61
+
+	if !oidMatch {
+		return nil, errors.New("t124_02_98_oid not match")
+	}
+	if err1 != nil {
+		return nil, err1
+	}
+
+	ret := make([]interface{}, 0, 3)
+	ln, _ := per.ReadLength(r)
+	for ln > 0 {
+		t, _ := core.ReadUint16LE(r)
+		l, _ := core.ReadUint16LE(r)
+		dataBytes, _ := core.ReadBytes(int(l)-4, r)
+		ln = ln - l
+		var d ScData
+		switch Message(t) {
+		case SC_CORE:
+			d = &ServerCoreData{}
+		case SC_SECURITY:
+			d = &ServerSecurityData{}
+		case SC_NET:
+			d = &ServerNetworkData{}
+		default:
+			glog.Error("userData Unknown type", t)
+			continue
+		}
+		if d != nil {
+			r := bytes.NewReader(dataBytes)
+			err := d.Unpack(r)
+			if err != nil {
+				glog.Warn("Unpack:", err)
+			}
+			ret = append(ret, d)
+		}
+	}
+
+	return ret, nil
 }
 
 type ScData interface {
@@ -582,12 +640,17 @@ type ScData interface {
 	Unpack(io.Reader) error
 }
 
+func MakeConferenceCreateResponse(userData []byte) []byte {
+	// TODO MakeConferenceCreateResponse
+	return nil
+}
+
 func ReadConferenceCreateResponse(data []byte) []interface{} {
 	ret := make([]interface{}, 0, 3)
 
 	r := bytes.NewReader(data)
 	per.ReadChoice(r)
-	if !per.ReadObjectIdentifier(r, t124_02_98_oid) {
+	if !per.MatchObjectIdentifier(r, t124_02_98_oid) {
 		glog.Error("NODE_RDP_PROTOCOL_T125_GCC_BAD_OBJECT_IDENTIFIER_T124")
 		return ret
 	}
@@ -599,7 +662,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 	per.ReadNumberOfSet(r)
 	per.ReadChoice(r)
 
-	if !per.ReadOctetStream(r, h221_sc_key, 4) {
+	if !per.MacthOctetStream(r, h221_sc_key, 4) {
 		glog.Error("NODE_RDP_PROTOCOL_T125_GCC_BAD_H221_SC_KEY")
 		return ret
 	}
@@ -620,7 +683,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 		case SC_NET:
 			d = &ServerNetworkData{}
 		default:
-			glog.Error("Unknown type", t)
+			glog.Error("userData Unknown type", t)
 			continue
 		}
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"log"
 
 	"github.com/tomatome/grdp/core"
 	"github.com/tomatome/grdp/emission"
@@ -133,7 +132,7 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 
 func (t *TPKT) Read(b []byte) (n int, err error) {
 	n, err = t.Conn.Read(b)
-	log.Printf("TPKT: %#v\n", b[:n])
+	fmt.Printf("TPKT: %#v\n", b[:n])
 	return n, err
 }
 

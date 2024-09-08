@@ -27,7 +27,7 @@ func showPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func socketIO() {
-	server, _ := socketio.NewServer(nil)
+	server := socketio.NewServer(nil)
 	server.OnConnect("/", func(so socketio.Conn) error {
 		fmt.Println("OnConnect", so.ID())
 		so.Emit("rdp-connect", true)

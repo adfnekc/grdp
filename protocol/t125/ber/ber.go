@@ -55,6 +55,12 @@ func ReadEnumerated(r io.Reader) (uint8, error) {
 	return core.ReadUInt8(r)
 }
 
+func WriteEnumerated(e uint8, w io.Writer) {
+	WriteUniversalTag(TAG_ENUMERATED, false, w)
+	WriteLength(1, w)
+	core.WriteUInt8(e, w)
+}
+
 func ReadUniversalTag(tag uint8, pc bool, r io.Reader) bool {
 	bb, _ := core.ReadUInt8(r)
 	return bb == (CLASS_UNIV|berPC(pc))|(TAG_MASK&tag)
@@ -143,6 +149,17 @@ func WriteOctetstring(str string, w io.Writer) {
 	core.WriteBytes([]byte(str), w)
 }
 
+func ReadOctetstring(r io.Reader) ([]byte, error) {
+	if !ReadUniversalTag(TAG_OCTET_STRING, false, r) {
+		return nil, errors.New("Bad string tag")
+	}
+	size, err := ReadLength(r)
+	if err != nil {
+		return nil, err
+	}
+	return core.ReadBytes(size, r)
+}
+
 func WriteBoolean(b bool, w io.Writer) {
 	bb := uint8(0)
 	if b {
@@ -151,6 +168,23 @@ func WriteBoolean(b bool, w io.Writer) {
 	WriteUniversalTag(TAG_BOOLEAN, false, w)
 	WriteLength(1, w)
 	core.WriteUInt8(bb, w)
+}
+
+func ReadBoolean(r io.Reader) (bool, error) {
+	if !ReadUniversalTag(TAG_BOOLEAN, false, r) {
+		return false, errors.New("Bad bool tag")
+	}
+	ReadLength(r)
+	bb, err := core.ReadByte(r)
+	if err != nil {
+		return false, err
+	}
+	if bb == 0xff {
+		return true, nil
+	} else if bb == 0x00 {
+		return false, nil
+	}
+	return false, fmt.Errorf("Bad bool value: %X", bb)
 }
 
 func ReadApplicationTag(tag uint8, r io.Reader) (int, error) {

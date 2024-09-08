@@ -43,7 +43,12 @@ func Trace(v ...interface{}) {
 		mu.Lock()
 		defer mu.Unlock()
 		logger.SetPrefix("[TRACE]")
-		logger.Output(2, fmt.Sprintln(v...))
+		s := fmt.Sprintln(v...)
+		if len(s) > 1024 {
+			logger.Output(2, s[:1024]+"......")
+			return
+		}
+		logger.Output(2, s)
 	}
 }
 func Tracef(f string, v ...interface{}) {

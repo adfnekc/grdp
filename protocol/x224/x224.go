@@ -48,7 +48,9 @@ const (
 	PROTOCOL_RDP       uint32 = 0x00000000
 	PROTOCOL_SSL              = 0x00000001
 	PROTOCOL_HYBRID           = 0x00000002
+	PROTOCOL_RDSTLS           = 0x00000004
 	PROTOCOL_HYBRID_EX        = 0x00000008
+	PROTOCOL_RDSAAD           = 0x00000010
 )
 
 /**
@@ -150,11 +152,11 @@ func (x *ClientConnectionRequestPDU) Serialize() []byte {
  * @see	http://msdn.microsoft.com/en-us/library/cc240506.aspx
  */
 type ServerConnectionConfirm struct {
-	Len         uint8
-	Code        MessageType
-	Padding1    uint16
-	Padding2    uint16
-	Padding3    uint8
+	Len         uint8       `struc:"byte"`
+	Code        MessageType `struc:"byte"`
+	Padding1    uint16      `struc:"little"`
+	Padding2    uint16      `struc:"little"`
+	Padding3    uint8       `struc:"byte"`
 	ProtocolNeg *Negotiation
 }
 
@@ -203,7 +205,8 @@ func New(t core.Transport) *X224 {
 }
 
 func (x *X224) Read(b []byte) (n int, err error) {
-	return x.transport.Read(b)
+	n, err = x.transport.Read(b)
+	return n, err
 }
 
 func (x *X224) Write(b []byte) (n int, err error) {

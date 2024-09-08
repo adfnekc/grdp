@@ -2,16 +2,20 @@ package per
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/tomatome/grdp/glog"
 
 	"github.com/tomatome/grdp/core"
 )
 
-func ReadEnumerates(r io.Reader) (uint8, error) {
-	return core.ReadUInt8(r)
-}
+const (
+	MinSimpleNumericStringLen       = 1
+	MinH221NonStandardIdentifierLen = 4
+)
 
 func WriteInteger(n int, w io.Writer) {
 	if n <= 0xff {
@@ -113,9 +117,32 @@ func WriteNumericString(s string, minValue int, w io.Writer) {
 	w.Write(buff.Bytes())
 }
 
+func ReadNumericString(minValue int, r io.Reader) string {
+	mLength, err := ReadLength(r)
+	if err != nil {
+		return ""
+	}
+	nBytes := minValue + int(mLength)
+	buf, err := core.ReadBytes(nBytes, r)
+	if err != nil {
+		return ""
+	}
+	var s strings.Builder
+	for i := 0; i < nBytes; i++ {
+		b := buf[i]
+		c1 := (b >> 4) & 0x0f
+		c2 := b & 0x0f
+		s.WriteByte(byte(c1 + '0'))
+		s.WriteByte(byte(c2 + '0'))
+	}
+	return s.String()
+}
+
 func WritePadding(length int, w io.Writer) {
-	b := make([]byte, length)
-	w.Write(b)
+	for i := 0; i < length; i++ {
+		core.WriteUInt8(uint8(0), w)
+	}
+
 }
 
 func WriteNumberOfSet(n int, w io.Writer) {
@@ -142,6 +169,19 @@ func ReadChoice(r io.Reader) uint8 {
 	choice, _ := core.ReadUInt8(r)
 	return choice
 }
+
+func ReadEnumerates(r io.Reader) (uint8, error) {
+	return core.ReadUInt8(r)
+}
+
+func ReadSelection(r io.Reader) (uint8, error) {
+	return core.ReadUInt8(r)
+}
+
+func ReadPadding(r io.Reader) (uint8, error) {
+	return core.ReadUInt8(r)
+}
+
 func ReadNumberOfSet(r io.Reader) uint8 {
 	choice, _ := core.ReadUInt8(r)
 	return choice
@@ -159,12 +199,12 @@ func ReadInteger(r io.Reader) uint32 {
 		ret, _ := core.ReadUInt32BE(r)
 		return ret
 	default:
-		glog.Info("ReadInteger")
+		glog.Trace("ReadInteger", size)
 	}
 	return 0
 }
 
-func ReadObjectIdentifier(r io.Reader, oid []byte) bool {
+func MatchObjectIdentifier(r io.Reader, oid []byte) bool {
 	size, _ := ReadLength(r)
 	if size != 5 {
 		return false
@@ -179,14 +219,14 @@ func ReadObjectIdentifier(r io.Reader, oid []byte) bool {
 	a_oid[4], _ = core.ReadByte(r)
 	a_oid[5], _ = core.ReadByte(r)
 
-	for i, _ := range oid {
+	for i := range oid {
 		if oid[i] != a_oid[i] {
 			return false
 		}
 	}
 	return true
 }
-func ReadOctetStream(r io.Reader, s string, min int) bool {
+func MacthOctetStream(r io.Reader, s string, min int) bool {
 	ln, _ := ReadLength(r)
 	size := int(ln) + min
 	if size != len(s) {
@@ -200,4 +240,27 @@ func ReadOctetStream(r io.Reader, s string, min int) bool {
 	}
 
 	return true
+}
+
+func ReadOctetStream(r io.Reader, min int) (string, error) {
+	ln, err := ReadLength(r)
+	if err != nil {
+		return "", err
+	}
+	size := int(ln) + min
+	buf, err := core.ReadBytes(size, r)
+	if err != nil {
+		return "", err
+	}
+	return string(buf[min:]), nil
+}
+
+func ReadExcept(b byte, r io.Reader) {
+	u, err := core.ReadUInt8(r)
+	if err != nil {
+		panic(fmt.Errorf("except %X,but read err", b))
+	}
+	if byte(u) != b {
+		panic(errors.WithStack(fmt.Errorf("except %X,but read %X", b, u)))
+	}
 }
