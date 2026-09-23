@@ -2,13 +2,21 @@
 package client
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/adfnekc/grdp/glog"
 	"github.com/adfnekc/grdp/protocol/pdu"
 	"github.com/adfnekc/grdp/protocol/rfb"
 )
+
+// DefaultLoginTimeout bounds how long Login waits for the RDP session to
+// become ready after the transport handshake succeeds.
+const DefaultLoginTimeout = 30 * time.Second
 
 const (
 	CLIP_OFF = 0
@@ -76,8 +84,64 @@ func NewClient(host, user, passwd string, t int, s *Setting) *Client {
 	return c
 }
 
+// Login connects and waits until the session is ready (or fails/times out).
 func (c *Client) Login() error {
-	return c.ctl.Login(c.host, c.user, c.passwd, c.setting.Width, c.setting.Height)
+	timeout := c.setting.Timeout
+	if timeout <= 0 {
+		timeout = DefaultLoginTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.LoginContext(ctx)
+}
+
+// LoginContext is Login with an explicit context. It returns only once the
+// server has completed the connection sequence and the session is ready, or
+// when the handshake fails, the connection is closed, or ctx expires.
+func (c *Client) LoginContext(ctx context.Context) error {
+	// The VNC client does not emit a "ready" event; its Login is synchronous.
+	if c.tc == TC_VNC {
+		return c.ctl.Login(c.host, c.user, c.passwd, c.setting.Width, c.setting.Height)
+	}
+
+	ready := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
+	closed := make(chan struct{}, 1)
+
+	// Register before the handshake so no event can be missed.
+	c.ctl.On("ready", func() {
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
+	})
+	c.ctl.On("error", func(e error) {
+		select {
+		case errCh <- e:
+		default:
+		}
+	})
+	c.ctl.On("close", func() {
+		select {
+		case closed <- struct{}{}:
+		default:
+		}
+	})
+
+	if err := c.ctl.Login(c.host, c.user, c.passwd, c.setting.Width, c.setting.Height); err != nil {
+		return err
+	}
+
+	select {
+	case <-ready:
+		return nil
+	case err := <-errCh:
+		return err
+	case <-closed:
+		return errors.New("client: connection closed before the session became ready")
+	case <-ctx.Done():
+		return fmt.Errorf("client: session not ready: %w", ctx.Err())
+	}
 }
 
 func (c *Client) KeyUp(sc int, name string) {
@@ -166,6 +230,7 @@ type Setting struct {
 	Width    int
 	Height   int
 	Protocol string
+	Timeout  time.Duration
 	LogLevel glog.LEVEL
 }
 
@@ -173,6 +238,7 @@ func NewSetting() *Setting {
 	return &Setting{
 		Width:    1024,
 		Height:   768,
+		Timeout:  DefaultLoginTimeout,
 		LogLevel: glog.INFO,
 	}
 }

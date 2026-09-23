@@ -195,7 +195,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("X.224/security handshake ok in %s, waiting for session ready...\n", time.Since(start).Round(time.Millisecond))
+	fmt.Printf("session ready in %s\n", time.Since(start).Round(time.Millisecond))
 
 	timer := time.NewTimer(*wait)
 	defer timer.Stop()
