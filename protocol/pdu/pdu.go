@@ -82,7 +82,7 @@ func NewPDULayer(t core.Transport) *PDULayer {
 			CAPSTYPE_FONT:            &FontCapability{0x0001, 0},
 			CAPSTYPE_BRUSH:           &BrushCapability{BRUSH_COLOR_8x8},
 			CAPSTYPE_GLYPHCACHE:      &GlyphCapability{},
-			CAPSETTYPE_BITMAP_CODECS: &BitmapCodecsCapability{},
+			CAPSETTYPE_BITMAP_CODECS: NewNSCodecCapability(),
 			CAPSTYPE_BITMAPCACHE_REV2: &BitmapCache2Capability{
 				BitmapCachePersist: 2,
 				CachesNum:          5,

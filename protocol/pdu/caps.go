@@ -592,6 +592,43 @@ type BitmapCodecsCapability struct {
 	SupportedBitmapCodecs BitmapCodecS // A variable-length field containing a TS_BITMAPCODECS structure (section 2.2.7.2.10.1).
 }
 
+// Bitmap codec ids are assigned by the client and referenced by
+// TS_BITMAP_DATA_EX.codecID (MS-RDPBCGR 2.2.9.2.1.1).
+const (
+	RDPCodecIDNSCodec  = 0x01
+	RDPCodecIDRemoteFX = 0x03
+)
+
+// codecGUIDNSCodec is CODEC_GUID_NSCODEC (MS-RDPBCGR 2.2.7.2.10.1.1.1),
+// stored in the little endian form the wire format uses.
+var codecGUIDNSCodec = [16]byte{
+	0xB9, 0x1B, 0x8D, 0xCA,
+	0x0F, 0x00,
+	0x4F, 0x15,
+	0x58, 0x9F, 0xAE, 0x2D, 0x1A, 0x87, 0xE2, 0xD6,
+}
+
+// NewNSCodecCapability builds the Bitmap Codecs capability set advertising
+// NSCodec. A client advertises the codec ids it can decode together with its
+// decoder preferences; MS-RDPBCGR 2.2.7.2.10.1.1 says NSCodec properties carry
+// a TS_NSCODEC_CAPABILITYSET from MS-RDPNSC.
+func NewNSCodecCapability() *BitmapCodecsCapability {
+	return &BitmapCodecsCapability{
+		SupportedBitmapCodecs: BitmapCodecS{
+			Count: 1,
+			Array: []BitmapCodec{{
+				GUID: codecGUIDNSCodec,
+				ID:   RDPCodecIDNSCodec,
+				// fAllowDynamicFidelity, fAllowSubsampling, colorLossLevel.
+				// Chroma subsampling is refused and colour loss is kept at its
+				// minimum so the decoded image stays close to lossless.
+				PropertiesLength: 3,
+				Properties:       []byte{0, 0, 1},
+			}},
+		},
+	}
+}
+
 func (*BitmapCodecsCapability) Type() CapsType {
 	return CAPSETTYPE_BITMAP_CODECS
 }
