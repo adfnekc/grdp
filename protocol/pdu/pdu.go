@@ -459,6 +459,14 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			c.Emit("orders", p.Data.(*FastPathOrdersPDU).OrderPdus)
 		} else if updateCode == FASTPATH_UPDATETYPE_PTR_POSITION {
 			c.Emit("pointer-position", p.Data.(*FastPathPointerPositionPDU))
+		} else if updateCode == FASTPATH_UPDATETYPE_SURFCMDS {
+			for _, cmd := range p.Data.(*SurfaceCommandsPDU).Commands {
+				if cmd.Bits != nil {
+					c.Emit("surface-bits", cmd.Bits)
+				} else if cmd.Marker != nil {
+					c.Emit("frame-marker", cmd.Marker)
+				}
+			}
 		} else if updateCode == FASTPATH_UPDATETYPE_COLOR || updateCode == FASTPATH_UPDATETYPE_CACHED ||
 			updateCode == FASTPATH_UPDATETYPE_POINTER || updateCode == FASTPATH_UPDATETYPE_LARGE_POINTER {
 			c.Emit("pointer-shape", p.Data.(*FastPathPointerPDU))

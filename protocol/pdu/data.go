@@ -898,7 +898,7 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 	case FASTPATH_UPDATETYPE_BITMAP:
 		d = &FastPathBitmapUpdateDataPDU{}
 	case FASTPATH_UPDATETYPE_SURFCMDS:
-		//d = &FastPathSurfaceCmds{}
+		d = &SurfaceCommandsPDU{}
 	case FASTPATH_UPDATETYPE_PALETTE:
 		d = &FastPathNoopPDU{Type: FASTPATH_UPDATETYPE_PALETTE}
 	case FASTPATH_UPDATETYPE_SYNCHRONIZE:

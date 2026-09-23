@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/adfnekc/grdp/codec"
 	"github.com/adfnekc/grdp/glog"
 	"github.com/adfnekc/grdp/protocol/pdu"
 	"github.com/adfnekc/grdp/protocol/rfb"
@@ -226,6 +227,38 @@ func (c *Client) OnBitmap(f func([]Bitmap)) {
 	}
 
 	c.ctl.On("bitmap", f1)
+
+	// Surface bits commands carry extended bitmap data whose codecID selects
+	// a bitmap codec (NSCodec, RemoteFX). Decode them into the same Bitmap
+	// shape so consumers only deal with one representation.
+	c.ctl.On("surface-bits", func(data interface{}) {
+		cmd := data.(*pdu.SurfaceBitsCommand)
+		b := cmd.Bitmap
+		w, h := int(b.Width), int(b.Height)
+		if w <= 0 || h <= 0 {
+			return
+		}
+		pixels, err := codec.Decompress(b.CodecID, b.BitmapData, w, h, int(b.Bpp))
+		if err != nil {
+			glog.Error("surface bits: ", err)
+			return
+		}
+		bpp := int(b.Bpp) / 8
+		if b.CodecID != codec.CodecIDNone {
+			// Every bitmap codec in use here decodes to 32bpp BGRA.
+			bpp = 4
+		}
+		f([]Bitmap{{
+			DestLeft:     int(cmd.DestLeft),
+			DestTop:      int(cmd.DestTop),
+			DestRight:    int(cmd.DestRight),
+			DestBottom:   int(cmd.DestBottom),
+			Width:        w,
+			Height:       h,
+			BitsPerPixel: bpp,
+			Data:         pixels,
+		}})
+	})
 }
 
 type Bitmap struct {

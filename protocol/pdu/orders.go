@@ -1051,15 +1051,20 @@ type CacheBitmapV3Order struct {
 	cacheIndex uint16
 	key1       uint32
 	key2       uint32
-	bitmapData BitmapDataEx
+	bitmapData CacheBitmapDataEx
 }
-type BitmapDataEx struct {
-	bpp     uint8
-	codecID uint8
-	width   uint16
-	height  uint16
-	length  uint32
-	data    []byte
+
+// CacheBitmapDataEx is the embedded BITMAP_DATA_EX structure of a Cache Bitmap
+// Revision 3 order (MS-RDPEGDI 2.2.2.2.1.2.8). It is close to, but not the
+// same as, TS_BITMAP_DATA_EX from a surface bits command: the second byte is
+// reserved here rather than a flags byte.
+type CacheBitmapDataEx struct {
+	Bpp     uint8
+	CodecID uint8
+	Width   uint16
+	Height  uint16
+	Length  uint32
+	Data    []byte
 }
 
 func (s *Secondary) updateCacheBitmapV3Order(r io.Reader, flags uint16) {
@@ -1076,16 +1081,16 @@ func (s *Secondary) updateCacheBitmapV3Order(r io.Reader, flags uint16) {
 	cb.key2, _ = core.ReadUInt32LE(r)
 
 	bitmapData := &cb.bitmapData
-	bitmapData.bpp, _ = core.ReadUInt8(r)
-	core.ReadUInt8(r)
-	core.ReadUInt8(r)
-	bitmapData.codecID, _ = core.ReadUInt8(r)
-	bitmapData.width, _ = core.ReadUint16LE(r)
-	bitmapData.height, _ = core.ReadUint16LE(r)
+	bitmapData.Bpp, _ = core.ReadUInt8(r)
+	core.ReadUInt8(r) // reserved
+	core.ReadUInt8(r) // reserved
+	bitmapData.CodecID, _ = core.ReadUInt8(r)
+	bitmapData.Width, _ = core.ReadUint16LE(r)
+	bitmapData.Height, _ = core.ReadUint16LE(r)
 	new_len, _ := core.ReadUInt32LE(r)
 
-	bitmapData.data, _ = core.ReadBytes(int(new_len), r)
-	bitmapData.length = new_len
+	bitmapData.Data, _ = core.ReadBytes(int(new_len), r)
+	bitmapData.Length = new_len
 
 }
 
