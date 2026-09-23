@@ -172,11 +172,12 @@ func TestNSCodecChromaSubsampling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NSCodec: %v", err)
 	}
+	// Rows are emitted bottom-up because NSCodec planes are stored that way.
 	want := []byte{
-		6, 13, 8, 255, // (0,0): y=10 co=1 cg=3
-		16, 23, 18, 255, // (1,0): y=20, same chroma sample
-		26, 33, 28, 255, // (0,1): y=30, chroma row 0
-		36, 43, 38, 255, // (1,1): y=40
+		26, 33, 28, 255, // source row 1, (0,1): y=30, chroma row 0
+		36, 43, 38, 255, // source row 1, (1,1): y=40
+		6, 13, 8, 255, // source row 0, (0,0): y=10 co=1 cg=3
+		16, 23, 18, 255, // source row 0, (1,0): y=20, same chroma sample
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("got  %v\nwant %v", got, want)

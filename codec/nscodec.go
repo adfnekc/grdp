@@ -195,6 +195,11 @@ func decodeNSPlaneRLE(in, out []byte) error {
 }
 
 // nscToBGRA converts the decoded Y, Co, Cg and A planes to BGRA pixels.
+//
+// The planes are stored bottom-up, the usual DIB convention, while the rest of
+// this library (the RLE bitmap path) hands consumers top-down rows. Rows are
+// therefore emitted in reverse so both paths agree; FreeRDP does the same with
+// FREERDP_FLIP_VERTICAL when it decodes NSCodec into a surface.
 func nscToBGRA(planes [4][]byte, width, height int, colorLossLevel, chromaSubsampling uint8) []byte {
 	// Colour loss recovery: the chroma planes were scaled down by the
 	// encoder, so shift them back up and truncate to a signed byte.
@@ -206,7 +211,6 @@ func nscToBGRA(planes [4][]byte, width, height int, colorLossLevel, chromaSubsam
 	}
 
 	out := make([]byte, 4*width*height)
-	pos := 0
 	for y := 0; y < height; y++ {
 		var yRow, coRow, cgRow []byte
 		if chromaSubsampling != 0 {
@@ -220,6 +224,8 @@ func nscToBGRA(planes [4][]byte, width, height int, colorLossLevel, chromaSubsam
 		}
 		aRow := planes[3][y*width:]
 
+		outRow := (height - 1 - y) * width * 4
+
 		for x := 0; x < width; x++ {
 			// With chroma subsampling the chroma samples are shared by
 			// pairs of horizontally adjacent pixels.
@@ -232,11 +238,11 @@ func nscToBGRA(planes [4][]byte, width, height int, colorLossLevel, chromaSubsam
 			co := int16(int8(uint8(int16(coRow[cx]) << shift)))
 			cg := int16(int8(uint8(int16(cgRow[cx]) << shift)))
 
+			pos := outRow + x*4
 			out[pos+0] = clamp8(yv - co - cg) // B
 			out[pos+1] = clamp8(yv + cg)      // G
 			out[pos+2] = clamp8(yv + co - cg) // R
 			out[pos+3] = aRow[x]
-			pos += 4
 		}
 	}
 	return out
