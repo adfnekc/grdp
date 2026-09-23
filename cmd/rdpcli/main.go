@@ -30,6 +30,7 @@ func main() {
 	wait := flag.Duration("wait", 20*time.Second, "how long to wait for the session to become ready")
 	bitmaps := flag.Int("bitmaps", 0, "exit after this many bitmap updates (0 = wait until timeout)")
 	dump := flag.String("dump", "", "write the composited framebuffer to this PNG file")
+	rects := flag.Bool("rects", false, "log each bitmap rectangle's geometry")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
 	flag.Parse()
 
@@ -88,6 +89,18 @@ func main() {
 	})
 	c.OnBitmap(func(bs []client.Bitmap) {
 		bitmapCount += len(bs)
+		if *rects {
+			for _, b := range bs {
+				nz := 0
+				for _, v := range b.Data {
+					if v != 0 {
+						nz++
+					}
+				}
+				fmt.Printf("  rect dst=(%d,%d) size=%dx%d bpp=%d compress=%v data=%d nonzero=%d\n",
+					b.DestLeft, b.DestTop, b.Width, b.Height, b.BitsPerPixel, b.IsCompress, len(b.Data), nz)
+			}
+		}
 		if fb != nil {
 			for _, b := range bs {
 				blit(fb, b)
