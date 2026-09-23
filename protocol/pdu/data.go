@@ -259,7 +259,10 @@ func readDemandActivePDU(r io.Reader) (*DemandActivePDU, error) {
 	for i := 0; i < int(d.NumberCapabilities); i++ {
 		c, err := readCapability(r)
 		if err != nil {
-			//return nil, err
+			glog.Warn("read capability set:", err)
+			continue
+		}
+		if c == nil {
 			continue
 		}
 		d.CapabilitySets = append(d.CapabilitySets, c)

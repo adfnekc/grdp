@@ -23,10 +23,34 @@ type RdpClient struct {
 	sec      *sec.Client
 	pdu      *pdu.Client
 	channels *plugin.Channels
+	setting  *Setting
+	pending  []pendingEvent
+}
+
+type pendingEvent struct {
+	event string
+	f     interface{}
 }
 
 func newRdpClient(s *Setting) *RdpClient {
-	return &RdpClient{}
+	return &RdpClient{setting: s}
+}
+
+// requestedProtocol maps the configured security protocol name to the X.224
+// negotiation bitmask. The default is TLS, which is what modern servers offer;
+// Standard RDP Security is not supported by this client yet.
+func requestedProtocol(s *Setting) uint32 {
+	if s == nil {
+		return x224.PROTOCOL_SSL
+	}
+	switch strings.ToLower(s.Protocol) {
+	case "rdp", "standard":
+		return x224.PROTOCOL_RDP
+	case "nla", "hybrid", "credssp":
+		return x224.PROTOCOL_HYBRID
+	default: // "", "auto", "tls", "ssl"
+		return x224.PROTOCOL_SSL
+	}
 }
 
 func bitmapDecompress(bitmap *pdu.BitmapData) []byte {
@@ -59,6 +83,11 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	c.sec = sec.NewClient(c.mcs)
 	c.pdu = pdu.NewClient(c.sec)
 	c.channels = plugin.NewChannels(c.sec)
+	// Replay handlers that were registered before the layers existed.
+	for _, p := range c.pending {
+		c.pdu.On(p.event, p.f)
+	}
+	c.pending = nil
 
 	c.mcs.SetClientDesktop(uint16(width), uint16(height))
 
@@ -71,8 +100,7 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	c.sec.SetChannelSender(c.mcs)
 	c.channels.SetChannelSender(c.sec)
 
-	c.x224.SetRequestedProtocol(x224.PROTOCOL_RDP)
-	//c.x224.SetRequestedProtocol(x224.PROTOCOL_SSL)
+	c.x224.SetRequestedProtocol(requestedProtocol(c.setting))
 
 	err = c.x224.Connect()
 	if err != nil {
@@ -81,7 +109,12 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	return nil
 }
 func (c *RdpClient) On(event string, f interface{}) {
-	if c == nil || c.pdu == nil {
+	if c == nil {
+		return
+	}
+	if c.pdu == nil {
+		// Registered before Login: buffer and replay once the PDU layer exists.
+		c.pending = append(c.pending, pendingEvent{event, f})
 		return
 	}
 	c.pdu.On(event, f)

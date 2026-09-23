@@ -682,8 +682,12 @@ func readCapability(r io.Reader) (Capability, error) {
 	if err != nil {
 		return nil, err
 	}
-	if int(capLen)-4 <= 0 {
+	if int(capLen) < 4 {
 		return nil, errors.New(fmt.Sprintf("Capability length expected %d", capLen))
+	}
+	if int(capLen) == 4 {
+		glog.Debugf("skipping empty capability type 0x%04x", capType)
+		return nil, nil
 	}
 
 	capBytes, err := core.ReadBytes(int(capLen)-4, r)
@@ -747,9 +751,10 @@ func readCapability(r io.Reader) (Capability, error) {
 	case CAPSSETTYPE_FRAME_ACKNOWLEDGE:
 		c = &FrameAcknowledgeCapability{}
 	default:
-		err := errors.New(fmt.Sprintf("unsupported Capability type 0x%04x", capType))
-		glog.Error(err)
-		return nil, err
+		// Unknown capability sets are skipped; the length field has already
+		// been consumed so the surrounding parser stays in sync.
+		glog.Debugf("skipping unsupported capability type 0x%04x", capType)
+		return nil, nil
 	}
 	if err := struc.Unpack(capReader, c); err != nil {
 		glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
