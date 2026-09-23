@@ -1,3 +1,5 @@
+//go:build windows
+
 // cliprdr_windows.go
 package cliprdr
 
@@ -7,10 +9,10 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"github.com/adfnekc/grdp/glog"
 	"github.com/shirou/w32"
-	"github.com/tomatome/grdp/glog"
 
-	"github.com/tomatome/grdp/core"
+	"github.com/adfnekc/grdp/core"
 
 	"github.com/tomatome/win"
 )

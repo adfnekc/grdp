@@ -5,9 +5,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/protocol/pdu"
-	"github.com/tomatome/grdp/protocol/rfb"
+	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/protocol/pdu"
+	"github.com/adfnekc/grdp/protocol/rfb"
 )
 
 const (
@@ -97,6 +97,11 @@ func (c *Client) MouseUp(button, x, y int) {
 }
 func (c *Client) MouseDown(button, x, y int) {
 	c.ctl.MouseDown(button, x, y)
+}
+func (c *Client) Close() {
+	if c != nil && c.ctl != nil {
+		c.ctl.Close()
+	}
 }
 func (c *Client) OnError(f func(e error)) {
 	c.ctl.On("error", f)

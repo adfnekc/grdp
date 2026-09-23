@@ -6,10 +6,10 @@ import (
 	"io"
 	"strings"
 
+	"github.com/adfnekc/grdp/glog"
 	"github.com/pkg/errors"
-	"github.com/tomatome/grdp/glog"
 
-	"github.com/tomatome/grdp/core"
+	"github.com/adfnekc/grdp/core"
 )
 
 const (

@@ -1,3 +1,5 @@
+//go:build windows
+
 // cliprdr_test.go
 package cliprdr_test
 
@@ -5,7 +7,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tomatome/grdp/plugin/cliprdr"
+	"github.com/adfnekc/grdp/plugin/cliprdr"
 )
 
 func TestClip(t *testing.T) {

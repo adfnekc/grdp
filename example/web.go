@@ -10,9 +10,9 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/protocol/pdu"
 	socketio "github.com/googollee/go-socket.io"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/protocol/pdu"
 )
 
 func showPreview(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +27,10 @@ func showPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func socketIO() {
-	server := socketio.NewServer(nil)
+	server, err := socketio.NewServer(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 	server.OnConnect("/", func(so socketio.Conn) error {
 		fmt.Println("OnConnect", so.ID())
 		so.Emit("rdp-connect", true)
@@ -138,7 +141,7 @@ func socketIO() {
 		p.XPos = x
 		p.YPos = y
 		g := so.Context().(*RdpClient)
-		g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+		g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 	})
 
 	server.OnError("/", func(so socketio.Conn, err error) {

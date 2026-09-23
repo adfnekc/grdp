@@ -8,16 +8,16 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/tomatome/grdp/plugin/rail"
+	"github.com/adfnekc/grdp/plugin/rail"
 
-	"github.com/tomatome/grdp/plugin/drdynvc"
+	"github.com/adfnekc/grdp/plugin/drdynvc"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/emission"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/protocol/t125/ber"
-	"github.com/tomatome/grdp/protocol/t125/gcc"
-	"github.com/tomatome/grdp/protocol/t125/per"
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/emission"
+	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/protocol/t125/ber"
+	"github.com/adfnekc/grdp/protocol/t125/gcc"
+	"github.com/adfnekc/grdp/protocol/t125/per"
 )
 
 // take idea from https://github.com/Madnikulin50/gordp

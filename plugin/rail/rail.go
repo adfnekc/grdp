@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"encoding/hex"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/plugin"
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/plugin"
 )
 
 const (

@@ -6,17 +6,29 @@ import (
 )
 
 func CVAL(p *[]uint8) int {
+	if len(*p) == 0 {
+		// Truncated/malformed input: never panic on network-supplied data.
+		return 0
+	}
 	a := int((*p)[0])
 	*p = (*p)[1:]
 	return a
 }
 
 func CVAL2(p *[]uint8, v *uint16) {
+	if len(*p) < 2 {
+		*v = 0
+		return
+	}
 	*v = *((*uint16)(unsafe.Pointer(&(*p)[0])))
 	*p = (*p)[2:]
 }
 
 func CVAL3(p *[]uint8, v *[3]uint8) {
+	if len(*p) < 3 {
+		*v = [3]uint8{}
+		return
+	}
 	(*v)[0] = (*p)[0]
 	(*v)[1] = (*p)[1]
 	(*v)[2] = (*p)[2]

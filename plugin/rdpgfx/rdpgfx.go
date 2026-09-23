@@ -3,9 +3,9 @@ package rdpgfx
 import (
 	"encoding/hex"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/plugin"
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/plugin"
 )
 
 const (
@@ -13,6 +13,7 @@ const (
 )
 
 type gfxClient struct {
+	w core.ChannelSender
 }
 
 func (c *gfxClient) Send(s []byte) (int, error) {

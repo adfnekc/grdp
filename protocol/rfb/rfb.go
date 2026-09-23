@@ -13,9 +13,9 @@ import (
 
 	"github.com/lunixbochs/struc"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/emission"
-	"github.com/tomatome/grdp/glog"
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/emission"
+	"github.com/adfnekc/grdp/glog"
 )
 
 // ProtocolVersion
@@ -263,7 +263,7 @@ func (fc *RFBConn) recvServerOrder(s []byte, err error) {
 	case 3:
 		core.StartReadBytes(7, fc, fc.recvServerCutTextHeader)
 	default:
-		glog.Errorf("Unknown message type %s", packetType)
+		glog.Errorf("Unknown message type %d", packetType)
 	}
 
 }
@@ -414,7 +414,7 @@ func (fb *RFB) Connect() error {
 }
 
 func (fb *RFB) recvProtocolVersion(version string) {
-	if version != RFB003003 || version != RFB003007 || version != RFB003008 {
+	if version != RFB003003 && version != RFB003007 && version != RFB003008 {
 		version = RFB003008
 	}
 	glog.Infof("version:%s", version)

@@ -1,17 +1,10 @@
 {
     "go.toolsEnvVars": {
-        "GOFLAGS": "-mod=vendor",
-        "GO111MODULE": "on",
-        "GOPROXY": "https://goproxy.cn,direct"
+        "GO111MODULE": "on"
     },
     "go.autocompleteUnimportedPackages": true,
     "go.formatTool": "goimports",
-    "go.languageServerExperimentalFeatures": {
-        "diagnostics": false
-    },
     "go.useCodeSnippetsOnFunctionSuggest": false,
     "go.buildTags": "",
-    "go.docsTool": "guru",
-    "go.vetOnSave": "off",
-    "tabnine.experimentalAutoImports": true,
+    "go.vetOnSave": "off"
 }

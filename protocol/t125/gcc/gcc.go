@@ -11,11 +11,11 @@ import (
 	"math/big"
 	"os"
 
-	"github.com/tomatome/grdp/glog"
+	"github.com/adfnekc/grdp/glog"
 
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/protocol/t125/per"
 	"github.com/lunixbochs/struc"
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/protocol/t125/per"
 )
 
 var t124_02_98_oid = []byte{0, 0, 20, 124, 0, 1}
@@ -366,7 +366,7 @@ type ProprietaryServerCertificate struct {
 func (p *ProprietaryServerCertificate) GetPublicKey() (*rsa.PublicKey, error) {
 	b := new(big.Int).SetBytes(core.Reverse(p.PublicKeyBlob.Modulus))
 	e := new(big.Int).SetInt64(int64(p.PublicKeyBlob.PubExp))
-	return &rsa.PublicKey{b, int(e.Int64())}, nil
+	return &rsa.PublicKey{N: b, E: int(e.Int64())}, nil
 }
 func (p *ProprietaryServerCertificate) Verify() bool {
 	return true

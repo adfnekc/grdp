@@ -8,17 +8,17 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/tomatome/grdp/plugin"
-	"github.com/tomatome/grdp/plugin/cliprdr"
+	"github.com/adfnekc/grdp/plugin"
+	"github.com/adfnekc/grdp/plugin/cliprdr"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
-	"github.com/tomatome/grdp/protocol/nla"
-	"github.com/tomatome/grdp/protocol/pdu"
-	"github.com/tomatome/grdp/protocol/sec"
-	"github.com/tomatome/grdp/protocol/t125"
-	"github.com/tomatome/grdp/protocol/tpkt"
-	"github.com/tomatome/grdp/protocol/x224"
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/protocol/nla"
+	"github.com/adfnekc/grdp/protocol/pdu"
+	"github.com/adfnekc/grdp/protocol/sec"
+	"github.com/adfnekc/grdp/protocol/t125"
+	"github.com/adfnekc/grdp/protocol/tpkt"
+	"github.com/adfnekc/grdp/protocol/x224"
 )
 
 const (
@@ -179,7 +179,7 @@ func (g *RdpClient) MouseWheel(scroll, x, y int) {
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
-	g.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+	g.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
 func (g *RdpClient) MouseUp(button int, x, y int) {

@@ -8,9 +8,9 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/glog"
 	"github.com/lunixbochs/struc"
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
 )
 
 const (
@@ -111,12 +111,23 @@ func NewNegotiateMessage() *NegotiateMessage {
 }
 
 func (m *NegotiateMessage) Serialize() []byte {
+	buff := &bytes.Buffer{}
+	core.WriteBytes(m.Signature[:], buff)
+	core.WriteUInt32LE(m.MessageType, buff)
+	core.WriteUInt32LE(m.NegotiateFlags, buff)
+	core.WriteUInt16LE(m.DomainNameLen, buff)
+	core.WriteUInt16LE(m.DomainNameMaxLen, buff)
+	core.WriteUInt32LE(m.DomainNameBufferOffset, buff)
+	core.WriteUInt16LE(m.WorkstationLen, buff)
+	core.WriteUInt16LE(m.WorkstationMaxLen, buff)
+	core.WriteUInt32LE(m.WorkstationBufferOffset, buff)
+	// The Version field is only present when NTLMSSP_NEGOTIATE_VERSION is set
+	// (MS-NLMP 2.2.1.1). Packing it unconditionally produced a non-conformant
+	// 40-byte message.
 	if (m.NegotiateFlags & NTLMSSP_NEGOTIATE_VERSION) != 0 {
 		m.Version = NewNVersion()
+		struc.Pack(buff, m.Version)
 	}
-	buff := &bytes.Buffer{}
-	struc.Pack(buff, m)
-
 	return buff.Bytes()
 }
 
@@ -313,7 +324,7 @@ func (n *NTLMv2) GetNegotiateMessage() *NegotiateMessage {
 	return n.negotiateMessage
 }
 
-//  process NTLMv2 Authenticate hash
+// process NTLMv2 Authenticate hash
 func (n *NTLMv2) ComputeResponseV2(respKeyNT, respKeyLM, serverChallenge, clientChallenge,
 	timestamp, serverInfo []byte) (ntChallResp, lmChallResp, SessBaseKey []byte) {
 
@@ -353,6 +364,16 @@ func MIC(exportedSessionKey []byte, negotiateMessage, challengeMessage, authenti
 
 func concat(bs ...[]byte) []byte {
 	return bytes.Join(bs, nil)
+}
+
+// SIGNKEY computes the NTLM signing key from the exported session key
+// (MS-NLMP 3.4.5.3). isClient selects the client-to-server direction.
+func SIGNKEY(exportedSessionKey []byte, isClient bool) []byte {
+	magic := serverSigning
+	if isClient {
+		magic = clientSigning
+	}
+	return MD5(concat(exportedSessionKey, magic))
 }
 
 var (

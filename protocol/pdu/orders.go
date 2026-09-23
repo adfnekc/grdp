@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/tomatome/grdp/glog"
+	"github.com/adfnekc/grdp/glog"
 
-	"github.com/tomatome/grdp/core"
+	"github.com/adfnekc/grdp/core"
 )
 
 type ControlFlag uint8

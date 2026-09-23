@@ -6,14 +6,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/plugin"
-	"github.com/tomatome/grdp/protocol/nla"
-	"github.com/tomatome/grdp/protocol/pdu"
-	"github.com/tomatome/grdp/protocol/sec"
-	"github.com/tomatome/grdp/protocol/t125"
-	"github.com/tomatome/grdp/protocol/tpkt"
-	"github.com/tomatome/grdp/protocol/x224"
+	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/plugin"
+	"github.com/adfnekc/grdp/protocol/nla"
+	"github.com/adfnekc/grdp/protocol/pdu"
+	"github.com/adfnekc/grdp/protocol/sec"
+	"github.com/adfnekc/grdp/protocol/t125"
+	"github.com/adfnekc/grdp/protocol/tpkt"
+	"github.com/adfnekc/grdp/protocol/x224"
 )
 
 type RdpClient struct {
@@ -81,21 +81,33 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	return nil
 }
 func (c *RdpClient) On(event string, f interface{}) {
+	if c == nil || c.pdu == nil {
+		return
+	}
 	c.pdu.On(event, f)
 }
 func (c *RdpClient) KeyUp(sc int, name string) {
+	if c == nil || c.pdu == nil {
+		return
+	}
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
 	p.KeyboardFlags |= pdu.KBDFLAGS_RELEASE
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 func (c *RdpClient) KeyDown(sc int, name string) {
+	if c == nil || c.pdu == nil {
+		return
+	}
 	p := &pdu.ScancodeKeyEvent{}
 	p.KeyCode = uint16(sc)
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 
 func (c *RdpClient) MouseMove(x, y int) {
+	if c == nil || c.pdu == nil {
+		return
+	}
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE
 	p.XPos = uint16(x)
@@ -104,14 +116,20 @@ func (c *RdpClient) MouseMove(x, y int) {
 }
 
 func (c *RdpClient) MouseWheel(scroll, x, y int) {
+	if c == nil || c.pdu == nil {
+		return
+	}
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
-	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
 func (c *RdpClient) MouseUp(button int, x, y int) {
+	if c == nil || c.pdu == nil {
+		return
+	}
 	p := &pdu.PointerEvent{}
 
 	switch button {
@@ -130,6 +148,9 @@ func (c *RdpClient) MouseUp(button int, x, y int) {
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 func (c *RdpClient) MouseDown(button int, x, y int) {
+	if c == nil || c.pdu == nil {
+		return
+	}
 	p := &pdu.PointerEvent{}
 
 	p.PointerFlags |= pdu.PTRFLAGS_DOWN
