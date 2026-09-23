@@ -10,6 +10,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"time"
 
@@ -26,6 +29,7 @@ func main() {
 	height := flag.Int("height", 768, "desktop height")
 	wait := flag.Duration("wait", 20*time.Second, "how long to wait for the session to become ready")
 	bitmaps := flag.Int("bitmaps", 0, "exit after this many bitmap updates (0 = wait until timeout)")
+	dump := flag.String("dump", "", "write the composited framebuffer to this PNG file")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
 	flag.Parse()
 
@@ -42,6 +46,27 @@ func main() {
 	closed := make(chan struct{}, 1)
 	var bitmapCount int
 	done := make(chan struct{}, 1)
+
+	var fb *image.RGBA
+	if *dump != "" {
+		fb = image.NewRGBA(image.Rect(0, 0, *width, *height))
+	}
+	writeDump := func() {
+		if fb == nil || *dump == "" {
+			return
+		}
+		f, err := os.Create(*dump)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "dump:", err)
+			return
+		}
+		defer f.Close()
+		if err := png.Encode(f, fb); err != nil {
+			fmt.Fprintln(os.Stderr, "dump:", err)
+			return
+		}
+		fmt.Println("wrote framebuffer to", *dump)
+	}
 
 	c.OnReady(func() {
 		select {
@@ -63,6 +88,11 @@ func main() {
 	})
 	c.OnBitmap(func(bs []client.Bitmap) {
 		bitmapCount += len(bs)
+		if fb != nil {
+			for _, b := range bs {
+				blit(fb, b)
+			}
+		}
 		fmt.Printf("bitmap update: %d rects (total %d)\n", len(bs), bitmapCount)
 		if *bitmaps > 0 && bitmapCount >= *bitmaps {
 			select {
@@ -96,15 +126,46 @@ func main() {
 			os.Exit(3)
 		case <-done:
 			fmt.Printf("received %d bitmap rectangles, closing\n", bitmapCount)
+			writeDump()
 			c.Close()
 			return
 		case <-timer.C:
 			fmt.Printf("timeout after %s (bitmap rectangles received: %d)\n", *wait, bitmapCount)
+			writeDump()
 			c.Close()
 			if bitmapCount == 0 {
 				os.Exit(4)
 			}
 			return
+		}
+	}
+}
+
+// blit composites one decoded bitmap into the framebuffer.
+// Note: client.Bitmap.BitsPerPixel already holds bytes-per-pixel.
+func blit(fb *image.RGBA, b client.Bitmap) {
+	bpp := b.BitsPerPixel
+	if bpp <= 0 {
+		return
+	}
+	for y := 0; y < b.Height; y++ {
+		for x := 0; x < b.Width; x++ {
+			i := (y*b.Width + x) * bpp
+			if i+bpp > len(b.Data) {
+				return
+			}
+			var r, g, bl uint8
+			switch bpp {
+			case 2:
+				v := uint16(b.Data[i]) | uint16(b.Data[i+1])<<8
+				r = uint8((v >> 11) & 0x1f)
+				g = uint8((v >> 5) & 0x3f)
+				bl = uint8(v & 0x1f)
+				r, g, bl = r<<3|r>>2, g<<2|g>>4, bl<<3|bl>>2
+			default:
+				bl, g, r = b.Data[i], b.Data[i+1], b.Data[i+2]
+			}
+			fb.Set(b.DestLeft+x, b.DestTop+y, color.RGBA{R: r, G: g, B: bl, A: 255})
 		}
 	}
 }

@@ -195,8 +195,7 @@ func (e *NegotiationFailure) Error() string {
 		INCONSISTENT_FLAGS:                    "inconsistent requested security protocols",
 		HYBRID_REQUIRED_BY_SERVER:             "the server requires CredSSP (NLA)",
 		SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER: "the server requires TLS with client authentication",
-	}[
-		e.Code]
+	}[e.Code]
 	if msg == "" {
 		msg = "unknown failure code"
 	}

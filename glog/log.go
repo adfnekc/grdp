@@ -61,13 +61,13 @@ func write(l LEVEL, prefix, msg string) {
 	logger.Output(3, msg)
 }
 
-func Trace(v ...interface{})                 { write(TRACE, "[TRACE]", fmt.Sprintln(v...)) }
-func Tracef(f string, v ...interface{})      { write(TRACE, "[TRACE]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
-func Debug(v ...interface{})                 { write(DEBUG, "[DEBUG]", fmt.Sprintln(v...)) }
-func Debugf(f string, v ...interface{})      { write(DEBUG, "[DEBUG]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
-func Info(v ...interface{})                  { write(INFO, "[INFO]", fmt.Sprintln(v...)) }
-func Infof(f string, v ...interface{})       { write(INFO, "[INFO]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
-func Warn(v ...interface{})                  { write(WARN, "[WARN]", fmt.Sprintln(v...)) }
-func Warnf(f string, v ...interface{})       { write(WARN, "[WARN]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
-func Error(v ...interface{})                 { write(ERROR, "[ERROR]", fmt.Sprintln(v...)) }
-func Errorf(f string, v ...interface{})      { write(ERROR, "[ERROR]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
+func Trace(v ...interface{})            { write(TRACE, "[TRACE]", fmt.Sprintln(v...)) }
+func Tracef(f string, v ...interface{}) { write(TRACE, "[TRACE]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
+func Debug(v ...interface{})            { write(DEBUG, "[DEBUG]", fmt.Sprintln(v...)) }
+func Debugf(f string, v ...interface{}) { write(DEBUG, "[DEBUG]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
+func Info(v ...interface{})             { write(INFO, "[INFO]", fmt.Sprintln(v...)) }
+func Infof(f string, v ...interface{})  { write(INFO, "[INFO]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
+func Warn(v ...interface{})             { write(WARN, "[WARN]", fmt.Sprintln(v...)) }
+func Warnf(f string, v ...interface{})  { write(WARN, "[WARN]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
+func Error(v ...interface{})            { write(ERROR, "[ERROR]", fmt.Sprintln(v...)) }
+func Errorf(f string, v ...interface{}) { write(ERROR, "[ERROR]", fmt.Sprintln(fmt.Sprintf(f, v...))) }
