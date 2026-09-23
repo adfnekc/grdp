@@ -20,6 +20,7 @@ import (
 
 	"github.com/adfnekc/grdp/client"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/protocol/pdu"
 )
 
 // keySeq collects repeatable -key input events.
@@ -29,6 +30,78 @@ func (k *keySeq) String() string { return strings.Join(*k, ";") }
 func (k *keySeq) Set(v string) error {
 	*k = append(*k, v)
 	return nil
+}
+
+// inputAction is one ordered -key/-type item, so both flags interleave in
+// command-line order (flag.Var callbacks fire in the order seen).
+type inputAction struct {
+	isType bool
+	value  string
+}
+
+type actionSeq struct {
+	list   *[]inputAction
+	isType bool
+}
+
+func (a actionSeq) String() string { return "" }
+func (a actionSeq) Set(v string) error {
+	*a.list = append(*a.list, inputAction{isType: a.isType, value: v})
+	return nil
+}
+
+// asciiToScancode maps a printable ASCII character to a (scancode, needsShift)
+// pair for a US QWERTY layout.
+var asciiToScancode = map[rune][2]int{
+	'a': {0x1E, 0}, 'b': {0x30, 0}, 'c': {0x2E, 0}, 'd': {0x20, 0}, 'e': {0x12, 0},
+	'f': {0x21, 0}, 'g': {0x22, 0}, 'h': {0x23, 0}, 'i': {0x17, 0}, 'j': {0x24, 0},
+	'k': {0x25, 0}, 'l': {0x26, 0}, 'm': {0x32, 0}, 'n': {0x31, 0}, 'o': {0x18, 0},
+	'p': {0x19, 0}, 'q': {0x10, 0}, 'r': {0x13, 0}, 's': {0x1F, 0}, 't': {0x14, 0},
+	'u': {0x16, 0}, 'v': {0x2F, 0}, 'w': {0x11, 0}, 'x': {0x2D, 0}, 'y': {0x15, 0},
+	'z': {0x2C, 0},
+	'0': {0x0B, 0}, '1': {0x02, 0}, '2': {0x03, 0}, '3': {0x04, 0}, '4': {0x05, 0},
+	'5': {0x06, 0}, '6': {0x07, 0}, '7': {0x08, 0}, '8': {0x09, 0}, '9': {0x0A, 0},
+	' ': {0x39, 0}, '-': {0x0C, 0}, '_': {0x0C, 1}, '=': {0x0D, 0}, '+': {0x0D, 1},
+	'[': {0x1A, 0}, ']': {0x1B, 0}, '{': {0x1A, 1}, '}': {0x1B, 1}, '\\': {0x2B, 0},
+	'|': {0x2B, 1}, ';': {0x27, 0}, ':': {0x27, 1}, '\'': {0x28, 0}, '"': {0x28, 1},
+	',': {0x33, 0}, '<': {0x33, 1}, '.': {0x34, 0}, '>': {0x34, 1}, '/': {0x35, 0},
+	'?': {0x35, 1}, '`': {0x29, 0}, '~': {0x29, 1}, '!': {0x02, 1}, '@': {0x03, 1},
+	'#': {0x04, 1}, '$': {0x05, 1}, '%': {0x06, 1}, '^': {0x07, 1}, '&': {0x08, 1},
+	'*': {0x09, 1}, '(': {0x0A, 1}, ')': {0x0B, 1},
+}
+
+const (
+	scShiftLeft = 0x2A
+	scEnter     = 0x1C
+)
+
+// typeString types an ASCII string into the focused window (US layout).
+func typeString(c *client.Client, s string) {
+	for _, ch := range s {
+		if ch == '\n' {
+			c.KeyDown(scEnter, "")
+			c.KeyUp(scEnter, "")
+			time.Sleep(40 * time.Millisecond)
+			continue
+		}
+		m, ok := asciiToScancode[ch]
+		if !ok {
+			continue
+		}
+		sc, shift := m[0], m[1]
+		if shift != 0 {
+			c.KeyDown(scShiftLeft, "")
+			time.Sleep(15 * time.Millisecond)
+		}
+		c.KeyDown(sc, "")
+		time.Sleep(15 * time.Millisecond)
+		c.KeyUp(sc, "")
+		if shift != 0 {
+			time.Sleep(15 * time.Millisecond)
+			c.KeyUp(scShiftLeft, "")
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
 }
 
 // playInput replays a sequence of input events after the session is ready.
@@ -110,9 +183,14 @@ func main() {
 	bitmaps := flag.Int("bitmaps", 0, "exit after this many bitmap updates (0 = wait until timeout)")
 	dump := flag.String("dump", "", "write the composited framebuffer to this PNG file")
 	rects := flag.Bool("rects", false, "log each bitmap rectangle's geometry")
-	var keys keySeq
-	flag.Var(&keys, "key", "input event, repeatable: press:0x1c | down:0x1c | up:0x1c | move:x,y | click:x,y | wait:300")
+	var actions []inputAction
+	keys := actionSeq{list: &actions, isType: false}
+	flag.Var(keys, "key", "input event, repeatable: press:0x1c | down:0x1c | up:0x1c | move:x,y | click:x,y | wait:300")
+	types := actionSeq{list: &actions, isType: true}
+	flag.Var(types, "type", "type an ASCII string into the focused window, repeatable")
 	postInput := flag.Duration("post-input", 3*time.Second, "wait after input playback before dumping")
+	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
+	pointerLog := flag.Bool("pointer", false, "log server-side pointer updates (position and shape)")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
 	flag.Parse()
 
@@ -121,6 +199,7 @@ func main() {
 	s.Height = *height
 	s.Protocol = *proto
 	s.LogLevel = glog.LEVEL(*logLevel)
+	s.NoFastPathInput = *slowInput
 
 	c := client.NewClient(*host, *user, *pass, client.TC_RDP, s)
 
@@ -157,10 +236,16 @@ func main() {
 		case ready <- struct{}{}:
 		default:
 		}
-		if len(keys) > 0 && !inputPlayed {
+		if len(actions) > 0 && !inputPlayed {
 			inputPlayed = true
 			go func() {
-				playInput(c, keys)
+				for _, a := range actions {
+					if a.isType {
+						typeString(c, a.value)
+					} else {
+						playInput(c, []string{a.value})
+					}
+				}
 				time.Sleep(*postInput)
 				select {
 				case done <- struct{}{}:
@@ -181,6 +266,18 @@ func main() {
 		default:
 		}
 	})
+	c.OnPointerPosition(func(x, y int) {
+		if *pointerLog {
+			fmt.Printf("pointer position: %d,%d\n", x, y)
+		}
+	})
+	c.OnPointer(func(p *pdu.PointerDataPDU) {
+		if *pointerLog {
+			fmt.Printf("pointer msg=0x%02x pos=%d,%d cache=%d size=%dx%d data=%d\n",
+				p.MessageType, p.XPos, p.YPos, p.CacheIndex, p.Width, p.Height, len(p.Data))
+		}
+	})
+
 	c.OnBitmap(func(bs []client.Bitmap) {
 		bitmapCount += len(bs)
 		if *rects {

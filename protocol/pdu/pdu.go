@@ -3,6 +3,7 @@ package pdu
 import (
 	"bytes"
 	"encoding/hex"
+	"io"
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
@@ -374,7 +375,10 @@ func (c *Client) recvPDU(s []byte) {
 			c.transport.Once("data", c.recvDemandActivePDU)
 		} else if p.ShareCtrlHeader.PDUType == PDUTYPE_DATAPDU {
 			d := p.Message.(*DataPDU)
-			if d.Header.PDUType2 == PDUTYPE2_UPDATE {
+			switch d.Header.PDUType2 {
+			case PDUTYPE2_POINTER:
+				c.Emit("pointer", d.Data.(*PointerDataPDU))
+			case PDUTYPE2_UPDATE:
 				up := d.Data.(*UpdateDataPDU)
 				p := up.Udata
 				if up.UpdateType == FASTPATH_UPDATETYPE_BITMAP {
@@ -416,6 +420,11 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		if compressionFlags&RDP_MPPC_COMPRESSED != 0 {
 			glog.Info("RDP_MPPC_COMPRESSED")
 		}
+		// src bounds this update's payload. It defaults to the shared reader so
+		// that several updates in one PDU stay in sync; a body copy is used when
+		// the declared size must be enforced, and the reassembly buffer when the
+		// update was fragmented.
+		src := io.Reader(r)
 		if fragmentation != FASTPATH_FRAGMENT_SINGLE {
 			if fragmentation == FASTPATH_FRAGMENT_FIRST {
 				c.buff.Reset()
@@ -425,10 +434,20 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			if fragmentation != FASTPATH_FRAGMENT_LAST {
 				return
 			}
-			r = bytes.NewReader(c.buff.Bytes())
+			src = bytes.NewReader(c.buff.Bytes())
+		} else if size > 0 {
+			// A fast-path update is self-describing: bound the reader to the
+			// declared size so that a payload we parse short (or long) cannot
+			// desynchronise the following updates in the same PDU.
+			body, err := core.ReadBytes(int(size), r)
+			if err != nil {
+				glog.Debug("fastpath: short update body:", err)
+				return
+			}
+			src = bytes.NewReader(body)
 		}
 
-		p, err := readFastPathUpdatePDU(r, updateCode)
+		p, err := readFastPathUpdatePDU(src, updateCode)
 		if err != nil || p == nil || p.Data == nil {
 			glog.Debug("readFastPathUpdatePDU:", err)
 			return
@@ -436,10 +455,13 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 
 		if updateCode == FASTPATH_UPDATETYPE_BITMAP {
 			c.Emit("bitmap", p.Data.(*FastPathBitmapUpdateDataPDU).Rectangles)
-		} else if updateCode == FASTPATH_UPDATETYPE_COLOR {
-			c.Emit("color", p.Data.(*FastPathColorPdu))
 		} else if updateCode == FASTPATH_UPDATETYPE_ORDERS {
 			c.Emit("orders", p.Data.(*FastPathOrdersPDU).OrderPdus)
+		} else if updateCode == FASTPATH_UPDATETYPE_PTR_POSITION {
+			c.Emit("pointer-position", p.Data.(*FastPathPointerPositionPDU))
+		} else if updateCode == FASTPATH_UPDATETYPE_COLOR || updateCode == FASTPATH_UPDATETYPE_CACHED ||
+			updateCode == FASTPATH_UPDATETYPE_POINTER || updateCode == FASTPATH_UPDATETYPE_LARGE_POINTER {
+			c.Emit("pointer-shape", p.Data.(*FastPathPointerPDU))
 		}
 	}
 }

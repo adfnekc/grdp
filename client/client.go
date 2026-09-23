@@ -173,6 +173,24 @@ func (c *Client) OnError(f func(e error)) {
 func (c *Client) OnClose(f func()) {
 	c.ctl.On("close", f)
 }
+
+// OnPointerPosition reports the server-side pointer position (fast-path
+// FASTPATH_UPDATETYPE_PTR_POSITION). It is useful to confirm that mouse input
+// reached the remote session.
+func (c *Client) OnPointerPosition(f func(x, y int)) {
+	c.ctl.On("pointer-position", func(data interface{}) {
+		p := data.(*pdu.FastPathPointerPositionPDU)
+		f(int(p.XPos), int(p.YPos))
+	})
+}
+
+// OnPointer reports slow-path pointer updates (PDUTYPE2_POINTER), which carry
+// either a new position or a pointer shape.
+func (c *Client) OnPointer(f func(p *pdu.PointerDataPDU)) {
+	c.ctl.On("pointer", func(data interface{}) {
+		f(data.(*pdu.PointerDataPDU))
+	})
+}
 func (c *Client) OnSuccess(f func()) {
 	c.ctl.On("success", f)
 }
@@ -232,6 +250,9 @@ type Setting struct {
 	Protocol string
 	Timeout  time.Duration
 	LogLevel glog.LEVEL
+	// NoFastPathInput forces keyboard/mouse input over the slow path even
+	// when the server advertised fast-path input. Useful for debugging.
+	NoFastPathInput bool
 }
 
 func NewSetting() *Setting {

@@ -445,6 +445,9 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 	case PDUTYPE2_CONTROL:
 		d = &ControlDataPDU{}
 
+	case PDUTYPE2_POINTER:
+		d = &PointerDataPDU{}
+
 	case PDUTYPE2_FONTLIST:
 		d = &FontListDataPDU{}
 
@@ -894,18 +897,26 @@ func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) 
 		d = &FastPathOrdersPDU{}
 	case FASTPATH_UPDATETYPE_BITMAP:
 		d = &FastPathBitmapUpdateDataPDU{}
-	case FASTPATH_UPDATETYPE_PALETTE:
-	case FASTPATH_UPDATETYPE_SYNCHRONIZE:
 	case FASTPATH_UPDATETYPE_SURFCMDS:
 		//d = &FastPathSurfaceCmds{}
+	case FASTPATH_UPDATETYPE_PALETTE:
+		d = &FastPathNoopPDU{Type: FASTPATH_UPDATETYPE_PALETTE}
+	case FASTPATH_UPDATETYPE_SYNCHRONIZE:
+		d = &FastPathNoopPDU{Type: FASTPATH_UPDATETYPE_SYNCHRONIZE}
 	case FASTPATH_UPDATETYPE_PTR_NULL:
+		d = &FastPathNoopPDU{Type: FASTPATH_UPDATETYPE_PTR_NULL}
 	case FASTPATH_UPDATETYPE_PTR_DEFAULT:
+		d = &FastPathNoopPDU{Type: FASTPATH_UPDATETYPE_PTR_DEFAULT}
 	case FASTPATH_UPDATETYPE_PTR_POSITION:
+		d = &FastPathPointerPositionPDU{}
 	case FASTPATH_UPDATETYPE_COLOR:
-		//d = &FastPathColorPdu{}
+		d = &FastPathPointerPDU{UpdateType: FASTPATH_UPDATETYPE_COLOR}
 	case FASTPATH_UPDATETYPE_CACHED:
+		d = &FastPathPointerPDU{UpdateType: FASTPATH_UPDATETYPE_CACHED}
 	case FASTPATH_UPDATETYPE_POINTER:
+		d = &FastPathPointerPDU{UpdateType: FASTPATH_UPDATETYPE_POINTER}
 	case FASTPATH_UPDATETYPE_LARGE_POINTER:
+		d = &FastPathPointerPDU{UpdateType: FASTPATH_UPDATETYPE_LARGE_POINTER}
 	default:
 		glog.Debugf("Unknown FastPathPDU type 0x%x", code)
 		return f, errors.New(fmt.Sprintf("Unknown FastPathPDU type 0x%x", code))
@@ -1054,3 +1065,187 @@ func (*ClientInputEventPDU) Type2() uint8 {
 func (*ClientInputEventPDU) Unpack(io.Reader) error {
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Pointer updates.
+//
+// Slow path: Pointer Update PDU (PDUTYPE2_POINTER, MS-RDPBCGR 2.2.9.1.1.4).
+// Fast path: FASTPATH_UPDATETYPE_PTR_POSITION / COLOR / CACHED / POINTER /
+// LARGE_POINTER (MS-RDPBCGR 2.2.9.1.2.1).
+
+// TS_PTRMSGTYPE_* values carried by the slow-path Pointer Update PDU.
+const (
+	TS_PTRMSGTYPE_SYSTEM   = 0x0001
+	TS_PTRMSGTYPE_POSITION = 0x0003
+	TS_PTRMSGTYPE_COLOR    = 0x0006
+	TS_PTRMSGTYPE_CACHED   = 0x0007
+	TS_PTRMSGTYPE_POINTER  = 0x0008
+)
+
+// PointerDataPDU is the slow-path Pointer Update PDU. It carries either a new
+// pointer position or a pointer shape.
+type PointerDataPDU struct {
+	MessageType uint16
+	XPos        uint16
+	YPos        uint16
+	CacheIndex  uint16
+	HotSpotX    uint16
+	HotSpotY    uint16
+	Width       uint16
+	Height      uint16
+	Data        []byte // XOR mask, bottom-up BGRA
+	Mask        []byte // AND mask, 1bpp
+}
+
+func (*PointerDataPDU) Type2() uint8 { return PDUTYPE2_POINTER }
+
+func (d *PointerDataPDU) Unpack(r io.Reader) error {
+	var err error
+	if d.MessageType, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	switch d.MessageType {
+	case TS_PTRMSGTYPE_POSITION:
+		if d.XPos, err = core.ReadUint16LE(r); err != nil {
+			return err
+		}
+		d.YPos, err = core.ReadUint16LE(r)
+		return err
+	case TS_PTRMSGTYPE_SYSTEM:
+		_, err = core.ReadUint16LE(r) // pad2octets
+		return err
+	case TS_PTRMSGTYPE_CACHED:
+		d.CacheIndex, err = core.ReadUint16LE(r)
+		return err
+	case TS_PTRMSGTYPE_COLOR:
+		return d.unpackShape(r, 3)
+	case TS_PTRMSGTYPE_POINTER:
+		return d.unpackShape(r, 4)
+	}
+	return nil
+}
+
+// unpackShape reads a TS_COLORPOINTERATTRIBUTE-style shape with the given
+// bytes-per-pixel for the XOR mask.
+func (d *PointerDataPDU) unpackShape(r io.Reader, bpp int) error {
+	var err error
+	if d.CacheIndex, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if d.HotSpotX, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if d.HotSpotY, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if d.Width, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if d.Height, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if d.Width == 0 || d.Height == 0 {
+		return nil
+	}
+	n := int(d.Width) * int(d.Height)
+	if d.Data, err = core.ReadBytes(n*bpp, r); err != nil {
+		return err
+	}
+	d.Mask, err = core.ReadBytes((n+7)/8, r)
+	return err
+}
+
+// FastPathPointerPositionPDU is FASTPATH_UPDATETYPE_PTR_POSITION
+// (TS_FP_POINTERPOSATTRIBUTE). It is how the server reports pointer motion.
+type FastPathPointerPositionPDU struct {
+	XPos uint16
+	YPos uint16
+}
+
+func (*FastPathPointerPositionPDU) FastPathUpdateType() uint8 {
+	return FASTPATH_UPDATETYPE_PTR_POSITION
+}
+
+func (f *FastPathPointerPositionPDU) Unpack(r io.Reader) error {
+	var err error
+	if f.XPos, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	f.YPos, err = core.ReadUint16LE(r)
+	return err
+}
+
+// FastPathPointerPDU covers the fast-path pointer shape updates
+// (COLOR, CACHED, POINTER, LARGE_POINTER).
+type FastPathPointerPDU struct {
+	UpdateType uint8
+	Bpp        uint16
+	CacheIndex uint16
+	HotSpotX   uint16
+	HotSpotY   uint16
+	Width      uint16
+	Height     uint16
+	Data       []byte
+	Mask       []byte
+}
+
+func (f *FastPathPointerPDU) FastPathUpdateType() uint8 { return f.UpdateType }
+
+func (f *FastPathPointerPDU) Unpack(r io.Reader) error {
+	var err error
+	switch f.UpdateType {
+	case FASTPATH_UPDATETYPE_CACHED:
+		f.CacheIndex, err = core.ReadUint16LE(r)
+		return err
+	case FASTPATH_UPDATETYPE_POINTER:
+		if f.Bpp, err = core.ReadUint16LE(r); err != nil {
+			return err
+		}
+		return f.unpackShape(r, int(f.Bpp)/8)
+	case FASTPATH_UPDATETYPE_LARGE_POINTER:
+		if f.Bpp, err = core.ReadUint16LE(r); err != nil {
+			return err
+		}
+		return f.unpackShape(r, int(f.Bpp)/8)
+	default: // FASTPATH_UPDATETYPE_COLOR is always 24bpp
+		return f.unpackShape(r, 3)
+	}
+}
+
+func (f *FastPathPointerPDU) unpackShape(r io.Reader, bpp int) error {
+	var err error
+	if f.CacheIndex, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if f.HotSpotX, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if f.HotSpotY, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if f.Width, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if f.Height, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if f.Width == 0 || f.Height == 0 || bpp <= 0 {
+		return nil
+	}
+	n := int(f.Width) * int(f.Height)
+	if f.Data, err = core.ReadBytes(n*bpp, r); err != nil {
+		return err
+	}
+	f.Mask, err = core.ReadBytes((n+7)/8, r)
+	return err
+}
+
+// FastPathNoopPDU is used for fast-path update types that carry no payload
+// (palette, synchronize, null/default pointer) so that parsing can continue
+// past them instead of aborting the whole fast-path PDU.
+type FastPathNoopPDU struct {
+	Type uint8
+}
+
+func (f *FastPathNoopPDU) FastPathUpdateType() uint8 { return f.Type }
+func (f *FastPathNoopPDU) Unpack(io.Reader) error    { return nil }

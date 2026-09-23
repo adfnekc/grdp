@@ -99,7 +99,9 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	c.sec.SetFastPathListener(c.pdu)
 	c.sec.SetChannelSender(c.mcs)
 	c.channels.SetChannelSender(c.sec)
-	c.pdu.SetFastPathSender(c.tpkt)
+	if c.setting == nil || !c.setting.NoFastPathInput {
+		c.pdu.SetFastPathSender(c.tpkt)
+	}
 
 	c.x224.SetRequestedProtocol(requestedProtocol(c.setting))
 
