@@ -14,11 +14,70 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/adfnekc/grdp/client"
 	"github.com/adfnekc/grdp/glog"
 )
+
+// keySeq collects repeatable -key input events.
+type keySeq []string
+
+func (k *keySeq) String() string { return strings.Join(*k, ";") }
+func (k *keySeq) Set(v string) error {
+	*k = append(*k, v)
+	return nil
+}
+
+// playInput replays a sequence of input events after the session is ready.
+// Each event is one of:
+//
+//	press:0x1c        key down + up (hex scancode)
+//	down:0xe05b       key down
+//	up:0xe05b         key up
+//	move:x,y          move the pointer
+//	click:x,y         move and left click
+//	wait:300          pause in milliseconds
+func playInput(c *client.Client, events []string) {
+	for _, ev := range events {
+		parts := strings.SplitN(ev, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		switch parts[0] {
+		case "press", "down", "up":
+			sc, err := strconv.ParseInt(parts[1], 0, 32)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "bad scancode:", ev)
+				continue
+			}
+			if parts[0] != "up" {
+				c.KeyDown(int(sc), "")
+			}
+			if parts[0] != "down" {
+				c.KeyUp(int(sc), "")
+			}
+		case "move", "click":
+			xy := strings.SplitN(parts[1], ",", 2)
+			if len(xy) != 2 {
+				continue
+			}
+			x, _ := strconv.Atoi(xy[0])
+			y, _ := strconv.Atoi(xy[1])
+			c.MouseMove(x, y)
+			if parts[0] == "click" {
+				c.MouseDown(0, x, y)
+				c.MouseUp(0, x, y)
+			}
+		case "wait":
+			ms, _ := strconv.Atoi(parts[1])
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
 
 func main() {
 	host := flag.String("host", "127.0.0.1:3389", "RDP server host:port")
@@ -31,6 +90,9 @@ func main() {
 	bitmaps := flag.Int("bitmaps", 0, "exit after this many bitmap updates (0 = wait until timeout)")
 	dump := flag.String("dump", "", "write the composited framebuffer to this PNG file")
 	rects := flag.Bool("rects", false, "log each bitmap rectangle's geometry")
+	var keys keySeq
+	flag.Var(&keys, "key", "input event, repeatable: press:0x1c | down:0x1c | up:0x1c | move:x,y | click:x,y | wait:300")
+	postInput := flag.Duration("post-input", 3*time.Second, "wait after input playback before dumping")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
 	flag.Parse()
 
@@ -69,10 +131,22 @@ func main() {
 		fmt.Println("wrote framebuffer to", *dump)
 	}
 
+	var inputPlayed bool
 	c.OnReady(func() {
 		select {
 		case ready <- struct{}{}:
 		default:
+		}
+		if len(keys) > 0 && !inputPlayed {
+			inputPlayed = true
+			go func() {
+				playInput(c, keys)
+				time.Sleep(*postInput)
+				select {
+				case done <- struct{}{}:
+				default:
+				}
+			}()
 		}
 	})
 	c.OnError(func(err error) {

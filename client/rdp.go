@@ -119,21 +119,34 @@ func (c *RdpClient) On(event string, f interface{}) {
 	}
 	c.pdu.On(event, f)
 }
+
+// scancodeFlags splits an 0xE0-prefixed extended scancode into the base
+// scancode and the KBDFLAGS_EXTENDED flag required by MS-RDPBCGR.
+func scancodeFlags(sc int) (uint16, uint16) {
+	if sc&0xFF00 == 0xE000 {
+		return uint16(sc & 0xFF), pdu.KBDFLAGS_EXTENDED
+	}
+	return uint16(sc), 0
+}
+
 func (c *RdpClient) KeyUp(sc int, name string) {
 	if c == nil || c.pdu == nil {
 		return
 	}
+	code, flags := scancodeFlags(sc)
 	p := &pdu.ScancodeKeyEvent{}
-	p.KeyCode = uint16(sc)
-	p.KeyboardFlags |= pdu.KBDFLAGS_RELEASE
+	p.KeyCode = code
+	p.KeyboardFlags = flags | pdu.KBDFLAGS_RELEASE
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 func (c *RdpClient) KeyDown(sc int, name string) {
 	if c == nil || c.pdu == nil {
 		return
 	}
+	code, flags := scancodeFlags(sc)
 	p := &pdu.ScancodeKeyEvent{}
-	p.KeyCode = uint16(sc)
+	p.KeyCode = code
+	p.KeyboardFlags = flags
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 
