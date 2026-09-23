@@ -2,9 +2,12 @@ package x224
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"time"
 
 	"github.com/adfnekc/grdp/glog"
 
@@ -174,6 +177,32 @@ func NewDataHeader() *DataHeader {
 	return &DataHeader{2, TPDU_DATA /* constant */, 0x80 /*constant*/}
 }
 
+// DefaultConnectTimeout bounds how long Connect waits for the server to
+// confirm the X.224 connection and complete the security handshake.
+const DefaultConnectTimeout = 20 * time.Second
+
+// NegotiationFailure is returned when the server rejects the requested
+// security protocol (RDP_NEG_FAILURE). See MS-RDPBCGR 2.2.1.2.1 for codes.
+type NegotiationFailure struct {
+	Code uint32
+}
+
+func (e *NegotiationFailure) Error() string {
+	msg := map[uint32]string{
+		SSL_REQUIRED_BY_SERVER:                "the server requires Enhanced RDP Security (TLS or CredSSP)",
+		SSL_NOT_ALLOWED_BY_SERVER:             "the server only supports Standard RDP Security",
+		SSL_CERT_NOT_ON_SERVER:                "the server has no valid authentication certificate",
+		INCONSISTENT_FLAGS:                    "inconsistent requested security protocols",
+		HYBRID_REQUIRED_BY_SERVER:             "the server requires CredSSP (NLA)",
+		SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER: "the server requires TLS with client authentication",
+	}[
+		e.Code]
+	if msg == "" {
+		msg = "unknown failure code"
+	}
+	return fmt.Sprintf("x224: RDP security negotiation failed (0x%08x): %s", e.Code, msg)
+}
+
 /**
  * Common X224 Automata
  * @param presentation {Layer} presentation layer
@@ -184,15 +213,18 @@ type X224 struct {
 	requestedProtocol uint32
 	selectedProtocol  uint32
 	dataHeader        *DataHeader
+	connectTimeout    time.Duration
+	connectResult     chan error
 }
 
 func New(t core.Transport) *X224 {
 	x := &X224{
-		*emission.NewEmitter(),
-		t,
-		PROTOCOL_RDP | PROTOCOL_SSL | PROTOCOL_HYBRID,
-		PROTOCOL_SSL,
-		NewDataHeader(),
+		Emitter:           *emission.NewEmitter(),
+		transport:         t,
+		requestedProtocol: PROTOCOL_RDP | PROTOCOL_SSL | PROTOCOL_HYBRID,
+		selectedProtocol:  PROTOCOL_SSL,
+		dataHeader:        NewDataHeader(),
+		connectTimeout:    DefaultConnectTimeout,
 	}
 
 	t.On("close", func() {
@@ -202,6 +234,11 @@ func New(t core.Transport) *X224 {
 	})
 
 	return x
+}
+
+// SetConnectTimeout overrides the handshake timeout used by Connect.
+func (x *X224) SetConnectTimeout(d time.Duration) {
+	x.connectTimeout = d
 }
 
 func (x *X224) Read(b []byte) (n int, err error) {
@@ -230,18 +267,67 @@ func (x *X224) SetRequestedProtocol(p uint32) {
 }
 
 func (x *X224) Connect() error {
+	return x.ConnectContext(context.Background())
+}
+
+// ConnectContext performs the X.224 connection request / confirm exchange and
+// the negotiated security handshake, blocking until it completes, fails or the
+// context (or the connect timeout) expires.
+func (x *X224) ConnectContext(ctx context.Context) error {
 	if x.transport == nil {
 		return errors.New("no transport")
 	}
+
+	timeout := x.connectTimeout
+	if timeout <= 0 {
+		timeout = DefaultConnectTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	result := make(chan error, 1)
+	x.connectResult = result
+
+	// Arm the confirm handler BEFORE writing so a fast server response cannot
+	// be dropped (previously this raced and could hang forever).
+	x.transport.Once("data", x.recvConnectionConfirm)
+
+	errCh := make(chan error, 1)
+	x.transport.Once("error", func(err error) {
+		if err == nil {
+			err = errors.New("transport error")
+		}
+		errCh <- err
+	})
+	x.transport.Once("close", func() {
+		errCh <- io.EOF
+	})
+
 	cookie := "Cookie: mstshash=test"
 	message := NewClientConnectionRequestPDU([]byte(cookie), x.requestedProtocol)
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)
 
 	glog.Debug("x224 sendConnectionRequest", hex.EncodeToString(message.Serialize()))
-	_, err := x.transport.Write(message.Serialize())
-	x.transport.Once("data", x.recvConnectionConfirm)
-	return err
+	if _, err := x.transport.Write(message.Serialize()); err != nil {
+		return fmt.Errorf("x224: send connection request: %w", err)
+	}
+
+	select {
+	case err := <-result:
+		return err
+	case err := <-errCh:
+		return fmt.Errorf("x224: transport closed during handshake: %w", err)
+	case <-ctx.Done():
+		_ = x.Close()
+		return fmt.Errorf("x224: connect timed out: %w", ctx.Err())
+	}
+}
+
+func (x *X224) signalConnect(err error) {
+	if x.connectResult != nil {
+		x.connectResult <- err
+	}
 }
 
 func (x *X224) recvConnectionConfirm(s []byte) {
@@ -252,17 +338,13 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		message := &ServerConnectionConfirm{}
 		if err := struc.Unpack(bytes.NewReader(s), message); err != nil {
 			glog.Error("ReadServerConnectionConfirm err", err)
+			x.signalConnect(fmt.Errorf("x224: read connection confirm: %w", err))
 			return
 		}
 		glog.Debugf("message: %+v", *message.ProtocolNeg)
 		if message.ProtocolNeg.Type == TYPE_RDP_NEG_FAILURE {
-			glog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
-				message.ProtocolNeg.Result))
-			//only use Standard RDP Security mechanisms
-			if message.ProtocolNeg.Result == 2 {
-				glog.Info("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
-			}
-			x.Close()
+			x.signalConnect(&NegotiationFailure{Code: message.ProtocolNeg.Result})
+			_ = x.Close()
 			return
 		}
 
@@ -274,44 +356,47 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		x.selectedProtocol = PROTOCOL_RDP
 	}
 
-	if x.selectedProtocol == PROTOCOL_HYBRID_EX {
-		glog.Error("NODE_RDP_PROTOCOL_HYBRID_EX_NOT_SUPPORTED")
+	if x.selectedProtocol == PROTOCOL_HYBRID_EX || x.selectedProtocol == PROTOCOL_RDSTLS || x.selectedProtocol == PROTOCOL_RDSAAD {
+		x.signalConnect(fmt.Errorf("x224: unsupported security protocol 0x%x (only Standard RDP, TLS and NLA are supported)", x.selectedProtocol))
+		_ = x.Close()
 		return
 	}
 
+	// From here on, regular data PDUs are handed to recvData.
 	x.transport.On("data", x.recvData)
 
-	if x.selectedProtocol == PROTOCOL_RDP {
+	switch x.selectedProtocol {
+	case PROTOCOL_RDP:
 		glog.Info("*** RDP security selected ***")
-		x.Emit("connect", x.selectedProtocol)
-		return
-	}
-
-	if x.selectedProtocol == PROTOCOL_SSL {
+	case PROTOCOL_SSL:
 		glog.Info("*** SSL security selected ***")
-		err := x.transport.(*tpkt.TPKT).StartTLS()
-		if err != nil {
+		if err := x.transport.(*tpkt.TPKT).StartTLS(); err != nil {
 			glog.Error("start tls failed:", err)
+			x.signalConnect(fmt.Errorf("x224: start TLS: %w", err))
 			return
 		}
-		x.Emit("connect", x.selectedProtocol)
+	case PROTOCOL_HYBRID:
+		glog.Info("*** NLA Security selected ***")
+		if err := x.transport.(*tpkt.TPKT).StartNLA(); err != nil {
+			glog.Error("start NLA failed:", err)
+			x.signalConnect(fmt.Errorf("x224: start NLA: %w", err))
+			return
+		}
+	default:
+		x.signalConnect(fmt.Errorf("x224: unknown selected protocol 0x%x", x.selectedProtocol))
 		return
 	}
 
-	if x.selectedProtocol == PROTOCOL_HYBRID {
-		glog.Info("*** NLA Security selected ***")
-		err := x.transport.(*tpkt.TPKT).StartNLA()
-		if err != nil {
-			glog.Error("start NLA failed:", err)
-			return
-		}
-		x.Emit("connect", x.selectedProtocol)
-		return
-	}
+	x.Emit("connect", x.selectedProtocol)
+	x.signalConnect(nil)
 }
 
 func (x *X224) recvData(s []byte) {
 	glog.Trace("x224 recvData", hex.EncodeToString(s), "emit data")
-	// x224 header takes 3 bytes
+	// x224 data header takes 3 bytes
+	if len(s) < 3 {
+		glog.Warn("x224 recvData: short data PDU, dropping")
+		return
+	}
 	x.Emit("data", s[3:])
 }

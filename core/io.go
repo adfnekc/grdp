@@ -2,75 +2,94 @@ package core
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 )
 
 type ReadBytesComplete func(result []byte, err error)
 
-func StartReadBytes(len int, r io.Reader, cb ReadBytesComplete) {
-	b := make([]byte, len)
+// StartReadBytes reads exactly length bytes from r in a background goroutine
+// and then invokes cb(result, err) exactly once.
+//
+// On any error - including io.EOF and io.ErrUnexpectedEOF - cb is invoked with
+// that error and no further reads are scheduled by this function. Callers are
+// responsible for stopping their own read chain and surfacing the error.
+//
+// NOTE: this used to loop forever on io.EOF, spinning the CPU and leaking the
+// goroutine whenever the peer closed the connection.
+func StartReadBytes(length int, r io.Reader, cb ReadBytesComplete) {
+	if length < 0 {
+		cb(nil, errors.New("core: negative read length"))
+		return
+	}
+	if cb == nil {
+		return
+	}
+	b := make([]byte, length)
 	go func() {
-		var err error
-		for {
-			_, err = io.ReadFull(r, b)
-			//glog.Debug("StartReadBytes Get", n, "Bytes:", hex.EncodeToString(b))
-			if err == io.EOF {
-				continue
-			}
-			break
-		}
+		_, err := io.ReadFull(r, b)
 		cb(b, err)
 	}()
 }
 
-func ReadBytes(len int, r io.Reader) ([]byte, error) {
-	b := make([]byte, len)
-	length, err := io.ReadFull(r, b)
-	return b[:length], err
+// ReadBytes reads exactly len bytes. On a short read it returns the bytes that
+// were read together with io.ErrUnexpectedEOF (or io.EOF when none were read).
+func ReadBytes(length int, r io.Reader) ([]byte, error) {
+	if length < 0 {
+		return nil, errors.New("core: negative read length")
+	}
+	b := make([]byte, length)
+	n, err := io.ReadFull(r, b)
+	if err != nil {
+		if err == io.EOF && n > 0 {
+			err = io.ErrUnexpectedEOF
+		}
+		return b[:n], err
+	}
+	return b, nil
 }
 
 func ReadByte(r io.Reader) (byte, error) {
 	b, err := ReadBytes(1, r)
-	return b[0], err
+	if err != nil || len(b) == 0 {
+		return 0, err
+	}
+	return b[0], nil
 }
 
 func ReadUInt8(r io.Reader) (uint8, error) {
-	b, err := ReadBytes(1, r)
-	return uint8(b[0]), err
+	b, err := ReadByte(r)
+	return uint8(b), err
 }
 
 func ReadUint16LE(r io.Reader) (uint16, error) {
-	b := make([]byte, 2)
-	_, err := io.ReadFull(r, b)
+	b, err := ReadBytes(2, r)
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.LittleEndian.Uint16(b), nil
 }
 
 func ReadUint16BE(r io.Reader) (uint16, error) {
-	b := make([]byte, 2)
-	_, err := io.ReadFull(r, b)
+	b, err := ReadBytes(2, r)
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.BigEndian.Uint16(b), nil
 }
 
 func ReadUInt32LE(r io.Reader) (uint32, error) {
-	b := make([]byte, 4)
-	_, err := io.ReadFull(r, b)
+	b, err := ReadBytes(4, r)
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.LittleEndian.Uint32(b), nil
 }
 
 func ReadUInt32BE(r io.Reader) (uint32, error) {
-	b := make([]byte, 4)
-	_, err := io.ReadFull(r, b)
+	b, err := ReadBytes(4, r)
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 	return binary.BigEndian.Uint32(b), nil
 }

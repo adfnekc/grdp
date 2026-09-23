@@ -22,8 +22,6 @@ github.com/goxjs/glfw v0.0.0-20220119044647-4bcee99381f2 h1:I9gvAmAaJVbyuQRJsD7Z
 github.com/goxjs/glfw v0.0.0-20220119044647-4bcee99381f2/go.mod h1:oS8P8gVOT4ywTcjV6wZlOU4GuVFQ8F5328KY3MJ79CY=
 github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358 h1:hVXNJ57IHkOA8FBq80UG263MEBwNUMfS9c82J2QE5UQ=
 github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358/go.mod h1:qBE210J2T9uLXRB3GNc73SvZACDEFAmDCOlDkV47zbY=
-github.com/icodeface/tls v0.0.0-20190904083142-17aec93c60e5 h1:ZcsPFW8UgACapqjcrBJx0PuyT4ppArO5VFn0vgnkvmc=
-github.com/icodeface/tls v0.0.0-20190904083142-17aec93c60e5/go.mod h1:VJNHW2GxCtQP/IQtXykBIPBV8maPJ/dHWirVTwm9GwY=
 github.com/labstack/echo v3.3.10+incompatible/go.mod h1:0INS7j/VjnFxD4E2wkz67b8cVwCLbBmJyDaka6Cmk1s=
 github.com/labstack/gommon v0.3.0/go.mod h1:MULnywXg0yavhxWKc+lOruYdAhDwPK9wf0OL7NoOu+k=
 github.com/lunixbochs/struc v0.0.0-20200707160740-784aaebc1d40 h1:EnfXoSqDfSNJv0VBNqY/88RNnhSGYkrHaO0mmFGbVsc=

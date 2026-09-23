@@ -2,19 +2,18 @@ package core
 
 import (
 	"crypto/rsa"
+	"crypto/tls"
+	"errors"
 	"math/big"
+	"net"
 
 	"github.com/huin/asn1ber"
-
-	//"crypto/tls"
-	"errors"
-	"github.com/icodeface/tls"
-	"net"
 )
 
 type SocketLayer struct {
-	conn    net.Conn
-	tlsConn *tls.Conn
+	conn      net.Conn
+	tlsConn   *tls.Conn
+	tlsConfig *tls.Config
 }
 
 func NewSocketLayer(conn net.Conn) *SocketLayer {
@@ -49,12 +48,21 @@ func (s *SocketLayer) Close() error {
 	return s.conn.Close()
 }
 
+// SetTLSConfig overrides the TLS configuration used by StartTLS. When unset a
+// default configuration is used that accepts the self-signed certificates RDP
+// servers normally present. Callers that require verification should supply a
+// config with InsecureSkipVerify=false and the appropriate RootCAs/ServerName.
+func (s *SocketLayer) SetTLSConfig(cfg *tls.Config) {
+	s.tlsConfig = cfg
+}
+
 func (s *SocketLayer) StartTLS() error {
-	config := &tls.Config{
-		InsecureSkipVerify:       true,
-		MinVersion:               tls.VersionTLS10,
-		MaxVersion:               tls.VersionTLS13,
-		PreferServerCipherSuites: true,
+	config := s.tlsConfig
+	if config == nil {
+		config = &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS10,
+		}
 	}
 	s.tlsConn = tls.Client(s.conn, config)
 	return s.tlsConn.Handshake()
@@ -69,6 +77,13 @@ func (s *SocketLayer) TlsPubKey() ([]byte, error) {
 	if s.tlsConn == nil {
 		return nil, errors.New("TLS conn does not exist")
 	}
-	pub := s.tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
+	cs := s.tlsConn.ConnectionState()
+	if len(cs.PeerCertificates) == 0 {
+		return nil, errors.New("TLS peer presented no certificate")
+	}
+	pub, ok := cs.PeerCertificates[0].PublicKey.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("TLS peer certificate key is not RSA")
+	}
 	return asn1ber.Marshal(*pub)
 }
