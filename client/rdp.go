@@ -99,6 +99,7 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	c.sec.SetFastPathListener(c.pdu)
 	c.sec.SetChannelSender(c.mcs)
 	c.channels.SetChannelSender(c.sec)
+	c.pdu.SetFastPathSender(c.tpkt)
 
 	c.x224.SetRequestedProtocol(requestedProtocol(c.setting))
 
@@ -166,7 +167,13 @@ func (c *RdpClient) MouseWheel(scroll, x, y int) {
 		return
 	}
 	p := &pdu.PointerEvent{}
-	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
+	p.PointerFlags |= pdu.PTRFLAGS_WHEEL | pdu.PTRFLAGS_MOVE
+	rotation := scroll
+	if rotation < 0 {
+		p.PointerFlags |= pdu.PTRFLAGS_WHEEL_NEGATIVE
+		rotation = -rotation
+	}
+	p.PointerFlags |= uint16(rotation) & pdu.WheelRotationMask
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
@@ -188,6 +195,7 @@ func (c *RdpClient) MouseUp(button int, x, y int) {
 	default:
 		p.PointerFlags |= pdu.PTRFLAGS_MOVE
 	}
+	p.PointerFlags |= pdu.PTRFLAGS_MOVE
 
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
@@ -199,7 +207,7 @@ func (c *RdpClient) MouseDown(button int, x, y int) {
 	}
 	p := &pdu.PointerEvent{}
 
-	p.PointerFlags |= pdu.PTRFLAGS_DOWN
+	p.PointerFlags |= pdu.PTRFLAGS_DOWN | pdu.PTRFLAGS_MOVE
 
 	switch button {
 	case 0:

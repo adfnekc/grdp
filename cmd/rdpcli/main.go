@@ -67,10 +67,30 @@ func playInput(c *client.Client, events []string) {
 			x, _ := strconv.Atoi(xy[0])
 			y, _ := strconv.Atoi(xy[1])
 			c.MouseMove(x, y)
+			time.Sleep(80 * time.Millisecond)
 			if parts[0] == "click" {
 				c.MouseDown(0, x, y)
+				time.Sleep(80 * time.Millisecond)
 				c.MouseUp(0, x, y)
 			}
+		case "mdown":
+			xy := strings.SplitN(parts[1], ",", 2)
+			if len(xy) != 2 {
+				continue
+			}
+			x, _ := strconv.Atoi(xy[0])
+			y, _ := strconv.Atoi(xy[1])
+			c.MouseMove(x, y)
+			time.Sleep(80 * time.Millisecond)
+			c.MouseDown(0, x, y)
+		case "mup":
+			xy := strings.SplitN(parts[1], ",", 2)
+			if len(xy) != 2 {
+				continue
+			}
+			x, _ := strconv.Atoi(xy[0])
+			y, _ := strconv.Atoi(xy[1])
+			c.MouseUp(0, x, y)
 		case "wait":
 			ms, _ := strconv.Atoi(parts[1])
 			time.Sleep(time.Duration(ms) * time.Millisecond)

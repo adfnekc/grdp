@@ -47,6 +47,60 @@ func TestPointerEventSerialize(t *testing.T) {
 	}
 }
 
+// fakeFastPath captures fast-path input PDUs.
+type fakeFastPath struct {
+	numEvents byte
+	data      []byte
+}
+
+func (f *fakeFastPath) SendFastPath(secFlag byte, s []byte) (int, error) { return len(s), nil }
+func (f *fakeFastPath) SendFastPathInput(n byte, s []byte) (int, error) {
+	f.numEvents = n
+	f.data = append([]byte(nil), s...)
+	return len(s), nil
+}
+
+func TestFastPathInputKeyboard(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   ScancodeKeyEvent
+		want []byte
+	}{
+		{"enter down", ScancodeKeyEvent{KeyCode: 0x1C}, []byte{0x00, 0x1C}},
+		{"enter up", ScancodeKeyEvent{KeyboardFlags: KBDFLAGS_RELEASE, KeyCode: 0x1C}, []byte{0x01, 0x1C}},
+		{"super down", ScancodeKeyEvent{KeyboardFlags: KBDFLAGS_EXTENDED, KeyCode: 0x5B}, []byte{0x02, 0x5B}},
+	}
+	for _, c := range cases {
+		fp := &fakeFastPath{}
+		cl := NewClient(newCaptureTransport())
+		cl.SetFastPathSender(fp)
+		cl.SendInputEvents(INPUT_EVENT_SCANCODE, []InputEventsInterface{&c.ev})
+		if fp.numEvents != 1 {
+			t.Errorf("%s: numEvents = %d, want 1", c.name, fp.numEvents)
+		}
+		if !bytes.Equal(fp.data, c.want) {
+			t.Errorf("%s: data = % X, want % X", c.name, fp.data, c.want)
+		}
+	}
+}
+
+func TestFastPathInputMouse(t *testing.T) {
+	fp := &fakeFastPath{}
+	cl := NewClient(newCaptureTransport())
+	cl.SetFastPathSender(fp)
+	cl.SendInputEvents(INPUT_EVENT_MOUSE, []InputEventsInterface{
+		&PointerEvent{PointerFlags: PTRFLAGS_MOVE, XPos: 968, YPos: 124},
+	})
+	// eventHeader = eventCode(1)<<5 = 0x20, then pointerFlags, x, y (LE)
+	want := []byte{0x20, 0x00, 0x08, 0xC8, 0x03, 0x7C, 0x00}
+	if fp.numEvents != 1 {
+		t.Fatalf("numEvents = %d, want 1", fp.numEvents)
+	}
+	if !bytes.Equal(fp.data, want) {
+		t.Fatalf("data = % X, want % X", fp.data, want)
+	}
+}
+
 // TestSendInputEventsFraming verifies the slow-path input PDU layout against
 // MS-RDPBCGR 2.2.8.1.1.3.1.1:
 //

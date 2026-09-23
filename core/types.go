@@ -18,6 +18,9 @@ type FastPathListener interface {
 
 type FastPathSender interface {
 	SendFastPath(secFlag byte, s []byte) (int, error)
+	// SendFastPathInput writes a client-to-server fast-path input PDU. The
+	// first header byte carries both the action and the event count.
+	SendFastPathInput(numEvents byte, s []byte) (int, error)
 }
 
 type ChannelSender interface {

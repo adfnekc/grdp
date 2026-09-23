@@ -224,6 +224,23 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 	return t.Conn.Write(buff.Bytes())
 }
 
+// SendFastPathInput writes a client-to-server fast-path input PDU. Unlike
+// output PDUs, the first header byte carries the event count in bits 2-5:
+//
+//	byte0 = action (2 bits) | numEvents << 2 | flags << 6
+//	byte1..2 = length (includes this 3 byte header)
+//	events
+//
+// See MS-RDPBCGR 2.2.8.1.2.1.
+func (t *TPKT) SendFastPathInput(numEvents byte, data []byte) (n int, err error) {
+	buff := &bytes.Buffer{}
+	core.WriteUInt8(FASTPATH_ACTION_FASTPATH|((numEvents&0x0F)<<2), buff)
+	core.WriteUInt16BE(uint16(len(data)+3)|0x8000, buff)
+	buff.Write(data)
+	glog.Trace("TPTK SendFastPathInput", hex.EncodeToString(buff.Bytes()))
+	return t.Conn.Write(buff.Bytes())
+}
+
 func (t *TPKT) recvHeader(s []byte, err error) {
 	glog.Trace("tpkt recvHeader", hex.EncodeToString(s), err)
 	if err != nil {

@@ -121,7 +121,9 @@ func NewPDULayer(t core.Transport) *PDULayer {
 
 func (p *PDULayer) sendPDU(message PDUMessage) {
 	pdu := NewPDU(p.userId, message)
-	p.transport.Write(pdu.serialize())
+	b := pdu.serialize()
+	glog.Trace("pdu send:", hex.EncodeToString(b))
+	p.transport.Write(b)
 }
 
 func (p *PDULayer) sendDataPDU(message DataPDUData) {
@@ -220,7 +222,8 @@ func (c *Client) sendConfirmActivePDU() {
 	orderCapa.OrderSupport[TS_NEG_FAST_GLYPH_INDEX] = 1
 
 	inputCapa := c.clientCapabilities[CAPSTYPE_INPUT].(*InputCapability)
-	inputCapa.Flags = INPUT_FLAG_SCANCODES | INPUT_FLAG_MOUSEX | INPUT_FLAG_UNICODE
+	inputCapa.Flags = INPUT_FLAG_SCANCODES | INPUT_FLAG_MOUSEX | INPUT_FLAG_UNICODE |
+		INPUT_FLAG_FASTPATH_INPUT | INPUT_FLAG_FASTPATH_INPUT2
 	inputCapa.KeyboardLayout = c.clientCoreData.KbdLayout
 	inputCapa.KeyboardType = c.clientCoreData.KeyboardType
 	inputCapa.KeyboardSubType = c.clientCoreData.KeyboardSubType
@@ -445,7 +448,86 @@ type InputEventsInterface interface {
 	Serialize() []byte
 }
 
+// Fast-path input constants (MS-RDPBCGR 2.2.8.1.2).
+const (
+	FASTPATH_INPUT_ACTION_FASTPATH = 0x0
+	FASTPATH_INPUT_ENCRYPTED       = 0x2
+
+	FASTPATH_INPUT_EVENT_SCANCODE = 0x0
+	FASTPATH_INPUT_EVENT_MOUSE    = 0x1
+	FASTPATH_INPUT_EVENT_MOUSEX   = 0x2
+	FASTPATH_INPUT_EVENT_SYNC     = 0x3
+	FASTPATH_INPUT_EVENT_UNICODE  = 0x4
+
+	FASTPATH_INPUT_KBDFLAGS_RELEASE   = 0x01
+	FASTPATH_INPUT_KBDFLAGS_EXTENDED  = 0x02
+	FASTPATH_INPUT_KBDFLAGS_EXTENDED1 = 0x04
+)
+
+func fastPathEventCode(msgType uint16) (byte, bool) {
+	switch msgType {
+	case INPUT_EVENT_SCANCODE:
+		return FASTPATH_INPUT_EVENT_SCANCODE, true
+	case INPUT_EVENT_MOUSE:
+		return FASTPATH_INPUT_EVENT_MOUSE, true
+	case INPUT_EVENT_MOUSEX:
+		return FASTPATH_INPUT_EVENT_MOUSEX, true
+	case INPUT_EVENT_UNICODE:
+		return FASTPATH_INPUT_EVENT_UNICODE, true
+	}
+	return 0, false
+}
+
+// sendFastPathInput serializes one or more input events into a TS_FP_INPUT_PDU
+// (MS-RDPBCGR 2.2.8.1.2) and hands it to the fast-path sender.
+//
+// fpInputHeader:  action (2 bits) | numEvents << 2 | encrypted << 6
+// eventHeader:    eventFlags (5 bits) | eventCode << 5
+func (c *Client) sendFastPathInput(msgType uint16, events []InputEventsInterface) {
+	eventCode, ok := fastPathEventCode(msgType)
+	if !ok || len(events) == 0 || len(events) > 15 {
+		return
+	}
+	buff := &bytes.Buffer{}
+	for _, e := range events {
+		switch ev := e.(type) {
+		case *ScancodeKeyEvent:
+			var flags byte
+			code := ev.KeyCode
+			if ev.KeyboardFlags&KBDFLAGS_RELEASE != 0 {
+				flags |= FASTPATH_INPUT_KBDFLAGS_RELEASE
+			}
+			if ev.KeyboardFlags&KBDFLAGS_EXTENDED != 0 || code&0xFF00 == 0xE000 {
+				flags |= FASTPATH_INPUT_KBDFLAGS_EXTENDED
+				code &= 0xFF
+			}
+			buff.WriteByte(flags | (eventCode << 5))
+			buff.WriteByte(byte(code & 0xFF))
+		case *UnicodeKeyEvent:
+			buff.WriteByte(eventCode << 5)
+			core.WriteUInt16LE(ev.Unicode, buff)
+		case *PointerEvent:
+			buff.WriteByte(eventCode << 5)
+			core.WriteUInt16LE(ev.PointerFlags, buff)
+			core.WriteUInt16LE(ev.XPos, buff)
+			core.WriteUInt16LE(ev.YPos, buff)
+		default:
+			return
+		}
+	}
+	if c.fastPathSender != nil {
+		c.fastPathSender.SendFastPathInput(byte(len(events)), buff.Bytes())
+	}
+}
+
 func (c *Client) SendInputEvents(msgType uint16, events []InputEventsInterface) {
+	// Prefer fast-path input (what modern servers/clients use); fall back to the
+	// slow-path T.128 input PDU when no fast-path sender is configured.
+	if c.fastPathSender != nil {
+		c.sendFastPathInput(msgType, events)
+		return
+	}
+
 	p := &ClientInputEventPDU{}
 	p.NumEvents = uint16(len(events))
 	p.SlowPathInputEvents = make([]SlowPathInputEvent, 0, p.NumEvents)

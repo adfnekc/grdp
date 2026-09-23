@@ -136,7 +136,7 @@ func (g *RdpClient) Login() error {
 	g.sec.SetFastPathListener(g.pdu)
 	g.sec.SetChannelSender(g.mcs)
 	g.channels.SetChannelSender(g.sec)
-	//g.pdu.SetFastPathSender(g.tpkt)
+	g.pdu.SetFastPathSender(g.tpkt)
 
 	//g.x224.SetRequestedProtocol(x224.PROTOCOL_RDP)
 	g.x224.SetRequestedProtocol(x224.PROTOCOL_SSL)
