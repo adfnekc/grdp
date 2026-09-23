@@ -4,12 +4,12 @@ import "fmt"
 
 // Bitmap codec ids (MS-RDPBCGR 2.2.9.2.1.1, TS_BITMAP_DATA_EX.codecID).
 const (
-	CodecIDNone            = 0x00 // data is not encoded
-	CodecIDNSCODEC         = 0x01
-	CodecIDRemoteFX        = 0x03
-	CodecIDImageRemoteFX   = 0x04
-	CodecIDX264            = 0x05
-	CodecIDX264Image       = 0x06
+	CodecIDNone          = 0x00 // data is not encoded
+	CodecIDNSCODEC       = 0x01
+	CodecIDRemoteFX      = 0x03
+	CodecIDImageRemoteFX = 0x04
+	CodecIDX264          = 0x05
+	CodecIDX264Image     = 0x06
 )
 
 // Decompress decodes a codec-encoded bitmap payload. codecID comes from
@@ -25,7 +25,17 @@ func Decompress(codecID uint8, data []byte, width, height, bpp int) ([]byte, err
 		return data, nil
 	case CodecIDNSCODEC:
 		return NSCodec(data, width, height)
+	case CodecIDRemoteFX:
+		return DecodeRFX(data, width, height, RFXMode)
 	default:
 		return nil, fmt.Errorf("codec: id 0x%02x: %w", codecID, ErrUnsupported)
 	}
 }
+
+// RFXMode is the entropy coder used for RemoteFX payloads. RemoteFX data does
+// not say which coder it used, so this has to match what was negotiated: a
+// client advertises both ICAPs and the server picks one. RLGR1 is the safer
+// default because every server supports it.
+//
+// Change it before decoding if the session negotiated RLGR3.
+var RFXMode = RLGR1

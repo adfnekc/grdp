@@ -608,15 +608,57 @@ var codecGUIDNSCodec = [16]byte{
 	0x58, 0x9F, 0xAE, 0x2D, 0x1A, 0x87, 0xE2, 0xD6,
 }
 
+// codecGUIDRemoteFX is CODEC_GUID_REMOTEFX (MS-RDPBCGR 2.2.7.2.10.1.1.1).
+var codecGUIDRemoteFX = [16]byte{
+	0x12, 0x2F, 0x77, 0x76,
+	0x72, 0xBD,
+	0x63, 0x44,
+	0xAF, 0xB3, 0xB7, 0x3C, 0x9C, 0x6F, 0x78, 0x86,
+}
+
+// TS_RFX_CAPS / TS_RFX_CAPSET block types and capability values
+// (MS-RDPRFX 2.2.2.1).
+const (
+	rfxBlockCaps        = 0xCBC0
+	rfxBlockCapset      = 0xCBC1
+	rfxCapsetType       = 0xCFC0
+	rfxVersion10        = 0x0100
+	rfxTile64x64        = 0x0040
+	rfxColConvICT       = 0x01
+	rfxXformDWT53A      = 0x01
+	rfxEntropyRLGR1     = 0x01
+	rfxEntropyRLGR3     = 0x04
+	rfxCaptureNonCAC    = 0x00000001
+	rfxClientCapsLength = 49
+)
+
 // NewNSCodecCapability builds the Bitmap Codecs capability set advertising
 // NSCodec. A client advertises the codec ids it can decode together with its
 // decoder preferences; MS-RDPBCGR 2.2.7.2.10.1.1 says NSCodec properties carry
 // a TS_NSCODEC_CAPABILITYSET from MS-RDPNSC.
 func NewNSCodecCapability() *BitmapCodecsCapability {
-	return &BitmapCodecsCapability{
-		SupportedBitmapCodecs: BitmapCodecS{
-			Count: 1,
-			Array: []BitmapCodec{{
+	return NewBitmapCodecsCapability(RDPCodecIDNSCodec)
+}
+
+// NewRemoteFXCapability builds the Bitmap Codecs capability set advertising
+// only RemoteFX.
+//
+// This has not been exercised against a server that speaks RemoteFX, so it is
+// deliberately not part of the default capability set. The decoder itself is
+// verified against reference data, so enabling this is what makes RemoteFX
+// reachable through Set Surface Bits.
+func NewRemoteFXCapability() *BitmapCodecsCapability {
+	return NewBitmapCodecsCapability(RDPCodecIDRemoteFX)
+}
+
+// NewBitmapCodecsCapability builds a Bitmap Codecs capability set from the
+// codec ids the client can decode.
+func NewBitmapCodecsCapability(codecIDs ...uint8) *BitmapCodecsCapability {
+	c := &BitmapCodecsCapability{}
+	for _, id := range codecIDs {
+		switch id {
+		case RDPCodecIDNSCodec:
+			c.SupportedBitmapCodecs.Array = append(c.SupportedBitmapCodecs.Array, BitmapCodec{
 				GUID: codecGUIDNSCodec,
 				ID:   RDPCodecIDNSCodec,
 				// fAllowDynamicFidelity, fAllowSubsampling, colorLossLevel.
@@ -624,9 +666,54 @@ func NewNSCodecCapability() *BitmapCodecsCapability {
 				// minimum so the decoded image stays close to lossless.
 				PropertiesLength: 3,
 				Properties:       []byte{0, 0, 1},
-			}},
-		},
+			})
+		case RDPCodecIDRemoteFX:
+			c.SupportedBitmapCodecs.Array = append(c.SupportedBitmapCodecs.Array, BitmapCodec{
+				GUID:             codecGUIDRemoteFX,
+				ID:               RDPCodecIDRemoteFX,
+				PropertiesLength: rfxClientCapsLength,
+				Properties:       rfxClientCapabilityContainer(),
+			})
+		}
 	}
+	c.SupportedBitmapCodecs.Count = uint8(len(c.SupportedBitmapCodecs.Array))
+	return c
+}
+
+// rfxClientCapabilityContainer builds the 49 byte TS_RFX_CLNT_CAPS_CONTAINER
+// that a client sends for RemoteFX: it lists the two entropy coders it can
+// decode, and nothing else, since the remaining parameters are fixed.
+func rfxClientCapabilityContainer() []byte {
+	b := make([]byte, 0, rfxClientCapsLength)
+	u16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
+	u32 := func(v uint32) {
+		b = append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	}
+
+	u32(rfxClientCapsLength) // length
+	u32(rfxCaptureNonCAC)    // captureFlags
+	u32(37)                  // capsLength
+	// TS_RFX_CAPS
+	u16(rfxBlockCaps)
+	u32(8) // blockLen
+	u16(1) // numCapsets
+	// TS_RFX_CAPSET
+	u16(rfxBlockCapset)
+	u32(29)             // blockLen
+	b = append(b, 0x01) // codecId, MUST be 0x01
+	u16(rfxCapsetType)
+	u16(2) // numIcaps
+	u16(8) // icapLen
+	// TS_RFX_ICAP, one per entropy coder.
+	for _, entropy := range []byte{rfxEntropyRLGR1, rfxEntropyRLGR3} {
+		u16(rfxVersion10)
+		u16(rfxTile64x64)
+		b = append(b, 0x00) // flags
+		b = append(b, rfxColConvICT)
+		b = append(b, rfxXformDWT53A)
+		b = append(b, entropy)
+	}
+	return b
 }
 
 func (*BitmapCodecsCapability) Type() CapsType {

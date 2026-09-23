@@ -80,6 +80,25 @@ extern BOOL rfx_compose_message(RFX_CONTEXT* context, wStream* s, const RFX_RECT
                                 size_t num_rects, const BYTE* image_data, UINT32 width,
                                 UINT32 height, UINT32 rowstride);
 
+/* include/freerdp/codec/region.h - only the layout is needed, the decoder
+   just writes the invalidated rectangles into it. */
+typedef struct
+{
+	UINT16 left, top, right, bottom;
+} RECTANGLE_16;
+typedef struct S_REGION16_DATA REGION16_DATA;
+typedef struct
+{
+	RECTANGLE_16 extents;
+	REGION16_DATA* data;
+} REGION16;
+
+extern BOOL rfx_process_message(RFX_CONTEXT* context, const BYTE* data, UINT32 length, UINT32 left,
+                                UINT32 top, BYTE* dst, UINT32 dstFormat, UINT32 dstStride,
+                                UINT32 dstHeight, REGION16* invalidRegion);
+extern void region16_init(REGION16* region);
+extern void region16_uninit(REGION16* region);
+
 /* include/freerdp/codec/nsc.h */
 typedef enum
 {
@@ -236,6 +255,35 @@ static void gen_rfx(const char* dir, int w, int h, BYTE* img, RLGR_MODE mode)
 	n = (size_t)(s->pointer - s->buffer);
 	snprintf(name, sizeof(name), "rfx_%dx%d_rlgr%d.bin", w, h, mode == RLGR3 ? 3 : 1);
 	write_file(dir, name, s->buffer, n);
+
+	/* Decode the same payload with FreeRDP so the Go tests can compare
+	   against the reference decoder instead of the lossy original. */
+	{
+		RFX_CONTEXT* dctx = rfx_context_new(FALSE);
+		BYTE* dec = malloc((size_t)w * h * 4);
+		REGION16 region;
+		char dname[128];
+
+		if (!dctx || !dec)
+		{
+			fprintf(stderr, "rfx: out of memory\n");
+			exit(1);
+		}
+		region16_init(&region);
+		rfx_context_set_pixel_format(dctx, PIXEL_FORMAT_BGRA32);
+		rfx_context_set_mode(dctx, mode);
+		if (!rfx_process_message(dctx, s->buffer, (UINT32)n, 0, 0, dec, PIXEL_FORMAT_BGRA32,
+		                         (UINT32)w * 4, (UINT32)h, &region))
+		{
+			fprintf(stderr, "rfx: process failed\n");
+			exit(1);
+		}
+		snprintf(dname, sizeof(dname), "rfx_dec_%dx%d_rlgr%d.bin", w, h, mode == RLGR3 ? 3 : 1);
+		write_file(dir, dname, dec, (size_t)w * h * 4);
+		region16_uninit(&region);
+		free(dec);
+		rfx_context_free(dctx);
+	}
 
 	Stream_Free(s, TRUE);
 	rfx_context_free(ctx);
