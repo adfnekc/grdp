@@ -66,3 +66,21 @@ func TestNonceIsEncodedInTSRequest(t *testing.T) {
 		t.Fatalf("pubKeyAuth round tripped as %d bytes", len(back.PubKeyAuth))
 	}
 }
+
+func TestLegacyExpectedServerResponse(t *testing.T) {
+	in := []byte{0x30, 0x82, 0x01, 0x22}
+	got := LegacyExpectedServerResponse(in)
+	want := []byte{0x31, 0x82, 0x01, 0x22}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %x, want %x", got, want)
+		}
+	}
+	if in[0] != 0x30 {
+		t.Fatal("the input must not be modified in place")
+	}
+	// A leading 0xFF must wrap rather than panic or saturate.
+	if got := LegacyExpectedServerResponse([]byte{0xFF}); got[0] != 0x00 {
+		t.Fatalf("expected a wrap to 0x00, got %x", got)
+	}
+}

@@ -73,27 +73,6 @@ type PublicKey struct {
 	E int      `asn1:"explicit,tag:1"` // public exponent
 }
 
-// TlsPubKeySPKI returns the DER encoded SubjectPublicKeyInfo of the server's
-// TLS certificate. CredSSP version 5 and later hash exactly these bytes to
-// bind to the TLS channel, so the raw certificate field is what is needed here
-// rather than a re-encoded key.
-func (s *SocketLayer) TlsPubKeySPKI() ([]byte, error) {
-	if s.tlsConn == nil {
-		return nil, errors.New("TLS conn does not exist")
-	}
-	cs := s.tlsConn.ConnectionState()
-	if len(cs.PeerCertificates) == 0 {
-		return nil, errors.New("TLS peer presented no certificate")
-	}
-	spki := cs.PeerCertificates[0].RawSubjectPublicKeyInfo
-	if len(spki) == 0 {
-		return nil, errors.New("TLS peer certificate has no SubjectPublicKeyInfo")
-	}
-	out := make([]byte, len(spki))
-	copy(out, spki)
-	return out, nil
-}
-
 func (s *SocketLayer) TlsPubKey() ([]byte, error) {
 	if s.tlsConn == nil {
 		return nil, errors.New("TLS conn does not exist")

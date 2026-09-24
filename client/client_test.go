@@ -46,8 +46,8 @@ func (f *fakeCtl) MouseMove(x, y int)            {}
 func (f *fakeCtl) MouseWheel(scroll, x, y int)   {}
 func (f *fakeCtl) MouseUp(button, x, y int)      {}
 func (f *fakeCtl) MouseDown(button, x, y int)    {}
-func (f *fakeCtl) SetClipboardText(string) error  { return nil }
-func (f *fakeCtl) RequestClipboardText() error    { return nil }
+func (f *fakeCtl) SetClipboardText(string) error { return nil }
+func (f *fakeCtl) RequestClipboardText() error   { return nil }
 
 func (f *fakeCtl) Close() {}
 

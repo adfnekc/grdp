@@ -143,9 +143,10 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		return errors.New("nla: server challenge contains no NTLM token")
 	}
 
-	// The binding hash is computed over the certificate's
-	// SubjectPublicKeyInfo, so keep those exact bytes for version 5 and up.
-	spki, err := t.Conn.TlsPubKeySPKI()
+	// MS-CSSP 3.1.5 says the binding hash covers the certificate's
+	// SubjectPublicKey, which is the DER RSAPublicKey inside the
+	// SubjectPublicKeyInfo, not the SubjectPublicKeyInfo wrapper itself.
+	spki, err := t.Conn.TlsPubKey()
 	if err != nil {
 		return fmt.Errorf("nla: get server public key: %w", err)
 	}
@@ -157,13 +158,6 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	version := tsreq.Version
 	if version > nla.VersionNonce {
 		version = nla.VersionNonce
-	}
-	if version < nla.VersionSha256 {
-		legacy, lerr := t.Conn.TlsPubKey()
-		if lerr != nil {
-			return fmt.Errorf("nla: get server public key: %w", lerr)
-		}
-		t.publicKey = legacy
 	}
 	t.credsspVersion = version
 
@@ -206,9 +200,14 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 	// than the client's own bytes, and a version 5 server proves it holds the
 	// TLS channel by producing it.
 	if len(tsreq.PubKeyAuth) > 0 && t.ntlmSec != nil {
+		// Both versions work off the same SubjectPublicKeyInfo. A pre-version-5
+		// server replies with that key with its first byte incremented, not
+		// with the key unchanged.
 		want := t.publicKey
 		if t.credsspVersion >= nla.VersionSha256 {
 			want = nla.ServerToClientHash(t.clientNonce, t.publicKey)
+		} else {
+			want = nla.LegacyExpectedServerResponse(t.publicKey)
 		}
 		got := t.ntlmSec.GssDecrypt(tsreq.PubKeyAuth)
 		if !bytes.Equal(got, want) {

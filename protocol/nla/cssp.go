@@ -42,6 +42,19 @@ const (
 // NonceLen is the length of the client nonce required from version 5 on.
 const NonceLen = 32
 
+// LegacyExpectedServerResponse returns what a pre-version-5 server replies in
+// its pubKeyAuth: the server's SubjectPublicKeyInfo with its first byte
+// incremented by one. It is a proof of freshness rather than a hash, which is
+// why CVE-2018-0886 applies to it.
+func LegacyExpectedServerResponse(serverPubKey []byte) []byte {
+	out := make([]byte, len(serverPubKey))
+	copy(out, serverPubKey)
+	if len(out) > 0 {
+		out[0]++
+	}
+	return out
+}
+
 // ClientToServerHash computes the SHA-256 binding hash the client seals into
 // its pubKeyAuth. serverPubKey is the DER encoded SubjectPublicKeyInfo of the
 // server's TLS certificate, exactly as it appears in the certificate.
