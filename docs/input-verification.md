@@ -30,6 +30,9 @@ so every XI2 event the X server receives is written to a world-readable
 session. This separates "we encoded the event wrongly" from "the server or X
 server dropped it".
 
+A dump of the session's screen is also worth reading rather than skimming: shell
+error messages explain far more than a screenshot of a prompt.
+
 An even more direct check that does not depend on rendering at all is to have
 the typed command produce a side effect:
 
@@ -75,3 +78,35 @@ Fast-path updates are parsed inside a reader bounded by the update's declared
 `size`. This matters: xrdp's 32x32 24bpp pointer update is five bytes longer
 than the documented layout, and without the bound those trailing bytes were
 misparsed as a second, bogus update.
+
+## Clipboard
+
+Both directions are verified against xrdp:
+
+* client to server: text published with `SetClipboardText` is read back
+  verbatim by `xclip -selection clipboard -o` inside the session;
+* server to client: the `CB_FORMAT_DATA_RESPONSE` decodes to exactly the text
+  that was placed on the session's clipboard.
+
+Two real xrdp PDUs captured while doing this are kept as regression fixtures in
+`plugin/cliprdr/cliprdr_protocol_test.go`. They are worth having because xrdp
+under-declares the length of both messages and appends four bytes beyond it.
+
+A note on timing: xrdp can announce a format list slightly before it is able to
+serve the data, and a request made in that window is silently dropped. The
+client therefore defers and retries its request, and `RequestClipboardText`
+exists for callers that want to control the moment themselves.
+
+## Read the terminal, do not guess
+
+An embarrassing amount of time went into a "corrupted clipboard" that turned
+out to be a bug in the test client: `cmd/rdpcli`'s ASCII to scancode map only
+listed unshifted characters, so typing an upper case letter hit a missing entry
+and was silently skipped. Shifted punctuation was in the map, so shifted
+*digits and symbols* worked while shifted *letters* vanished, which made it look
+like the library's shift handling was at fault. It was not, and the X server
+event log proved it by showing the letters had never been sent at all.
+
+The lesson generalises: when an interaction seems broken, dump what the other
+side actually received, and read the terminal, before theorising about the
+protocol. `scripts/dev-rdp.sh probe-session` exists for exactly that.
