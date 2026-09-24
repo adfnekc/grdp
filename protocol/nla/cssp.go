@@ -1,6 +1,7 @@
 package nla
 
 import (
+	"crypto/sha256"
 	"encoding/asn1"
 
 	"github.com/adfnekc/grdp/glog"
@@ -11,11 +12,55 @@ type NegoToken struct {
 }
 
 type TSRequest struct {
-	Version    int         `asn1:"explicit,tag:0"`
-	NegoTokens []NegoToken `asn1:"optional,explicit,tag:1"`
-	AuthInfo   []byte      `asn1:"optional,explicit,tag:2"`
-	PubKeyAuth []byte      `asn1:"optional,explicit,tag:3"`
-	//ErrorCode  int         `asn1:"optional,explicit,tag:4"`
+	Version     int         `asn1:"explicit,tag:0"`
+	NegoTokens  []NegoToken `asn1:"optional,explicit,tag:1"`
+	AuthInfo    []byte      `asn1:"optional,explicit,tag:2"`
+	PubKeyAuth  []byte      `asn1:"optional,explicit,tag:3"`
+	ErrorCode   int         `asn1:"optional,explicit,tag:4"`
+	ClientNonce []byte      `asn1:"optional,explicit,tag:5"`
+}
+
+// CredSSP versions that change how the public key binding is computed.
+const (
+	// VersionLegacy binds the raw TLS public key. It is vulnerable to
+	// CVE-2018-0886 and only kept for old servers.
+	VersionLegacy = 4
+	// VersionSha256 replaces the raw key with a direction specific SHA-256
+	// binding hash. Windows servers speak at least this.
+	VersionSha256 = 5
+	// VersionNonce is what Windows 10 and later offer.
+	VersionNonce = 6
+)
+
+// Binding prefixes from MS-CSSP 3.1.5, including the terminating NUL. They are
+// what makes the client and server hashes different for the same key and nonce.
+const (
+	BindingPrefixClientToServer = "CredSSP Client-To-Server Binding Hash\x00"
+	BindingPrefixServerToClient = "CredSSP Server-To-Client Binding Hash\x00"
+)
+
+// NonceLen is the length of the client nonce required from version 5 on.
+const NonceLen = 32
+
+// ClientToServerHash computes the SHA-256 binding hash the client seals into
+// its pubKeyAuth. serverPubKey is the DER encoded SubjectPublicKeyInfo of the
+// server's TLS certificate, exactly as it appears in the certificate.
+func ClientToServerHash(nonce, serverPubKey []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte(BindingPrefixClientToServer))
+	h.Write(nonce)
+	h.Write(serverPubKey)
+	return h.Sum(nil)
+}
+
+// ServerToClientHash computes the hash the server is expected to return. The
+// client compares it against the unsealed pubKeyAuth from the server.
+func ServerToClientHash(nonce, serverPubKey []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte(BindingPrefixServerToClient))
+	h.Write(nonce)
+	h.Write(serverPubKey)
+	return h.Sum(nil)
 }
 
 type TSCredentials struct {
@@ -45,8 +90,15 @@ type TSSmartCardCreds struct {
 }
 
 func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byte {
+	return EncodeDERTRequestVersion(VersionNonce, msgs, authInfo, pubKeyAuth, nil)
+}
+
+// EncodeDERTRequestVersion builds a TSRequest with an explicit version and, for
+// version 5 and later, the client nonce that the public key binding hash is
+// computed over.
+func EncodeDERTRequestVersion(version int, msgs []Message, authInfo, pubKeyAuth, clientNonce []byte) []byte {
 	req := TSRequest{
-		Version: 2,
+		Version: version,
 	}
 
 	if len(msgs) > 0 {
@@ -64,6 +116,10 @@ func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byt
 
 	if len(pubKeyAuth) > 0 {
 		req.PubKeyAuth = pubKeyAuth
+	}
+
+	if len(clientNonce) > 0 {
+		req.ClientNonce = clientNonce
 	}
 
 	result, err := asn1.Marshal(req)
