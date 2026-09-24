@@ -16,6 +16,12 @@ func TestNewNegotiateMessage(t *testing.T) {
 	struc.Pack(buff, negoMsg)
 
 	result := hex.EncodeToString(buff.Bytes())
+
+	// Flags are 0x60088235: 128 bit, key exchange, extended session security,
+	// always sign, NTLM, seal, sign, request target, unicode. Key exchange is
+	// negotiated, so the client chooses the session key and sends it wrapped
+	// under the exported session key; the sealing keys are derived from that
+	// chosen key while the MIC uses the exported one.
 	expected := "4e544c4d535350000100000035820860000000000000000000000000000000000000000000000000"
 
 	if result != expected {

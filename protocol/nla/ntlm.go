@@ -422,11 +422,19 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponseV2(
 		n.respKeyNT, n.respKeyLM, serverChallenge, clientChallenge, timestamp, serverInfo)
 
-	exchangeKey := SessionBaseKey
-	exportedSessionKey := core.Random(16)
-	EncryptedRandomSessionKey := make([]byte, len(exportedSessionKey))
-	rc, _ := rc4.NewCipher(exchangeKey)
-	rc.XORKeyStream(EncryptedRandomSessionKey, exportedSessionKey)
+	// ExportedSessionKey is derived from the NTLMv2 exchange (SessionBaseKey
+	// for NTLMv2), not chosen. It keys the MIC and wraps the random session
+	// key. Writing a random value here, as this code used to, makes the server
+	// derive a different key and reject every sealed message.
+	exportedSessionKey := SessionBaseKey
+
+	// Key exchange: the client picks the session key and sends it wrapped
+	// under the exported key. The sealing and signing keys are derived from
+	// this one, while the MIC still uses the exported key.
+	sessionKey := core.Random(16)
+	EncryptedRandomSessionKey := make([]byte, len(sessionKey))
+	rc, _ := rc4.NewCipher(exportedSessionKey)
+	rc.XORKeyStream(EncryptedRandomSessionKey, sessionKey)
 
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_UNICODE != 0 {
 		n.enableUnicode = true
@@ -443,22 +451,22 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 
 	md := md5.New()
 	//ClientSigningKey
-	a := concat(exportedSessionKey, clientSigning)
+	a := concat(sessionKey, clientSigning)
 	md.Write(a)
 	ClientSigningKey := md.Sum(nil)
 	//ServerSigningKey
 	md.Reset()
-	a = concat(exportedSessionKey, serverSigning)
+	a = concat(sessionKey, serverSigning)
 	md.Write(a)
 	ServerSigningKey := md.Sum(nil)
 	//ClientSealingKey
 	md.Reset()
-	a = concat(exportedSessionKey, clientSealing)
+	a = concat(sessionKey, clientSealing)
 	md.Write(a)
 	ClientSealingKey := md.Sum(nil)
 	//ServerSealingKey
 	md.Reset()
-	a = concat(exportedSessionKey, serverSealing)
+	a = concat(sessionKey, serverSealing)
 	md.Write(a)
 	ServerSealingKey := md.Sum(nil)
 
@@ -491,21 +499,20 @@ type NTLMv2Security struct {
 }
 
 func (n *NTLMv2Security) GssEncrypt(s []byte) []byte {
+	// Key exchange seals the checksum as well as the message.
 	p := make([]byte, len(s))
 	n.EncryptRC4.XORKeyStream(p, s)
-	b := &bytes.Buffer{}
 
-	//signature
+	b := &bytes.Buffer{}
 	core.WriteUInt32LE(n.SeqNum, b)
 	core.WriteBytes(s, b)
-	s1 := HMAC_MD5(n.SigningKey, b.Bytes())[:8]
 	checksum := make([]byte, 8)
-	n.EncryptRC4.XORKeyStream(checksum, s1)
+	n.EncryptRC4.XORKeyStream(checksum, HMAC_MD5(n.SigningKey, b.Bytes())[:8])
+
 	b.Reset()
-	core.WriteUInt32LE(0x00000001, b)
+	core.WriteUInt32LE(0x00000001, b) // signature version
 	core.WriteBytes(checksum, b)
 	core.WriteUInt32LE(n.SeqNum, b)
-
 	core.WriteBytes(p, b)
 
 	n.SeqNum++
@@ -514,7 +521,7 @@ func (n *NTLMv2Security) GssEncrypt(s []byte) []byte {
 }
 func (n *NTLMv2Security) GssDecrypt(s []byte) []byte {
 	r := bytes.NewReader(s)
-	core.ReadUInt32LE(r) //version
+	core.ReadUInt32LE(r) // signature version
 	checksum, _ := core.ReadBytes(8, r)
 	seqNum, _ := core.ReadUInt32LE(r)
 	data, _ := core.ReadBytes(r.Len(), r)
@@ -528,8 +535,8 @@ func (n *NTLMv2Security) GssDecrypt(s []byte) []byte {
 	b := &bytes.Buffer{}
 	core.WriteUInt32LE(seqNum, b)
 	core.WriteBytes(p, b)
-	verify := HMAC_MD5(n.VerifyKey, b.Bytes())
-	if string(verify) != string(check) {
+	verify := HMAC_MD5(n.VerifyKey, b.Bytes())[:8]
+	if !bytes.Equal(verify, check) {
 		return nil
 	}
 	return p
