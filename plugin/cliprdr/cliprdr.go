@@ -3,9 +3,11 @@ package cliprdr
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf16"
 
 	"github.com/lunixbochs/struc"
@@ -60,6 +62,12 @@ const (
 	ChannelOption = plugin.CHANNEL_OPTION_INITIALIZED | plugin.CHANNEL_OPTION_ENCRYPT_RDP |
 		plugin.CHANNEL_OPTION_COMPRESS_RDP | plugin.CHANNEL_OPTION_SHOW_PROTOCOL
 )
+
+// clipboardRequestDelay is how long to wait before re-asking for announced
+// text. A server can announce a format list slightly before it is able to
+// serve the data, and it silently drops a request made in that window. It is a
+// variable so tests can shorten it.
+var clipboardRequestDelay = 600 * time.Millisecond
 
 type MsgType uint16
 
@@ -343,6 +351,23 @@ func (c *CliprdrClient) OnText(f func(string)) {
 	c.mu.Unlock()
 }
 
+// RequestClipboardText asks the server for the text it last announced. It is
+// only needed when the text was announced before a handler was registered, or
+// when a request timed out; OnText normally triggers the request itself.
+func (c *CliprdrClient) RequestClipboardText() error {
+	c.mu.Lock()
+	ready := c.ready
+	c.mu.Unlock()
+	if !ready {
+		return fmt.Errorf("cliprdr: the channel is not ready")
+	}
+	c.mu.Lock()
+	c.pendingTextRequest = true
+	c.mu.Unlock()
+	c.sendFormatDataRequest(CF_UNICODETEXT)
+	return nil
+}
+
 // SetClipboardText publishes text as the local clipboard contents and tells
 // the server about it. The text is also served to any later data request, so
 // it stays available after the announcement.
@@ -378,13 +403,39 @@ func (c *CliprdrClient) Process(s []byte) {
 	glog.Debug("recv:", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 
-	msgType, _ := core.ReadUint16LE(r)
-	flag, _ := core.ReadUint16LE(r)
-	length, _ := core.ReadUInt32LE(r)
-	glog.Debugf("cliprdr: type=0x%x flag=%d length=%d, all=%d", msgType, flag, length, r.Len())
+	// A channel payload can hold several PDUs, and a server may append
+	// bytes beyond the length it declared, so walk the payload using each
+	// PDU's own length instead of assuming one PDU per message.
+	for r.Len() >= 8 {
+		msgType, _ := core.ReadUint16LE(r)
+		flag, _ := core.ReadUint16LE(r)
+		length, _ := core.ReadUInt32LE(r)
+		if !knownMsgType(msgType) {
+			// Servers can append bytes beyond the length they declared
+			// (xrdp does), and those bytes do not form a PDU. Stop rather
+			// than misread them and swallow a following message.
+			glog.Debugf("cliprdr: stopping at unknown message type 0x%x (%d bytes left)",
+				msgType, r.Len())
+			return
+		}
+		if int(length) > r.Len() {
+			glog.Debugf("cliprdr: type=0x%x declares %d bytes, %d left; dropping",
+				msgType, length, r.Len())
+			return
+		}
+		glog.Debugf("cliprdr: type=0x%x flag=%d length=%d, all=%d", msgType, flag, length, r.Len())
 
-	b, _ := core.ReadBytes(int(length), r)
+		b, _ := core.ReadBytes(int(length), r)
+		c.dispatch(msgType, flag, b)
+	}
+}
 
+// knownMsgType reports whether a message type is part of the protocol.
+func knownMsgType(msgType uint16) bool {
+	return msgType >= CB_MONITOR_READY && msgType <= CB_UNLOCK_CLIPDATA
+}
+
+func (c *CliprdrClient) dispatch(msgType, flag uint16, b []byte) {
 	switch msgType {
 	case CB_CLIP_CAPS:
 		glog.Info("CB_CLIP_CAPS")
@@ -498,8 +549,36 @@ func (c *CliprdrClient) processFormatList(b []byte) {
 		if f.FormatId == CF_UNICODETEXT {
 			c.mu.Lock()
 			c.pendingTextRequest = true
+			auto := c.textHandler != nil
 			c.mu.Unlock()
-			c.sendFormatDataRequest(CF_UNICODETEXT)
+
+			if auto {
+				// Snapshot the delay so the goroutine never reads a
+				// variable that could change under it.
+				delay := clipboardRequestDelay
+				// A server may announce a format before it has actually
+				// acquired the data from whatever owns the selection, and
+				// such a request is simply dropped. Give it a moment and ask
+				// again, which is also what an interactive paste ends up
+				// doing. Callers that want to control the timing exactly can
+				// use RequestClipboardText instead.
+				go func() {
+					time.Sleep(delay)
+					c.mu.Lock()
+					pending := c.pendingTextRequest
+					c.mu.Unlock()
+					if pending {
+						c.sendFormatDataRequest(CF_UNICODETEXT)
+					}
+					time.Sleep(delay)
+					c.mu.Lock()
+					pending = c.pendingTextRequest
+					c.mu.Unlock()
+					if pending {
+						c.sendFormatDataRequest(CF_UNICODETEXT)
+					}
+				}()
+			}
 			break
 		}
 	}

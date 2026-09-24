@@ -3,19 +3,43 @@ package cliprdr
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/adfnekc/grdp/core"
 )
 
-// captureSender records the PDUs the client writes.
-type captureSender struct{ chunks [][]byte }
+// captureSender records the PDUs the client writes. It is safe for concurrent
+// use because the client can write from a deferred goroutine.
+type captureSender struct {
+	mu     sync.Mutex
+	chunks [][]byte
+}
 
 func (c *captureSender) SendToChannel(_ string, s []byte) (int, error) {
 	cp := make([]byte, len(s))
 	copy(cp, s)
+	c.mu.Lock()
 	c.chunks = append(c.chunks, cp)
+	c.mu.Unlock()
 	return len(s), nil
+}
+
+// sent returns a snapshot of the recorded PDUs.
+func (c *captureSender) sent() [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([][]byte, len(c.chunks))
+	copy(out, c.chunks)
+	return out
+}
+
+// reset drops everything recorded so far.
+func (c *captureSender) reset() {
+	c.mu.Lock()
+	c.chunks = nil
+	c.mu.Unlock()
 }
 
 // resetLocalClipboard clears the process wide clipboard contents, which would
@@ -53,7 +77,8 @@ func formatList(ids ...uint32) []byte {
 }
 
 // sentTypes returns the message types the client wrote, in order.
-func sentTypes(chunks [][]byte) []uint16 {
+func sentTypes(s *captureSender) []uint16 {
+	chunks := s.sent()
 	out := make([]uint16, 0, len(chunks))
 	for _, c := range chunks {
 		out = append(out, binary.LittleEndian.Uint16(c))
@@ -68,7 +93,7 @@ func TestSetClipboardTextBeforeReadyOnlyStores(t *testing.T) {
 		t.Fatalf("SetClipboardText: %v", err)
 	}
 	// The channel is not up yet, so nothing may be written.
-	if len(sent.chunks) != 0 {
+	if len(sent.sent()) != 0 {
 		t.Fatalf("wrote %d PDUs before the channel was ready", len(sent.chunks))
 	}
 	if got, ok := localText(); !ok || got != "hello" {
@@ -81,16 +106,16 @@ func TestMonitorReadyAdvertisesLocalText(t *testing.T) {
 	if err := c.SetClipboardText("hello"); err != nil {
 		t.Fatalf("SetClipboardText: %v", err)
 	}
-	sent.chunks = nil
+	sent.reset()
 
 	c.Process(msg(CB_MONITOR_READY, 0, nil))
 
-	types := sentTypes(sent.chunks)
+	types := sentTypes(sent)
 	// Capabilities, then a format list carrying the text formats.
 	if len(types) != 2 || types[0] != CB_CLIP_CAPS || types[1] != CB_FORMAT_LIST {
 		t.Fatalf("got message types %v, want [7 2]", types)
 	}
-	fl := sent.chunks[1]
+	fl := sent.sent()[1]
 	if got := binary.LittleEndian.Uint32(fl[4:]); got != 12 {
 		t.Fatalf("format list length is %d, want 12 (two formats)", got)
 	}
@@ -106,32 +131,38 @@ func TestEmptyClipboardAdvertisesNothing(t *testing.T) {
 	c, sent := newTestClient()
 	c.Process(msg(CB_MONITOR_READY, 0, nil))
 
-	fl := sent.chunks[1]
+	fl := sent.sent()[1]
 	if got := binary.LittleEndian.Uint32(fl[4:]); got != 0 {
 		t.Fatalf("format list length is %d, want 0", got)
 	}
 }
 
-func TestFormatListRequestsUnicodeText(t *testing.T) {
+func TestFormatListWhateverRequestsUnicodeText(t *testing.T) {
 	c, sent := newTestClient()
+	// A format list only ever follows the monitor ready message.
+	c.Process(msg(CB_MONITOR_READY, 0, nil))
+	sent.reset()
 
 	// A list like a real server sends: unicode text, locale, plain text, oem.
 	c.Process(msg(CB_FORMAT_LIST, 0, formatList(CF_UNICODETEXT, 16, CF_TEXT, 7)))
 
-	types := sentTypes(sent.chunks)
-	if len(types) != 2 {
-		t.Fatalf("got message types %v, want a response and a request", types)
+	types := sentTypes(sent)
+	if len(types) != 1 || types[0] != CB_FORMAT_LIST_RESPONSE {
+		t.Fatalf("got message types %v, want just a format list response", types)
 	}
-	if types[0] != CB_FORMAT_LIST_RESPONSE {
-		t.Fatalf("first message is 0x%04x, want 0x%04x", types[0], CB_FORMAT_LIST_RESPONSE)
-	}
-	if got := binary.LittleEndian.Uint16(sent.chunks[0][2:]); got != CB_RESPONSE_OK {
+	if got := binary.LittleEndian.Uint16(sent.sent()[0][2:]); got != CB_RESPONSE_OK {
 		t.Fatalf("response flags are 0x%04x, want OK", got)
 	}
-	if types[1] != CB_FORMAT_DATA_REQUEST {
-		t.Fatalf("second message is 0x%04x, want 0x%04x", types[1], CB_FORMAT_DATA_REQUEST)
+
+	// With no handler registered nothing asks for the data, so an explicit
+	// request is needed.
+	if err := c.RequestClipboardText(); err != nil {
+		t.Fatalf("RequestClipboardText: %v", err)
 	}
-	req := sent.chunks[1]
+	if got := sentTypes(sent); len(got) != 2 || got[1] != CB_FORMAT_DATA_REQUEST {
+		t.Fatalf("got message types %v, want a data request", got)
+	}
+	req := sent.sent()[1]
 	if got := binary.LittleEndian.Uint32(req[4:]); got != 4 {
 		t.Fatalf("request length is %d, want 4", got)
 	}
@@ -140,12 +171,88 @@ func TestFormatListRequestsUnicodeText(t *testing.T) {
 	}
 }
 
+// TestFormatListRequestsAutomatically covers the convenience path: a
+// registered handler makes the client ask for announced text on its own,
+// after a delay because a server may not be able to serve it immediately.
+func TestFormatListRequestsAutomatically(t *testing.T) {
+	old := clipboardRequestDelay
+	clipboardRequestDelay = time.Millisecond
+	defer func() { clipboardRequestDelay = old }()
+
+	c, sent := newTestClient()
+	c.OnText(func(string) {})
+
+	c.Process(msg(CB_FORMAT_LIST, 0, formatList(CF_UNICODETEXT)))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, t2 := range sentTypes(sent) {
+			if t2 == CB_FORMAT_DATA_REQUEST {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no data request was sent; got %v", sentTypes(sent))
+}
+
+func TestRequestClipboardTextBeforeReadyFails(t *testing.T) {
+	c, sent := newTestClient()
+	if err := c.RequestClipboardText(); err == nil {
+		t.Fatal("expected an error before the channel is ready")
+	}
+	if len(sent.sent()) != 0 {
+		t.Fatal("nothing should have been written")
+	}
+}
+
+// TestProcessWalksMultiplePdus covers a server batching several PDUs into one
+// channel payload.
+func TestProcessWalksMultiplePdus(t *testing.T) {
+	c, sent := newTestClient()
+
+	payload := msg(CB_MONITOR_READY, 0, nil)
+	payload = append(payload, msg(CB_FORMAT_LIST, 0, formatList(CF_UNICODETEXT))...)
+	payload = append(payload, msg(CB_FORMAT_LIST, 0, formatList(CF_TEXT))...)
+
+	c.Process(payload)
+
+	responses := 0
+	for _, t2 := range sentTypes(sent) {
+		if t2 == CB_FORMAT_LIST_RESPONSE {
+			responses++
+		}
+	}
+	if responses != 2 {
+		t.Fatalf("got %d format list responses, want 2; types %v", responses, sentTypes(sent))
+	}
+}
+
+// TestProcessStopsAtTrailingGarbage covers what xrdp actually sends: a format
+// list whose declared length is shorter than the bytes that follow it, with a
+// zero format id terminator in between. Parsing must stop there instead of
+// treating the leftovers as a message.
+func TestProcessStopsAtTrailingGarbage(t *testing.T) {
+	c, sent := newTestClient()
+
+	// A real format list, then the four extra bytes xrdp appends.
+	fl := msg(CB_FORMAT_LIST, 0, formatList(CF_UNICODETEXT, 16, CF_TEXT, 7))
+	payload := append(append([]byte{}, fl...), 0, 0, 0, 0)
+
+	c.Process(payload)
+
+	types := sentTypes(sent)
+	if len(types) != 1 || types[0] != CB_FORMAT_LIST_RESPONSE {
+		t.Fatalf("got message types %v, want exactly one format list response", types)
+	}
+}
+
 func TestFormatListWithoutTextDoesNotRequest(t *testing.T) {
 	c, sent := newTestClient()
 	// Only a non-text format is offered.
 	c.Process(msg(CB_FORMAT_LIST, 0, formatList(CF_HDROP)))
 
-	if got := sentTypes(sent.chunks); len(got) != 1 || got[0] != CB_FORMAT_LIST_RESPONSE {
+	if got := sentTypes(sent); len(got) != 1 || got[0] != CB_FORMAT_LIST_RESPONSE {
 		t.Fatalf("got message types %v, want just a format list response", got)
 	}
 }
@@ -201,17 +308,17 @@ func TestFormatDataRequestServesLocalText(t *testing.T) {
 	if err := c.SetClipboardText("local-text"); err != nil {
 		t.Fatalf("SetClipboardText: %v", err)
 	}
-	sent.chunks = nil
+	sent.reset()
 
 	// The server asks for unicode text.
 	req := make([]byte, 4)
 	binary.LittleEndian.PutUint32(req, CF_UNICODETEXT)
 	c.Process(msg(CB_FORMAT_DATA_REQUEST, 0, req))
 
-	if len(sent.chunks) != 1 {
+	if len(sent.sent()) != 1 {
 		t.Fatalf("got %d PDUs, want 1 data response", len(sent.chunks))
 	}
-	resp := sent.chunks[0]
+	resp := sent.sent()[0]
 	if got := binary.LittleEndian.Uint16(resp); got != CB_FORMAT_DATA_RESPONSE {
 		t.Fatalf("message type is 0x%04x", got)
 	}
@@ -226,18 +333,18 @@ func TestFormatDataRequestForNonTextServesNothing(t *testing.T) {
 	if err := c.SetClipboardText("local-text"); err != nil {
 		t.Fatalf("SetClipboardText: %v", err)
 	}
-	sent.chunks = nil
+	sent.reset()
 
 	req := make([]byte, 4)
 	binary.LittleEndian.PutUint32(req, CF_HDROP)
 	c.Process(msg(CB_FORMAT_DATA_REQUEST, 0, req))
 
-	if len(sent.chunks) != 1 {
+	if len(sent.sent()) != 1 {
 		t.Fatalf("got %d PDUs, want 1", len(sent.chunks))
 	}
 	// Only the NUL terminator, so the server gets an empty string rather
 	// than the wrong format's bytes.
-	if got := sent.chunks[0][8:]; !bytes.Equal(got, []byte{0, 0}) {
+	if got := sent.sent()[0][8:]; !bytes.Equal(got, []byte{0, 0}) {
 		t.Fatalf("payload is %x, want just a terminator", got)
 	}
 }
@@ -245,13 +352,13 @@ func TestFormatDataRequestForNonTextServesNothing(t *testing.T) {
 func TestSetClipboardTextAfterReadyAnnouncesImmediately(t *testing.T) {
 	c, sent := newTestClient()
 	c.Process(msg(CB_MONITOR_READY, 0, nil))
-	sent.chunks = nil
+	sent.reset()
 
 	if err := c.SetClipboardText("later"); err != nil {
 		t.Fatalf("SetClipboardText: %v", err)
 	}
 
-	if got := sentTypes(sent.chunks); len(got) != 1 || got[0] != CB_FORMAT_LIST {
+	if got := sentTypes(sent); len(got) != 1 || got[0] != CB_FORMAT_LIST {
 		t.Fatalf("got message types %v, want a format list", got)
 	}
 }
