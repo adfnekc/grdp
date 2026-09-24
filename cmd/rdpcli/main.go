@@ -192,6 +192,8 @@ func main() {
 	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
 	pointerLog := flag.Bool("pointer", false, "log server-side pointer updates (position and shape)")
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
+	clip := flag.Bool("clipboard", false, "enable the clipboard channel and log text received")
+	setClip := flag.String("set-clipboard", "", "publish this text on the shared clipboard once ready")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
 	flag.Parse()
 
@@ -202,6 +204,7 @@ func main() {
 	s.LogLevel = glog.LEVEL(*logLevel)
 	s.NoFastPathInput = *slowInput
 	s.EnableEGFX = *egfx
+	s.EnableClipboard = *clip
 
 	c := client.NewClient(*host, *user, *pass, client.TC_RDP, s)
 
@@ -241,6 +244,14 @@ func main() {
 		if len(actions) > 0 && !inputPlayed {
 			inputPlayed = true
 			go func() {
+				if *setClip != "" {
+					if err := c.SetClipboardText(*setClip); err != nil {
+						fmt.Fprintln(os.Stderr, "set clipboard:", err)
+					} else {
+						fmt.Printf("published %d bytes to the shared clipboard\n", len(*setClip))
+					}
+					time.Sleep(800 * time.Millisecond)
+				}
 				for _, a := range actions {
 					if a.isType {
 						typeString(c, a.value)
@@ -278,6 +289,10 @@ func main() {
 			fmt.Printf("pointer msg=0x%02x pos=%d,%d cache=%d size=%dx%d data=%d\n",
 				p.MessageType, p.XPos, p.YPos, p.CacheIndex, p.Width, p.Height, len(p.Data))
 		}
+	})
+
+	c.OnClipboardText(func(text string) {
+		fmt.Printf("clipboard text (%d bytes): %q\n", len(text), text)
 	})
 
 	c.OnBitmap(func(bs []client.Bitmap) {

@@ -40,13 +40,15 @@ func (f *fakeCtl) Login(host, user, passwd string, w, h int) error {
 	}
 	return f.loginErr
 }
-func (f *fakeCtl) KeyUp(sc int, name string)   {}
-func (f *fakeCtl) KeyDown(sc int, name string) {}
-func (f *fakeCtl) MouseMove(x, y int)          {}
-func (f *fakeCtl) MouseWheel(scroll, x, y int) {}
-func (f *fakeCtl) MouseUp(button, x, y int)    {}
-func (f *fakeCtl) MouseDown(button, x, y int)  {}
-func (f *fakeCtl) Close()                      {}
+func (f *fakeCtl) KeyUp(sc int, name string)     {}
+func (f *fakeCtl) KeyDown(sc int, name string)   {}
+func (f *fakeCtl) MouseMove(x, y int)            {}
+func (f *fakeCtl) MouseWheel(scroll, x, y int)   {}
+func (f *fakeCtl) MouseUp(button, x, y int)      {}
+func (f *fakeCtl) MouseDown(button, x, y int)    {}
+func (f *fakeCtl) SetClipboardText(string) error { return nil }
+
+func (f *fakeCtl) Close() {}
 
 func newFakeClient(f *fakeCtl) *Client {
 	c := NewClient("host:3389", "u", "p", TC_RDP, nil)

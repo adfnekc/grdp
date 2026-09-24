@@ -40,6 +40,7 @@ type Control interface {
 	MouseUp(button int, x, y int)
 	MouseDown(button int, x, y int)
 	On(event string, msg interface{})
+	SetClipboardText(text string) error
 	Close()
 }
 
@@ -212,6 +213,21 @@ func (c *Client) OnSurfaceReset(f func(width, height int)) {
 		f(v.Width, v.Height)
 	})
 }
+
+// OnClipboardText reports text the server has put on the clipboard. It only
+// fires when the clipboard channel is enabled.
+func (c *Client) OnClipboardText(f func(text string)) {
+	c.ctl.On("clipboard-text", func(data interface{}) {
+		f(data.(string))
+	})
+}
+
+// SetClipboardText publishes text on the shared clipboard, so a paste on the
+// server pastes it. It only does anything when the clipboard channel is
+// enabled.
+func (c *Client) SetClipboardText(text string) error {
+	return c.ctl.SetClipboardText(text)
+}
 func (c *Client) OnSuccess(f func()) {
 	c.ctl.On("success", f)
 }
@@ -314,6 +330,11 @@ type Setting struct {
 	// This is off by default: it has not been exercised against a server that
 	// speaks EGFX, and enabling it changes how the server draws the session.
 	EnableEGFX bool
+
+	// EnableClipboard opens the clipboard channel so text can be exchanged
+	// with the server. Use Client.OnClipboardText and Client.SetClipboardText
+	// to bridge it to the local clipboard.
+	EnableClipboard bool
 }
 
 func NewSetting() *Setting {

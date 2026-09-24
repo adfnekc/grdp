@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"strings"
+	"sync"
 	"unicode/utf16"
 
 	"github.com/lunixbochs/struc"
@@ -307,6 +308,10 @@ func (resp *CliprdrFileContentsResponse) Unpack(b []byte) {
 
 type CliprdrClient struct {
 	w                     core.ChannelSender
+	mu                    sync.Mutex
+	ready                 bool
+	textHandler           func(string)
+	pendingTextRequest    bool
 	useLongFormatNames    bool
 	streamFileClipEnabled bool
 	fileClipNoFilePaths   bool
@@ -330,6 +335,33 @@ func NewCliprdrClient() *CliprdrClient {
 	return c
 }
 
+// OnText registers the handler for text the server offers. It is called on
+// the channel's goroutine, so it should not block.
+func (c *CliprdrClient) OnText(f func(string)) {
+	c.mu.Lock()
+	c.textHandler = f
+	c.mu.Unlock()
+}
+
+// SetClipboardText publishes text as the local clipboard contents and tells
+// the server about it. The text is also served to any later data request, so
+// it stays available after the announcement.
+func (c *CliprdrClient) SetClipboardText(s string) error {
+	setLocalText(s)
+
+	c.mu.Lock()
+	ready := c.ready
+	c.mu.Unlock()
+	if !ready {
+		// The channel will advertise the current clipboard when the server
+		// sends its monitor ready.
+		return nil
+	}
+	c.sendFormatListPDU()
+	return nil
+}
+
+// Send(s []byte) writes a cliprdr PDU on the static channel.
 func (c *CliprdrClient) Send(s []byte) (int, error) {
 	glog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
 	name, _ := c.GetType()
@@ -420,6 +452,10 @@ func (c *CliprdrClient) processClipCaps(b []byte) {
 }
 
 func (c *CliprdrClient) processMonitorReady(b []byte) {
+	c.mu.Lock()
+	c.ready = true
+	c.mu.Unlock()
+
 	//Client Clipboard Capabilities PDU
 	c.sendClientCapabilitiesPDU()
 
@@ -455,13 +491,25 @@ func (c *CliprdrClient) processFormatList(b []byte) {
 	}
 
 	c.sendFormatListResponse(CB_RESPONSE_OK)
+
+	// If the server offers plain text, ask for it. Only one request is kept
+	// in flight; cliprdr has no request ids to correlate responses with.
+	for _, f := range fl.Formats {
+		if f.FormatId == CF_UNICODETEXT {
+			c.mu.Lock()
+			c.pendingTextRequest = true
+			c.mu.Unlock()
+			c.sendFormatDataRequest(CF_UNICODETEXT)
+			break
+		}
+	}
 }
 func (c *CliprdrClient) processFormatListResponse(flag uint16, b []byte) {
 	if flag != CB_RESPONSE_OK {
 		glog.Error("Format List Response Failed")
 		return
 	}
-	glog.Error("Format List Response OK")
+	glog.Debug("Format List Response OK")
 }
 func getFilesDescriptor(name string) (FileDescriptor, error) {
 	var fd FileDescriptor
@@ -510,8 +558,32 @@ func (c *CliprdrClient) processFormatDataRequest(b []byte) {
 func (c *CliprdrClient) processFormatDataResponse(flag uint16, b []byte) {
 	if flag != CB_RESPONSE_OK {
 		glog.Error("Format Data Response Failed")
+		c.mu.Lock()
+		c.pendingTextRequest = false
+		c.mu.Unlock()
+		return
 	}
-	c.reply <- b
+
+	c.mu.Lock()
+	wanted := c.pendingTextRequest
+	handler := c.textHandler
+	c.pendingTextRequest = false
+	c.mu.Unlock()
+
+	if wanted && handler != nil {
+		// Text arrives as UTF-16LE, usually NUL terminated. Decoding the
+		// terminator would put a stray NUL in the string.
+		text := core.UnicodeDecode(b)
+		text = strings.TrimRight(text, "\x00")
+		handler(text)
+	}
+
+	select {
+	case c.reply <- b:
+	default:
+		// The legacy reply channel is buffered; drop rather than block the
+		// channel goroutine when nobody is reading it.
+	}
 }
 
 func (c *CliprdrClient) processFileContentsRequest(b []byte) {

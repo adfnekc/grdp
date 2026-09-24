@@ -8,6 +8,7 @@ import (
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/plugin"
+	"github.com/adfnekc/grdp/plugin/cliprdr"
 	"github.com/adfnekc/grdp/plugin/drdynvc"
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/nla"
@@ -31,6 +32,9 @@ type RdpClient struct {
 	// Set when EGFX is enabled; nil otherwise.
 	dvc *drdynvc.DvcClient
 	gfx *rdpgfx.GfxClient
+
+	// Set when the clipboard channel is enabled; nil otherwise.
+	clip *cliprdr.CliprdrClient
 }
 
 type pendingEvent struct {
@@ -107,6 +111,18 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 		// and graphics protocol.
 		c.mcs.SetClientDynvcProtocol()
 	}
+
+	if c.setting != nil && c.setting.EnableClipboard {
+		clip := cliprdr.NewCliprdrClient()
+		clip.OnText(func(text string) {
+			if c.pdu != nil {
+				c.pdu.Emit("clipboard-text", text)
+			}
+		})
+		c.channels.Register(clip)
+		c.clip = clip
+		c.mcs.SetClientCliprdr()
+	}
 	// Replay handlers that were registered before the layers existed.
 	for _, p := range c.pending {
 		c.dispatch(p.event, p.f)
@@ -135,6 +151,15 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	}
 	return nil
 }
+
+// SetClipboardText publishes text on the shared clipboard.
+func (c *RdpClient) SetClipboardText(text string) error {
+	if c.clip == nil {
+		return fmt.Errorf("client: the clipboard channel is not enabled")
+	}
+	return c.clip.SetClipboardText(text)
+}
+
 func (c *RdpClient) On(event string, f interface{}) {
 	if c == nil {
 		return

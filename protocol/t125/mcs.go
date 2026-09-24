@@ -8,9 +8,9 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/adfnekc/grdp/plugin/rail"
-
+	"github.com/adfnekc/grdp/plugin/cliprdr"
 	"github.com/adfnekc/grdp/plugin/drdynvc"
+	"github.com/adfnekc/grdp/plugin/rail"
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
@@ -291,7 +291,7 @@ func (c *MCSClient) SetClientRemoteProgram() {
 }
 
 func (c *MCSClient) SetClientCliprdr() {
-	// c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
+	c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
 }
 
 func (c *MCSClient) connect(selectedProtocol uint32) {

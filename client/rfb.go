@@ -32,6 +32,10 @@ func (c *VncClient) Login(host, user, pwd string, width, height int) error {
 
 	return nil
 }
+
+// SetClipboardText is not implemented for RFB.
+func (c *VncClient) SetClipboardText(string) error { return nil }
+
 func (c *VncClient) On(event string, f interface{}) {
 	c.vnc.On(event, f)
 }
