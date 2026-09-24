@@ -210,7 +210,7 @@ type Channels struct {
 	emission.Emitter
 	channels      map[string]ChannelClient
 	transport     core.Transport
-	buff          *bytes.Buffer
+	buffs         map[string]*bytes.Buffer
 	channelSender core.ChannelSender
 }
 
@@ -219,7 +219,7 @@ func NewChannels(t core.Transport) *Channels {
 		Emitter:   *emission.NewEmitter(),
 		channels:  make(map[string]ChannelClient, 20),
 		transport: t,
-		buff:      &bytes.Buffer{},
+		buffs:     make(map[string]*bytes.Buffer),
 	}
 	t.On("channel", c.process)
 	return c
@@ -286,16 +286,25 @@ func (c *Channels) process(channel string, s []byte) {
 	ln, _ := core.ReadUInt32LE(r)
 	flags, _ := core.ReadUInt32LE(r)
 	glog.Debugf("channel:%s length: %d, flags: %d", channel, ln, flags)
+
+	// Each channel needs its own reassembly buffer: a chunked message on one
+	// channel must not be corrupted by a message arriving on another.
+	buff, ok := c.buffs[channel]
+	if !ok {
+		buff = &bytes.Buffer{}
+		c.buffs[channel] = buff
+	}
+
 	if flags&CHANNEL_FLAG_FIRST == 0 || flags&CHANNEL_FLAG_LAST == 0 {
 		if flags&CHANNEL_FLAG_FIRST != 0 {
-			c.buff.Reset()
+			buff.Reset()
 		}
 		b, _ := core.ReadBytes(r.Len(), r)
-		c.buff.Write(b)
+		buff.Write(b)
 		if flags&CHANNEL_FLAG_LAST == 0 {
 			return
 		}
-		s = c.buff.Bytes()
+		s = buff.Bytes()
 	} else {
 		s, _ = core.ReadBytes(r.Len(), r)
 	}

@@ -8,6 +8,8 @@ import (
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/plugin"
+	"github.com/adfnekc/grdp/plugin/drdynvc"
+	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/nla"
 	"github.com/adfnekc/grdp/protocol/pdu"
 	"github.com/adfnekc/grdp/protocol/sec"
@@ -25,6 +27,10 @@ type RdpClient struct {
 	channels *plugin.Channels
 	setting  *Setting
 	pending  []pendingEvent
+
+	// Set when EGFX is enabled; nil otherwise.
+	dvc *drdynvc.DvcClient
+	gfx *rdpgfx.GfxClient
 }
 
 type pendingEvent struct {
@@ -83,9 +89,23 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	c.sec = sec.NewClient(c.mcs)
 	c.pdu = pdu.NewClient(c.sec)
 	c.channels = plugin.NewChannels(c.sec)
+
+	// EGFX is the modern drawing path. It only makes sense once the dynamic
+	// virtual channel layer and the graphics channel are both registered, so
+	// it is opt in: the server may start sending surface commands instead of
+	// bitmap updates as soon as the channel is created.
+	if c.setting != nil && c.setting.EnableEGFX {
+		gfx := rdpgfx.NewGfxClient()
+		dvc := drdynvc.NewDvcClient()
+		gfx.SetSender(dvc.SendData)
+		dvc.Register(rdpgfx.DVCChannelName, gfx)
+		c.channels.Register(dvc)
+		c.gfx = gfx
+		c.dvc = dvc
+	}
 	// Replay handlers that were registered before the layers existed.
 	for _, p := range c.pending {
-		c.pdu.On(p.event, p.f)
+		c.dispatch(p.event, p.f)
 	}
 	c.pending = nil
 
@@ -116,8 +136,20 @@ func (c *RdpClient) On(event string, f interface{}) {
 		return
 	}
 	if c.pdu == nil {
-		// Registered before Login: buffer and replay once the PDU layer exists.
+		// Registered before Login: buffer and replay once the layers exist.
 		c.pending = append(c.pending, pendingEvent{event, f})
+		return
+	}
+	c.dispatch(event, f)
+}
+
+// dispatch routes an event to the layer that produces it. EGFX events come
+// from the graphics channel, everything else from the PDU layer.
+func (c *RdpClient) dispatch(event string, f interface{}) {
+	if strings.HasPrefix(event, "gfx-") {
+		if c.gfx != nil {
+			c.gfx.On(event, f)
+		}
 		return
 	}
 	c.pdu.On(event, f)

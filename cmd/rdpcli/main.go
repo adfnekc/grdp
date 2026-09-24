@@ -191,6 +191,7 @@ func main() {
 	postInput := flag.Duration("post-input", 3*time.Second, "wait after input playback before dumping")
 	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
 	pointerLog := flag.Bool("pointer", false, "log server-side pointer updates (position and shape)")
+	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
 	flag.Parse()
 
@@ -200,6 +201,7 @@ func main() {
 	s.Protocol = *proto
 	s.LogLevel = glog.LEVEL(*logLevel)
 	s.NoFastPathInput = *slowInput
+	s.EnableEGFX = *egfx
 
 	c := client.NewClient(*host, *user, *pass, client.TC_RDP, s)
 

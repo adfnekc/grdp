@@ -11,6 +11,7 @@ import (
 
 	"github.com/adfnekc/grdp/codec"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
 	"github.com/adfnekc/grdp/protocol/rfb"
 )
@@ -192,6 +193,25 @@ func (c *Client) OnPointer(f func(p *pdu.PointerDataPDU)) {
 		f(data.(*pdu.PointerDataPDU))
 	})
 }
+
+// OnSurfaceFrame reports each completed EGFX frame and the surfaces it
+// touched. The pixel data lives on the surfaces, so callers that need it
+// should copy what they need before returning.
+func (c *Client) OnSurfaceFrame(f func(frameID uint32, surfaces []*rdpgfx.Surface)) {
+	c.ctl.On("gfx-frame", func(data interface{}) {
+		v := data.(rdpgfx.Frame)
+		f(v.ID, v.Surfaces)
+	})
+}
+
+// OnSurfaceReset reports the desktop size an EGFX server will composite into,
+// which also means any previously known surfaces are gone.
+func (c *Client) OnSurfaceReset(f func(width, height int)) {
+	c.ctl.On("gfx-reset", func(data interface{}) {
+		v := data.(rdpgfx.Reset)
+		f(v.Width, v.Height)
+	})
+}
 func (c *Client) OnSuccess(f func()) {
 	c.ctl.On("success", f)
 }
@@ -286,6 +306,14 @@ type Setting struct {
 	// NoFastPathInput forces keyboard/mouse input over the slow path even
 	// when the server advertised fast-path input. Useful for debugging.
 	NoFastPathInput bool
+
+	// EnableEGFX opens the dynamic virtual channel needed for the RDP
+	// Graphics Pipeline Extension, so the server can composite surfaces and
+	// send them as compressed bitmaps instead of bitmap updates.
+	//
+	// This is off by default: it has not been exercised against a server that
+	// speaks EGFX, and enabling it changes how the server draws the session.
+	EnableEGFX bool
 }
 
 func NewSetting() *Setting {
