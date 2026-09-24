@@ -751,16 +751,23 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 	var req lic.ServerLicenseRequest
 	struc.Unpack(bytes.NewReader(data), &req)
 
+	// Prefer the certificate carried by the license request itself. The
+	// certificate from the Standard Security Data Exchange is the fallback,
+	// not the other way round: over NLA or TLS it is either absent or in a
+	// form this code does not parse, and picking it produces a nonsense RSA
+	// key (Go rejects it as "public modulus is even").
 	var sc gcc.ServerCertificate
-	if c.ServerSecurityData().ServerCertificate.DwVersion != 0 {
-		sc = c.ServerSecurityData().ServerCertificate
-	} else {
-		rd := bytes.NewReader(req.ServerCertificate.BlobData)
-		err := sc.Unpack(rd)
-		if err != nil {
+	switch {
+	case len(req.ServerCertificate.BlobData) > 0:
+		if err := sc.Unpack(bytes.NewReader(req.ServerCertificate.BlobData)); err != nil {
 			glog.Error("read serverCertificate err:", err)
 			return
 		}
+	case c.ServerSecurityData().ServerCertificate.DwVersion != 0:
+		sc = c.ServerSecurityData().ServerCertificate
+	default:
+		glog.Error("no server certificate in the license request or the security exchange")
+		return
 	}
 
 	serverRandom := req.ServerRandom
@@ -779,10 +786,22 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 
 	buff := &bytes.Buffer{}
 
-	serverPubKey, _ := sc.CertData.GetPublicKey()
+	if sc.CertData == nil {
+		glog.Error("server certificate has no key data")
+		return
+	}
+	serverPubKey, err := sc.CertData.GetPublicKey()
+	if err != nil || serverPubKey == nil {
+		glog.Error("server public key err:", err)
+		return
+	}
+
 	ret, err := rsa.EncryptPKCS1v15(rand.Reader, serverPubKey, core.Reverse(preMasterSecret))
 	if err != nil {
-		glog.Error("err:", err)
+		// A malformed license request is not worth sending, and the caller
+		// has nothing to fall back on, so stop here.
+		glog.Error("encrypt premaster secret err:", err)
+		return
 	}
 
 	buff.Write(core.Reverse(ret))
