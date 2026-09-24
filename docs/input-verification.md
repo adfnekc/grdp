@@ -18,7 +18,7 @@ unrelated causes, none of which were in the protocol encoding:
 
 ## Deterministic method
 
-`scripts/probe-session.sh` starts a session whose `.xsession` runs
+`scripts/dev-rdp.sh probe-session` starts a session whose `.xsession` runs
 
 ```sh
 stdbuf -oL xinput test-xi2 --root >/tmp/xi.log 2>&1 &
