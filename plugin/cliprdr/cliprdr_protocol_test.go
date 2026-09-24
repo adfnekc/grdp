@@ -3,6 +3,7 @@ package cliprdr
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"sync"
 	"testing"
 	"time"
@@ -360,5 +361,59 @@ func TestSetClipboardTextAfterReadyAnnouncesImmediately(t *testing.T) {
 
 	if got := sentTypes(sent); len(got) != 1 || got[0] != CB_FORMAT_LIST {
 		t.Fatalf("got message types %v, want a format list", got)
+	}
+}
+
+// The next two fixtures are verbatim captures from xrdp. They are worth
+// keeping because xrdp under-declares the length of both of them and appends
+// four bytes beyond it, which a parser that trusts the declared length will
+// quietly mis-handle.
+
+// xrdp announcing text, unicode, locale and oem formats.
+const xrdpFormatListHex = "02000000180000000d000000000010000000000001000000000007000000000000000000"
+
+// xrdp answering a request for unicode text with "ABCDEFGHIJ".
+const xrdpDataResponseHex = "05000100160000004100420043004400450046004700480049004a00000000000000"
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("bad fixture: %v", err)
+	}
+	return b
+}
+
+func TestRealFormatListFromXrdp(t *testing.T) {
+	c, sent := newTestClient()
+	c.Process(msg(CB_MONITOR_READY, 0, nil))
+	sent.reset()
+
+	c.Process(mustHex(t, xrdpFormatListHex))
+
+	// The four formats must be decoded despite the declared length being four
+	// bytes short of what actually follows.
+	types := sentTypes(sent)
+	if len(types) != 1 || types[0] != CB_FORMAT_LIST_RESPONSE {
+		t.Fatalf("got message types %v, want one format list response", types)
+	}
+	if got := binary.LittleEndian.Uint16(sent.sent()[0][2:]); got != CB_RESPONSE_OK {
+		t.Fatalf("response flags are 0x%04x", got)
+	}
+}
+
+func TestRealDataResponseFromXrdp(t *testing.T) {
+	c, _ := newTestClient()
+	c.Process(msg(CB_MONITOR_READY, 0, nil))
+
+	var got string
+	c.OnText(func(s string) { got = s })
+
+	// The announcement, then the answer, exactly as xrdp sent them.
+	c.Process(mustHex(t, xrdpFormatListHex))
+	c.Process(mustHex(t, xrdpDataResponseHex))
+
+	if got != "ABCDEFGHIJ" {
+		t.Fatalf("got %q, want %q", got, "ABCDEFGHIJ")
 	}
 }

@@ -84,11 +84,20 @@ func typeString(c *client.Client, s string) {
 			time.Sleep(40 * time.Millisecond)
 			continue
 		}
-		m, ok := asciiToScancode[ch]
+		// The map only lists unshifted characters, so upper case letters
+		// are looked up as their lower case form with shift added. Missing
+		// this silently drops every upper case letter.
+		key := ch
+		extraShift := 0
+		if ch >= 'A' && ch <= 'Z' {
+			key = ch + ('a' - 'A')
+			extraShift = 1
+		}
+		m, ok := asciiToScancode[key]
 		if !ok {
 			continue
 		}
-		sc, shift := m[0], m[1]
+		sc, shift := m[0], m[1]|extraShift
 		if shift != 0 {
 			c.KeyDown(scShiftLeft, "")
 			time.Sleep(15 * time.Millisecond)

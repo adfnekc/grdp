@@ -83,8 +83,17 @@ up() {
     echo "starting xrdp..."
     as_root "$XRDP_BIN"
   fi
-  sleep 1
+  # xrdp needs a moment to bind the port; polling beats a fixed sleep that is
+  # either too short (reports "not listening") or too slow.
+  for _ in $(seq 1 20); do
+    port_listening && break
+    sleep 0.25
+  done
   status
+}
+
+port_listening() {
+  (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":$PORT "
 }
 
 down() {
@@ -106,7 +115,7 @@ status() {
       echo "$(basename "$b"): stopped"
     fi
   done
-  if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":$PORT "; then
+  if port_listening; then
     echo "port $PORT: listening"
   else
     echo "port $PORT: not listening"
