@@ -160,6 +160,14 @@ func (c *RdpClient) SetClipboardText(text string) error {
 	return c.clip.SetClipboardText(text)
 }
 
+// RequestClipboardText asks the server for its clipboard text.
+func (c *RdpClient) RequestClipboardText() error {
+	if c.clip == nil {
+		return fmt.Errorf("client: the clipboard channel is not enabled")
+	}
+	return c.clip.RequestClipboardText()
+}
+
 func (c *RdpClient) On(event string, f interface{}) {
 	if c == nil {
 		return

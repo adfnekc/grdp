@@ -12,26 +12,40 @@
 #   scripts/dev-rdp.sh probe    # check TCP 3389 + RDP negotiation bytes
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 XRDP_BIN=${XRDP_BIN:-/usr/sbin/xrdp}
 SESMAN_BIN=${SESMAN_BIN:-/usr/sbin/xrdp-sesman}
 RUN_DIR=${RUN_DIR:-/var/run/xrdp}
 PORT=${PORT:-3389}
 
+# have_dev_sudo reports whether the one time setup has been run. It asks sudo
+# to list what is permitted rather than running anything, because sudo itself
+# is not the thing we were granted: individual commands are, so `sudo -n true`
+# would fail even when everything needed is allowed.
+have_dev_sudo() {
+  sudo -n -l 2>/dev/null | grep -qF "$SESMAN_BIN"
+}
+
 need_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    if ! sudo -n true 2>/dev/null; then
-      echo "error: this action needs root and sudo requires a password." >&2
-      echo "       run: sudo $0 $1" >&2
-      exit 1
-    fi
+  [ "$(id -u)" -eq 0 ] && return 0
+  if have_dev_sudo; then
+    return 0
   fi
+  echo "error: the action '$1' needs root, and this shell has no passwordless access." >&2
+  echo >&2
+  echo "       Run the one time setup, and it will stop asking you:" >&2
+  echo "         sudo $SCRIPT_DIR/dev-rdp-setup.sh" >&2
+  echo >&2
+  echo "       (or, for a single run:  sudo $0 $1)" >&2
+  exit 1
 }
 
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
   else
-    sudo "$@"
+    sudo -n "$@"
   fi
 }
 

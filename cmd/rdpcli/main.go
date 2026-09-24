@@ -194,6 +194,7 @@ func main() {
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
 	clip := flag.Bool("clipboard", false, "enable the clipboard channel and log text received")
 	setClip := flag.String("set-clipboard", "", "publish this text on the shared clipboard once ready")
+	clipReq := flag.Duration("request-clipboard-after", 0, "ask the server for its clipboard text this long after ready (0 disables)")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
 	flag.Parse()
 
@@ -251,6 +252,16 @@ func main() {
 						fmt.Printf("published %d bytes to the shared clipboard\n", len(*setClip))
 					}
 					time.Sleep(800 * time.Millisecond)
+				}
+				if *clipReq > 0 {
+					// Request outside the handler's own retry window, so
+					// the server has had time to acquire the selection.
+					go func() {
+						time.Sleep(*clipReq)
+						if err := c.RequestClipboardText(); err != nil {
+							fmt.Fprintln(os.Stderr, "request clipboard:", err)
+						}
+					}()
 				}
 				for _, a := range actions {
 					if a.isType {

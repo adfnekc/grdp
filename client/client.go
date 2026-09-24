@@ -41,6 +41,7 @@ type Control interface {
 	MouseDown(button int, x, y int)
 	On(event string, msg interface{})
 	SetClipboardText(text string) error
+	RequestClipboardText() error
 	Close()
 }
 
@@ -227,6 +228,14 @@ func (c *Client) OnClipboardText(f func(text string)) {
 // enabled.
 func (c *Client) SetClipboardText(text string) error {
 	return c.ctl.SetClipboardText(text)
+}
+
+// RequestClipboardText asks the server for the clipboard text it last
+// announced. OnClipboardText normally triggers this by itself, but a server
+// can announce a format before it is able to serve it, in which case an
+// explicit request made later is what gets the data.
+func (c *Client) RequestClipboardText() error {
+	return c.ctl.RequestClipboardText()
 }
 func (c *Client) OnSuccess(f func()) {
 	c.ctl.On("success", f)
