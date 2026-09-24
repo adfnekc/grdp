@@ -102,6 +102,10 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 		c.channels.Register(dvc)
 		c.gfx = gfx
 		c.dvc = dvc
+		// The channel also has to be requested from the server, and the
+		// early capability flag has to say we support the dynamic channel
+		// and graphics protocol.
+		c.mcs.SetClientDynvcProtocol()
 	}
 	// Replay handlers that were registered before the layers existed.
 	for _, p := range c.pending {

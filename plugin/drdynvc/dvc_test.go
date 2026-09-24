@@ -94,13 +94,24 @@ func TestHeaderRoundTrip(t *testing.T) {
 	}
 }
 
+// capabilitiesRequest builds the real 12 byte capabilities PDU: the header,
+// a pad byte, the version, and four priority charge thresholds. xrdp sends
+// exactly this, and parsing it as a 5 byte PDU leaves seven trailing bytes
+// that look like bogus commands.
+func capabilitiesRequest(version uint16) []byte {
+	req := []byte{0x50, 0x00}
+	req = append(req, byte(version), byte(version>>8))
+	for i := 0; i < 4; i++ {
+		req = append(req, 0x00, 0x00) // PriorityChargeN
+	}
+	return req
+}
+
 func TestCapabilitiesResponse(t *testing.T) {
 	c, sent := newTestClient()
 
 	// The server announces version 2.
-	req := []byte{0x50}
-	req = append(req, 0x02, 0x00, 0x00, 0x00)
-	c.Process(req)
+	c.Process(capabilitiesRequest(2))
 
 	if len(sent.chunks) != 1 {
 		t.Fatalf("got %d responses, want 1", len(sent.chunks))
@@ -116,6 +127,36 @@ func TestCapabilitiesResponse(t *testing.T) {
 	// The negotiated version is the lower of the two, so 2 here.
 	if got := binary.LittleEndian.Uint16(resp[2:]); got != 2 {
 		t.Fatalf("got version %d, want 2", got)
+	}
+}
+
+// TestCapabilitiesConsumesWholePdu guards the 12 byte layout: if the priority
+// charges are not consumed, the leftover zero bytes are parsed as further
+// commands whose command id is 0.
+func TestCapabilitiesConsumesWholePdu(t *testing.T) {
+	c, sent := newTestClient()
+	c.Process(capabilitiesRequest(3))
+
+	// One response and, crucially, no more: the loop must not have tried to
+	// interpret the trailing priority charges as commands.
+	if len(sent.chunks) != 1 {
+		t.Fatalf("got %d responses, want 1", len(sent.chunks))
+	}
+	if got := c.version; got != 3 {
+		t.Fatalf("negotiated version %d, want 3", got)
+	}
+}
+
+func TestCapabilitiesVersion1HasNoPriorityCharges(t *testing.T) {
+	c, sent := newTestClient()
+	// Version 1 stops after the version field.
+	c.Process([]byte{0x50, 0x00, 0x01, 0x00})
+
+	if len(sent.chunks) != 1 {
+		t.Fatalf("got %d responses, want 1", len(sent.chunks))
+	}
+	if got := binary.LittleEndian.Uint16(sent.chunks[0][2:]); got != 1 {
+		t.Fatalf("negotiated version %d, want 1", got)
 	}
 }
 
@@ -146,6 +187,26 @@ func TestServerCreatesKnownChannel(t *testing.T) {
 	status := binary.LittleEndian.Uint32(resp[2:])
 	if status != 0 {
 		t.Fatalf("status is 0x%08x, want 0", status)
+	}
+}
+
+// TestCreateRequestNameIsNulTerminated guards against keeping the terminator:
+// the lookup must match the registered name, and the refusal path must be
+// taken for a genuinely unknown name.
+func TestCreateRequestNameIsNulTerminated(t *testing.T) {
+	c, sent := newTestClient()
+	rec := &recorder{}
+	c.Register("TestChannel", rec)
+
+	req := append(buildHeader(cmdCreateRequest, 0, 7), []byte("TestChannel\x00")...)
+	c.Process(req)
+
+	if !rec.opened {
+		t.Fatalf("a NUL terminated name should still match: %+v", rec)
+	}
+	status := binary.LittleEndian.Uint32(sent.chunks[0][2:])
+	if status != 0 {
+		t.Fatalf("status is 0x%08x, want 0 for an accepted channel", status)
 	}
 }
 

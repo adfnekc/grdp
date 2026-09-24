@@ -6,8 +6,10 @@ package drdynvc
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/adfnekc/grdp/core"
@@ -262,6 +264,7 @@ func readVarLength(r io.Reader, sp uint8) (uint32, error) {
 
 // Process handles one reassembled drdynvc channel payload.
 func (c *DvcClient) Process(s []byte) {
+	glog.Tracef("drdynvc: recv %s", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
 		h, err := readHeader(r)
@@ -310,19 +313,32 @@ func (c *DvcClient) handle(h *header, r *bytes.Reader) error {
 }
 
 // processCapabilities answers the server's capability announcement.
+//
+// The PDU is: a pad byte, the version, and, for version 2 and later, four
+// priority charge thresholds. That is 12 bytes in total, which is worth
+// spelling out because getting it wrong leaves trailing bytes that look like
+// further (bogus) commands.
 func (c *DvcClient) processCapabilities(r *bytes.Reader) error {
+	if _, err := core.ReadUInt8(r); err != nil { // pad
+		return err
+	}
 	version, err := core.ReadUint16LE(r)
 	if err != nil {
 		return err
 	}
-	// Two bytes of padding follow the version.
-	if _, err = core.ReadUint16LE(r); err != nil {
-		return err
+	if version >= capsVersion2 {
+		// PriorityCharge0..3. They are advisory and unused here.
+		for i := 0; i < 4; i++ {
+			if _, err := core.ReadUint16LE(r); err != nil {
+				return err
+			}
+		}
 	}
-	if version > c.version {
-		version = c.version
+	if version > capsVersion3 {
+		version = capsVersion3
 	}
-	glog.Debugf("drdynvc: server version 0x%04x", version)
+	c.version = version
+	glog.Debugf("drdynvc: server version %d", version)
 
 	// The response header is the command byte (0x05 << 4) plus a pad byte,
 	// which is what the reference client sends as the literal 0x0050.
@@ -339,7 +355,8 @@ func (c *DvcClient) processCreateRequest(h *header, r *bytes.Reader) error {
 	if err != nil {
 		return err
 	}
-	name := string(readAll(r))
+	// The name is NUL terminated on the wire.
+	name := strings.TrimRight(string(readAll(r)), "\x00")
 	glog.Debugf("drdynvc: server requests channel id=%d name=%q", id, name)
 
 	c.mu.Lock()
