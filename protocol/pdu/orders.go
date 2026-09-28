@@ -189,7 +189,14 @@ func cachePixels(data []byte, width, height, bitsPerPixel int, compressed bool) 
 	if len(data) == 0 {
 		return nil
 	}
-	return core.Decompress(data, width, height, bpp)
+	pixels, err := core.Decompress(data, width, height, bpp)
+	if err != nil {
+		// A truncated entry would only put rubbish in the cache and then on
+		// screen, so leave the slot empty and let the server refill it.
+		glog.Debugf("cache bitmap: %v", err)
+		return nil
+	}
+	return pixels
 }
 
 type Primary struct {

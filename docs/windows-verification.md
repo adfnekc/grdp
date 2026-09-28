@@ -178,10 +178,21 @@ WireToSurface header: find the field in the specification, or settle it against
 a capture, rather than guessing at an offset. Note that this is an off by one in
 our parser, not a second compression format.
 
-**The bitmap decompressor does not survive malformed input.** Handing
-`core.Decompress` a short compressed payload does not return an error, it does
-not return, and it does not stop: a four byte run of `{0x10, 0, 0, 0}` ran for
-over five minutes before the test was killed. That is reachable from the network,
-since the same decoder serves bitmap updates, so it is a robustness bug rather
-than a testing inconvenience. It is pre existing and unrelated to orders, but it
-is worth fixing before anything else touches that code.
+**The bitmap decompressor used to hang on malformed input.** Handing
+`core.Decompress` a short compressed payload did not return an error, it did not
+return, and it did not stop: a four byte run of `{0x10, 0, 0, 0}` ran for over
+five minutes before the test was killed. That was reachable from the network,
+since the same decoder serves bitmap updates.
+
+The cause was the interleaved decoder specifically. It reads a code and then a
+run, and once the input is gone every read returns zero, which decodes as a run
+of zero pixels: the loop advanced neither the input nor the output, so it never
+finished. It now notices exhaustion, clamps runs to the line so they cannot walk
+past the buffer, and reports what happened. The fuzzer covers it, and ran 8.7
+million cases in 45 seconds without stalling, where the four byte case used to
+never return at all.
+
+Worth knowing: only the interleaved form can tell that a stream ended early,
+because it carries an explicit size. The 8, 16 and 24 bit forms are terminated
+by the buffer ending, so a short stream is not distinguishable from a complete
+one and no error is reported for them.

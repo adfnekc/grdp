@@ -53,7 +53,8 @@ func (g *RdpClient) SetRequestedProtocol(p uint32) {
 }
 
 func BitmapDecompress(bitmap *pdu.BitmapData) []byte {
-	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
+	pixels, _ := core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
+	return pixels
 }
 
 func uiRdp(info *Info) (error, *RdpClient) {

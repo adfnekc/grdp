@@ -738,7 +738,13 @@ func decompress3(output *[]uint8, width, height int, input []uint8, size int) bo
 }
 
 /* decompress a colour plane */
-func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
+// processPlane decodes one plane of an interleaved 4 byte bitmap.
+//
+// It reports whether the input was well formed. The check matters: once the
+// input runs out, CVAL hands back zeros, and a zero code means a run of zero
+// pixels, which advances neither the input nor the output. The loop around it
+// would then never finish, so exhaustion has to be noticed here.
+func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) (int, bool) {
 	var (
 		indexw   int
 		indexh   int
@@ -764,6 +770,9 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 
 		if lastline == 0 {
 			for indexw < width {
+				if len(*in) == 0 {
+					return ln - len(*in), false
+				}
 				code = CVAL(in)
 				replen = int(code & 0xf)
 				collen = int((code >> 4) & 0xf)
@@ -772,7 +781,9 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 					replen = revcode
 					collen = 0
 				}
-				for collen > 0 {
+				// Runs are clamped to the line: one longer than the line
+				// would walk off the end of the buffer.
+				for collen > 0 && indexw < width {
 					color = uint8(CVAL(in))
 					(*output)[i] = uint8(color)
 					i += 4
@@ -780,7 +791,7 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 					indexw++
 					collen--
 				}
-				for replen > 0 {
+				for replen > 0 && indexw < width {
 					(*output)[i] = uint8(color)
 					i += 4
 					indexw++
@@ -789,6 +800,9 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 			}
 		} else {
 			for indexw < width {
+				if len(*in) == 0 {
+					return ln - len(*in), false
+				}
 				code = CVAL(in)
 				replen = int(code & 0xf)
 				collen = int((code >> 4) & 0xf)
@@ -797,7 +811,7 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 					replen = revcode
 					collen = 0
 				}
-				for collen > 0 {
+				for collen > 0 && indexw < width {
 					x = uint8(CVAL(in))
 					if x&1 != 0 {
 						x = x >> 1
@@ -813,7 +827,7 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 					indexw++
 					collen--
 				}
-				for replen > 0 {
+				for replen > 0 && indexw < width {
 					x = (*output)[indexw*4+lastline] + color
 					(*output)[i] = uint8(x)
 					i += 4
@@ -825,7 +839,7 @@ func processPlane(in *[]uint8, width, height int, output *[]uint8, j int) int {
 		indexh++
 		lastline = thisline
 	}
-	return ln - len(*in)
+	return ln - len(*in), true
 }
 
 /* 4 byte bitmap decompress */
@@ -841,37 +855,68 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 	}
 
 	total = 1
-	onceBytes = processPlane(&input, width, height, output, 3)
+	var ok bool
+	if onceBytes, ok = processPlane(&input, width, height, output, 3); !ok {
+		return false
+	}
 	total += onceBytes
 
-	onceBytes = processPlane(&input, width, height, output, 2)
+	if onceBytes, ok = processPlane(&input, width, height, output, 2); !ok {
+		return false
+	}
 	total += onceBytes
 
-	onceBytes = processPlane(&input, width, height, output, 1)
+	if onceBytes, ok = processPlane(&input, width, height, output, 1); !ok {
+		return false
+	}
 	total += onceBytes
 
-	onceBytes = processPlane(&input, width, height, output, 0)
+	if onceBytes, ok = processPlane(&input, width, height, output, 0); !ok {
+		return false
+	}
 	total += onceBytes
 
 	return size == total
 }
 
 /* main decompress function */
-func Decompress(input []uint8, width, height int, Bpp int) []uint8 {
-	size := width * height * Bpp
-	output := make([]uint8, size)
-	switch Bpp {
-	case 1:
-		decompress1(&output, width, height, input, size)
-	case 2:
-		decompress2(&output, width, height, input, size)
-	case 3:
-		decompress3(&output, width, height, input, size)
-	case 4:
-		decompress4(&output, width, height, input, size)
-	default:
-		fmt.Printf("Bpp %d\n", Bpp)
+
+// Decompress decodes one RDP 6.0 compressed bitmap. Bpp is bytes per pixel:
+// 1, 2, 3 or 4 for 8, 16, 24 and 32 bits.
+//
+// It returns whatever it decoded along with an error when it can tell the input
+// is malformed, rather than a buffer of zeros. That distinction matters: a
+// truncated stream used to leave the interleaved decoder spinning on a zero
+// byte, which decodes as a run of nothing and so advances nothing. Callers can
+// still render the partial result, but they can tell that it is partial.
+//
+// Only the interleaved form reports an error for a stream that ends early, since
+// it carries an explicit size. The other three are terminated by the buffer
+// ending, so ending early is not distinguishable from ending on purpose.
+func Decompress(input []uint8, width, height int, Bpp int) ([]uint8, error) {
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("rle: bad bitmap size %dx%d", width, height)
+	}
+	if Bpp < 1 || Bpp > 4 {
+		return nil, fmt.Errorf("rle: %d bytes per pixel is not supported", Bpp)
 	}
 
-	return output
+	size := width * height * Bpp
+	output := make([]uint8, size)
+
+	var ok bool
+	switch Bpp {
+	case 1:
+		ok = decompress1(&output, width, height, input, size)
+	case 2:
+		ok = decompress2(&output, width, height, input, size)
+	case 3:
+		ok = decompress3(&output, width, height, input, size)
+	case 4:
+		ok = decompress4(&output, width, height, input, size)
+	}
+	if !ok {
+		return output, fmt.Errorf("rle: malformed or truncated compressed data")
+	}
+	return output, nil
 }

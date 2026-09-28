@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/adfnekc/grdp/core"
+	"github.com/adfnekc/grdp/glog"
 	"github.com/adfnekc/grdp/plugin"
 	"github.com/adfnekc/grdp/plugin/cliprdr"
 	"github.com/adfnekc/grdp/plugin/drdynvc"
@@ -64,7 +65,13 @@ func requestedProtocol(s *Setting) uint32 {
 }
 
 func bitmapDecompress(bitmap *pdu.BitmapData) []byte {
-	return core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
+	// A malformed stream yields the part that decoded. Showing an incomplete
+	// update beats dropping the whole thing, but it is worth a line in the log.
+	pixels, err := core.Decompress(bitmap.BitmapDataStream, int(bitmap.Width), int(bitmap.Height), Bpp(bitmap.BitsPerPixel))
+	if err != nil {
+		glog.Warnf("bitmap update %dx%d: %v", bitmap.Width, bitmap.Height, err)
+	}
+	return pixels
 }
 func split(user string) (domain string, uname string) {
 	if strings.Index(user, "\\") != -1 {
