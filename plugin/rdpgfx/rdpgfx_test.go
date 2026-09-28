@@ -10,6 +10,17 @@ import (
 )
 
 // pdu builds a complete RDPGFX PDU: the 8 byte header plus the body.
+// zgfx wraps a payload the way the graphics channel does: EGFX never puts a
+// bare RDPGFX PDU on the wire, every message is a ZGFX stream. A stored segment
+// carries the bytes verbatim, which keeps these tests about the graphics layer
+// rather than about the compression, which codec/zgfx_test.go covers.
+func zgfx(payload []byte) []byte {
+	return append([]byte{0xE0, 0x04}, payload...)
+}
+
+// feed delivers one message to the channel.
+func feed(c *GfxClient, payload []byte) { c.OnData(zgfx(payload)) }
+
 func pdu(cmdID uint16, body []byte) []byte {
 	out := appendHeader(nil, cmdID, 0, uint32(headerSize+len(body)))
 	return append(out, body...)
@@ -59,7 +70,7 @@ func TestCreateAndWireUncompressed(t *testing.T) {
 	c, _ := newTestClient(t)
 
 	// Create a 4x2 surface.
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20, 0)...)))
 	// Fill it with uncompressed BGRA pixels.
 	pixels := []byte{
 		1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255,
@@ -69,7 +80,7 @@ func TestCreateAndWireUncompressed(t *testing.T) {
 	body = append(body, rect16(0, 0, 4, 2)...)
 	body = append(body, u32(uint32(len(pixels)))...)
 	body = append(body, pixels...)
-	c.OnData(pdu(cmdWireToSurface1, body))
+	feed(c, pdu(cmdWireToSurface1, body))
 
 	c.mu.Lock()
 	s := c.surfaces[1]
@@ -84,7 +95,7 @@ func TestCreateAndWireUncompressed(t *testing.T) {
 
 func TestWireToSurfaceClipping(t *testing.T) {
 	c, _ := newTestClient(t)
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20, 0)...)))
 
 	// A 2x2 update at (3,3) on a 4x4 surface: only (3,3) is inside.
 	pixels := []byte{
@@ -95,7 +106,7 @@ func TestWireToSurfaceClipping(t *testing.T) {
 	body = append(body, rect16(3, 3, 5, 5)...)
 	body = append(body, u32(uint32(len(pixels)))...)
 	body = append(body, pixels...)
-	c.OnData(pdu(cmdWireToSurface1, body))
+	feed(c, pdu(cmdWireToSurface1, body))
 
 	c.mu.Lock()
 	got := c.surfaces[1].Pixels()
@@ -122,7 +133,7 @@ func TestWireToSurfaceRejectsUnknownSurface(t *testing.T) {
 	body = append(body, rect16(0, 0, 1, 1)...)
 	body = append(body, u32(4)...)
 	body = append(body, 0, 0, 0, 255)
-	c.OnData(pdu(cmdWireToSurface1, body))
+	feed(c, pdu(cmdWireToSurface1, body))
 
 	c.mu.Lock()
 	n := len(c.surfaces)
@@ -155,13 +166,13 @@ func TestWireToSurfaceRemoteFX(t *testing.T) {
 	defer func() { codec.RFXMode = old }()
 
 	c, _ := newTestClient(t)
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(5), u16(64)...), append(u16(64), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(5), u16(64)...), append(u16(64), 0x20, 0)...)))
 
 	body := append(append(append([]byte{}, u16(5)...), u16(codecCAVideo)...), 0x20, 0)
 	body = append(body, rect16(0, 0, 64, 64)...)
 	body = append(body, u32(uint32(len(rfxData)))...)
 	body = append(body, rfxData...)
-	c.OnData(pdu(cmdWireToSurface1, body))
+	feed(c, pdu(cmdWireToSurface1, body))
 
 	c.mu.Lock()
 	s := c.surfaces[5]
@@ -178,8 +189,8 @@ func TestWireToSurfaceRemoteFX(t *testing.T) {
 func TestStartAndEndFrame(t *testing.T) {
 	c, sent := newTestClient(t)
 
-	c.OnData(pdu(cmdStartFrame, append(u32(999), u32(3)...)))
-	c.OnData(pdu(cmdEndFrame, u32(3)))
+	feed(c, pdu(cmdStartFrame, append(u32(999), u32(3)...)))
+	feed(c, pdu(cmdEndFrame, u32(3)))
 
 	// End frame must be followed by an acknowledge, or the server stops
 	// sending frames.
@@ -200,10 +211,10 @@ func TestStartAndEndFrame(t *testing.T) {
 
 func TestResetGraphicsClearsSurfaces(t *testing.T) {
 	c, _ := newTestClient(t)
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(8)...), append(u16(8), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(8)...), append(u16(8), 0x20, 0)...)))
 	// width(4) height(4) monitorCount(4)
 	reset := append(append(u32(1920), u32(1080)...), u32(0)...)
-	c.OnData(pdu(cmdResetGraphics, reset))
+	feed(c, pdu(cmdResetGraphics, reset))
 
 	c.mu.Lock()
 	w, h, n := c.width, c.height, len(c.surfaces)
@@ -218,8 +229,8 @@ func TestResetGraphicsClearsSurfaces(t *testing.T) {
 
 func TestDeleteSurface(t *testing.T) {
 	c, _ := newTestClient(t)
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)))
-	c.OnData(pdu(cmdDeleteSurface, u16(1)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)))
+	feed(c, pdu(cmdDeleteSurface, u16(1)))
 	c.mu.Lock()
 	n := len(c.surfaces)
 	c.mu.Unlock()
@@ -230,13 +241,13 @@ func TestDeleteSurface(t *testing.T) {
 
 func TestSolidFill(t *testing.T) {
 	c, _ := newTestClient(t)
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20, 0)...)))
 
 	// RDPGFX_COLOR32 is XRGB: 0x00332211 means R=0x33 G=0x22 B=0x11.
 	body := append(append([]byte{}, u16(1)...), u32(0x00332211)...)
 	body = append(body, u16(1)...)
 	body = append(body, rect16(1, 1, 3, 2)...)
-	c.OnData(pdu(cmdSolidFill, body))
+	feed(c, pdu(cmdSolidFill, body))
 
 	c.mu.Lock()
 	got := c.surfaces[1].Pixels()
@@ -255,8 +266,8 @@ func TestSolidFill(t *testing.T) {
 
 func TestSurfaceToSurface(t *testing.T) {
 	c, _ := newTestClient(t)
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)))
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(2), u16(4)...), append(u16(4), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(2), u16(4)...), append(u16(4), 0x20, 0)...)))
 
 	// Fill surface 1 with known pixels.
 	pixels := []byte{
@@ -267,7 +278,7 @@ func TestSurfaceToSurface(t *testing.T) {
 	body = append(body, rect16(0, 0, 2, 2)...)
 	body = append(body, u32(uint32(len(pixels)))...)
 	body = append(body, pixels...)
-	c.OnData(pdu(cmdWireToSurface1, body))
+	feed(c, pdu(cmdWireToSurface1, body))
 
 	// source(2) dest(2) destPointsCount(2) destPoint(4) srcRect(8)
 	body = append(append([]byte{}, u16(1)...), u16(2)...)
@@ -275,7 +286,7 @@ func TestSurfaceToSurface(t *testing.T) {
 	body = append(body, u16(2)...) // destination x
 	body = append(body, u16(1)...) // destination y
 	body = append(body, rect16(0, 0, 2, 2)...)
-	c.OnData(pdu(cmdSurfaceToSurface, body))
+	feed(c, pdu(cmdSurfaceToSurface, body))
 
 	c.mu.Lock()
 	got := c.surfaces[2].Pixels()
@@ -295,7 +306,7 @@ func TestMultiplePdusInOnePayload(t *testing.T) {
 		pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)),
 		pdu(cmdDeleteSurface, u16(1))...)
 
-	c.OnData(payload)
+	feed(c, payload)
 
 	c.mu.Lock()
 	n := len(c.surfaces)
@@ -310,12 +321,12 @@ func TestShortAndUnknownPdusAreIgnored(t *testing.T) {
 
 	// A header claiming a length longer than the payload must not be acted on.
 	bogus := appendHeader(nil, cmdCreateSurface, 0, 9999)
-	c.OnData(append(bogus, u16(1)...))
+	feed(c, append(bogus, u16(1)...))
 
 	// An unknown command with a valid length must be skipped, and must not
 	// stop the following command from being processed.
 	payload := append(pdu(0x7777, []byte{1, 2, 3, 4}), pdu(cmdDeleteSurface, u16(1))...)
-	c.OnData(payload)
+	feed(c, payload)
 
 	c.mu.Lock()
 	n := len(c.surfaces)
@@ -325,7 +336,7 @@ func TestShortAndUnknownPdusAreIgnored(t *testing.T) {
 	}
 }
 
-func TestCapsAdvertiseOffersNoAVC(t *testing.T) {
+func TestCapsAdvertiseFlags(t *testing.T) {
 	c := NewGfxClient()
 	var sent [][]byte
 	c.SetSender(func(_ uint32, data []byte) error {
@@ -352,10 +363,39 @@ func TestCapsAdvertiseOffersNoAVC(t *testing.T) {
 	if got := binary.LittleEndian.Uint32(p[14:]); got != 4 {
 		t.Fatalf("first capset length = %d, want 4", got)
 	}
-	if got := binary.LittleEndian.Uint32(p[18:]); got != 0 {
-		t.Fatalf("first capset flags = 0x%08x, want 0 (no AVC)", got)
-	}
 	if got := binary.LittleEndian.Uint32(p[22:]); got != CapsVersion81 {
 		t.Fatalf("second capset version = 0x%08x", got)
+	}
+
+	// Every capset has to ask for plain RemoteFX, because the progressive
+	// variant is not decodeable here, and must not offer H.264.
+	const avc420Enabled = 0x00000010
+	// Each capset is version(4) length(4) flags(4), starting at offset 10.
+	for i, off := range []int{18, 30} {
+		if off+4 > len(p) {
+			t.Fatalf("capset %d is not in the PDU", i)
+		}
+		flags := binary.LittleEndian.Uint32(p[off:])
+		if flags&capsFlagThinClient == 0 {
+			t.Errorf("capset %d flags = 0x%08x, want THINCLIENT so the server uses RemoteFX rather than RemoteFX Progressive", i, flags)
+		}
+		if flags&avc420Enabled != 0 {
+			t.Errorf("capset %d flags = 0x%08x offers H.264, which there is no decoder for", i, flags)
+		}
+	}
+}
+
+// A bare RDPGFX PDU is not a valid message on this channel: everything is ZGFX
+// wrapped, so the first byte is a stream descriptor and never a command id. A
+// payload that is not a ZGFX stream has to be refused rather than parsed.
+func TestOnDataRequiresZGFX(t *testing.T) {
+	c, _ := newTestClient(t)
+	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20, 0)...)))
+
+	c.mu.Lock()
+	created := c.surfaces[1] != nil
+	c.mu.Unlock()
+	if created {
+		t.Fatal("a bare PDU should not have been accepted")
 	}
 }

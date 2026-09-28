@@ -68,10 +68,26 @@ const (
 
 // Capability versions. 8.0 and 8.1 are the ones a decoder of RemoteFX and raw
 // bitmaps can honestly claim; the 10.x versions advertise AVC support.
+//
+// 0x00080105 rather than 0x00080100: the low byte is part of the version, not
+// padding. See MS-RDPEGFX 2.2.3.2.
 const (
 	CapsVersion8  = 0x00080004
 	CapsVersion81 = 0x00080105
 )
+
+// Capability flags (MS-RDPEGFX 2.2.3.1).
+//
+// Only THINCLIENT is set. It asks for the RemoteFX codec rather than the
+// RemoteFX Progressive codec, which this client cannot decode, and caps the
+// bitmap cache at 16 MB, which costs nothing here because cache import offers
+// are declined anyway.
+//
+// AVC is excluded by omission rather than switched off:
+// RDPGFX_CAPS_FLAG_AVC_DISABLED only exists from version 10 onwards, and the
+// way to keep H.264 out of a version 8.1 negotiation is to not set
+// RDPGFX_CAPS_FLAG_AVC420_ENABLED (0x00000010).
+const capsFlagThinClient = 0x00000001
 
 const (
 	headerSize            = 8
@@ -133,6 +149,12 @@ type GfxClient struct {
 	height   int
 	surfaces map[uint16]*Surface
 	frameID  uint32
+
+	// zgfx unwraps the channel's bulk compression. EGFX does not put bare
+	// RDPGFX PDUs on the wire: every message is a ZGFX stream, and its history
+	// is shared between messages, so this has to live for the whole channel and
+	// be fed every message in order.
+	zgfx *codec.ZGFX
 }
 
 // NewGfxClient creates an RDPGFX handler.
@@ -140,6 +162,7 @@ func NewGfxClient() *GfxClient {
 	return &GfxClient{
 		Emitter:  *emission.NewEmitter(),
 		surfaces: make(map[uint16]*Surface),
+		zgfx:     codec.NewZGFX(),
 	}
 }
 
@@ -167,8 +190,16 @@ func (c *GfxClient) OnClose() {
 	c.Emit("close")
 }
 
-// OnData implements drdynvc.DynChannel. A payload may hold several PDUs.
+// OnData implements drdynvc.DynChannel. The payload is a ZGFX stream that may
+// hold several PDUs.
 func (c *GfxClient) OnData(data []byte) {
+	pdu, err := c.zgfx.Decompress(data)
+	if err != nil {
+		glog.Errorf("rdpgfx: cannot decompress %d bytes: %v", len(data), err)
+		return
+	}
+	data = pdu
+
 	for off := 0; off+headerSize <= len(data); {
 		h := headerBuf{
 			cmdID:     binary.LittleEndian.Uint16(data[off:]),
@@ -357,6 +388,11 @@ func decodeGfx(codecID uint16, data []byte, width, height int, pixelFormat uint8
 	case codecCAVideo:
 		// "CAVideo" is the RemoteFX codec under its RDPGFX name.
 		return codec.Decompress(codec.CodecIDRemoteFX, data, width, height, 32)
+	case codecProgressive, codecProgressiveV2:
+		// The progressive variants need their own arithmetic decoder. The
+		// THINCLIENT flag asked the server not to use them, so reaching here
+		// means the negotiation went differently than expected.
+		return nil, fmt.Errorf("RDPGFX codec 0x%04x is RemoteFX Progressive, which was not advertised", codecID)
 	default:
 		return nil, fmt.Errorf("unsupported RDPGFX codec 0x%04x", codecID)
 	}
@@ -539,9 +575,9 @@ func (c *GfxClient) sendCapsAdvertise() error {
 	out = appendHeader(out, cmdCapsAdvertise, 0, uint32(length))
 	out = append(out, byte(len(versions)), byte(len(versions)>>8))
 	for _, v := range versions {
-		out = appendU32(out, v) // version
-		out = appendU32(out, 4) // length of the flags that follow
-		out = appendU32(out, 0) // flags
+		out = appendU32(out, v)                  // version
+		out = appendU32(out, 4)                  // length of the flags that follow
+		out = appendU32(out, capsFlagThinClient) // flags
 	}
 	return c.write(out)
 }

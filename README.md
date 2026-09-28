@@ -23,15 +23,23 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
 * [x] Clipboard, text, both directions
 * [x] NSCodec and RemoteFX (RFX) bitmap codecs, checked byte for byte against
       libfreerdp's own decoder
+* [x] ZGFX, the bulk compression the EGFX channel wraps its messages in, also
+      checked byte for byte against libfreerdp
 * [x] Surface commands, `drdynvc`, RDPGFX command parsing
 
 Not done:
 
-* [ ] EGFX rendering. Windows offers the graphics channel and then stops sending
-      bitmap updates, and the payload is ZGFX compressed, which is not
-      implemented yet. See `docs/windows-verification.md`. Off by default.
+* [ ] EGFX rendering has not been seen working against a live server yet. The
+      pieces are in place (the channel, ZGFX, RemoteFX, and a capability set
+      that asks for plain RemoteFX rather than the progressive codec), but it
+      still has to be watched. It is off by default, and while it is on the
+      server stops sending bitmap updates, so a failure there looks like a
+      black screen rather than a partial one.
 * [ ] Orders and the bitmap cache. xrdp never sends orders, so this path is only
       needed for Windows' partial updates.
+* [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own
+      arithmetic decoder. The `THINCLIENT` capability flag asks the server not
+      to use it.
 * [ ] Interleaved RLE bitmaps, which the bitmap cache revision 3 needs.
 * [ ] H.264 (AVC420 / AVC444) codecs, which EGFX servers may choose.
 * [ ] VNC. The RFB subset this fork inherited is unused and unverified.
@@ -85,6 +93,9 @@ that input can be verified rather than eyeballed.
 `scripts/gen-codec-vectors.sh` regenerates the codec test vectors from
 libfreerdp's encoders and decoders, so the image codecs are checked against a
 reference implementation rather than against hand written expectations.
+`scripts/gen-zgfx-vectors.sh` does the same for ZGFX, except that the streams
+come from our test encoder because FreeRDP's compressor is a stub; FreeRDP's
+decoder still supplies the expected output.
 
 ## Take ideas from
 

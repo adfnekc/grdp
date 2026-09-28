@@ -51,7 +51,7 @@ On this target the fix was to add the account to the local **Remote Desktop
 Users** group. A TLS alert (`remote error: tls: internal error`) instead of a
 reset is a different thing and does point at the wire format.
 
-## EGFX is offered, but wrapped
+## EGFX is offered, and its payload was the missing piece
 
 With `Setting.EnableEGFX` the dynamic channel layer negotiates correctly
 against Windows (which offers version 3) and the server asks for
@@ -63,19 +63,24 @@ Microsoft::Windows::RDS::Graphics
 It then stops sending bitmap updates entirely, so the session renders nothing
 until the graphics channel is understood.
 
-The payload is not a bare RDPGFX PDU: every message starts with
+The reason nothing was understood is that the payload is not a bare RDPGFX PDU:
 
 ```
 e0 24 ...
+│  └─ 0x24 = PACKET_COMPRESSED | RDP8
+└─ 0xE0 = ZGFX_SEGMENTED_SINGLE
 ```
 
-which is ZGFX, the RDP 8.0 bulk compression (MS-RDPEGFX 3.1.8): `0xE0` is
-`ZGFX_SEGMENTED_SINGLE` and `0x24` is `PACKET_COMPRESSED | RDP8`. So EGFX needs
-a ZGFX decompressor before RDPGFX parsing can begin.
+Every message on that channel is a ZGFX stream, the RDP 8.0 bulk compression
+(MS-RDPEGFX 3.1.8), whether or not it is actually compressed. FreeRDP's client
+calls `zgfx_decompress` on every message it receives there without checking, so
+the framing is mandatory rather than optional.
 
-Two nearby traps that were checked and are **not** at fault:
+That decoder now exists, in `codec/zgfx.go`, and the graphics channel unwraps
+its messages before parsing them. Two nearby traps that were checked and are
+**not** at fault:
 
 * channel data in general is fine against Windows, the clipboard channel parses
   its capabilities and monitor ready PDUs correctly;
-* the platform is the legacy path's problem only, `Setting.EnableEGFX` is off by
-  default so Windows keeps using bitmap updates.
+* the platform is only a problem for the legacy path, `Setting.EnableEGFX` is
+off by default so Windows keeps using bitmap updates.
