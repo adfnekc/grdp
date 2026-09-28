@@ -289,8 +289,21 @@ and only 0.18% of pixels by more than sixteen: a lossy codec doing its job, not 
 region left blank. A surface that was never drawn would show up as a large solid
 patch, and there is none.
 
-Comparing sessions that involved input did not work, and the reason is worth
-recording because it is a trap: the runs are not independent. Keystrokes land in
+The control has to be run at the same time as the comparison, and that is not a
+formality. A later attempt compared the two paths again and read a mean of 2.55
+with 87% of pixels differing, which looks like a fault. Running the *same* path
+twice, immediately, gave 2.551, 87.517% and 688265 pixels: the same numbers to
+three digits. The screen had been changing between runs, because Windows fades
+between wallpapers on a timer, and a fade is a slow full screen change. The
+comparison had measured the fade, not the renderer. When the screen is genuinely
+still, the two paths agree to 0.026 of 255 with the differences confined to the
+clock.
+
+So: compare against a control taken at the same moment, or the number means
+nothing.
+
+Comparing sessions that involved input did not work either, and the reason is
+worth recording because it is a trap too: the runs are not independent. Keystrokes land in
 whichever window has focus, so the second run inherits the first one's windows and
 ends in a different state. The screenshots then differ by a whole window, which
 looks like a rendering fault and is not one. A comparison that involves input
