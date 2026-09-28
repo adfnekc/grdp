@@ -267,3 +267,53 @@ func TestOrderCarryOverWithoutDeltaCoordinates(t *testing.T) {
 		t.Errorf("left coordinate is %d, want 64", second.X)
 	}
 }
+
+// An order that cannot be parsed must not be parsed as nothing. Reading no
+// fields leaves the stream out of step for every order after it in the same
+// batch, so the batch has to fail instead.
+func TestUnparsableOrderIsRejected(t *testing.T) {
+	var b bytes.Buffer
+	writeU16 := func(v uint16) { b.Write([]byte{byte(v), byte(v >> 8)}) }
+	writeU16(1)
+	// A TEXT2 order, whose rendering needs a glyph cache this does not have.
+	b.WriteByte(TS_STANDARD | TS_TYPE_CHANGE)
+	b.WriteByte(ORDER_TYPE_TEXT2)
+	writeU16(0x0001)
+
+	var pdu FastPathOrdersPDU
+	if err := pdu.Unpack(bytes.NewReader(b.Bytes())); err == nil {
+		t.Error("expected an error rather than a silent misread")
+	}
+}
+
+// The point list a polygon or polyline carries is deltas from the last point,
+// with a bitmap saying which of them are zero and therefore absent.
+func TestReadDeltaPoints(t *testing.T) {
+	// Three points after the start. The zero bitmap is two bits per point, and
+	// 0x00 means neither coordinate of any of them is omitted.
+	// A one byte delta is a seven bit twos complement value: bit 6 is the sign,
+	// and bit 7 instead means a second byte follows. So -1 is 0x7f, not 0x41.
+	raw := []byte{
+		0x00,       // zero bitmap for three points (one byte)
+		0x02, 0x03, // +2, +3
+		0x01, 0x7f, // +1, -1
+		0x00, 0x02, // +0, +2
+	}
+	got := readDeltaPoints(bytes.NewReader(raw), 3, Point{X: 10, Y: 20})
+	want := []Point{{X: 10, Y: 20}, {X: 12, Y: 23}, {X: 13, Y: 22}, {X: 13, Y: 24}}
+	if len(got) != len(want) {
+		t.Fatalf("got %d points, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("point %d is %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// A set flag means that coordinate is zero and was not sent.
+	raw = []byte{0x80, 0x05} // first point: x omitted, y is +5
+	got = readDeltaPoints(bytes.NewReader(raw), 1, Point{X: 7, Y: 7})
+	if got[1] != (Point{X: 7, Y: 12}) {
+		t.Errorf("got %+v, want the x to be unchanged and the y advanced", got[1])
+	}
+}

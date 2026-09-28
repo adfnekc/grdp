@@ -277,14 +277,13 @@ func TestOpaqueRectIsClippedToTheScreen(t *testing.T) {
 // tell a half drawn screen from a complete one.
 func TestUnsupportedOrdersAreCounted(t *testing.T) {
 	s := NewScreen(4, 4)
-	// An order type with no renderer at all.
-	s.Draw([]pdu.OrderPdu{order(&pdu.Polyline{})})
-	if len(s.Unsupported()) == 0 {
-		t.Errorf("expected the unrendered order type to be counted: %v", s.Unsupported())
-	}
+	// An order type that parses but has no renderer. Memory blits with a third
+	// colour table are parsed and not drawn, and a server that sends one should
+	// show up here rather than silently leaving part of the screen stale.
+	s.Draw([]pdu.OrderPdu{order(&pdu.Mem3blt{})})
 	found := false
 	for kind := range s.Unsupported() {
-		if strings.Contains(kind, "Polyline") {
+		if strings.Contains(kind, "Mem3blt") {
 			found = true
 		}
 	}
@@ -310,5 +309,143 @@ func TestResizeClearsTheScreenAndCacheIsSeparate(t *testing.T) {
 		if !bytes.Equal(px, []byte{0, 0, 0, 0xff}) {
 			t.Errorf("a resized screen should be opaque black, got %v", px)
 		}
+	}
+}
+
+// PATBLT is how a server draws a fill. Almost all of them are a solid brush with
+// PATCOPY, which is a rectangle in a colour; a patterned brush is an eight by
+// eight monochrome tile.
+func TestPatbltSolidFill(t *testing.T) {
+	s := NewScreen(6, 4)
+	dirty, err := s.Draw([]pdu.OrderPdu{order(&pdu.Patblt{
+		X: 1, Y: 1, Cx: 3, Cy: 2, Opcode: ropPatCopy,
+		FgColour: [4]uint8{0x11, 0x22, 0x33, 0},
+		BgColour: [4]uint8{0x00, 0x00, 0x00, 0},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := image.Rect(1, 1, 4, 3); dirty != want {
+		t.Errorf("dirty area is %v, want %v", dirty, want)
+	}
+	// TS_COLOR is red, green, blue, so the pixel is the reverse.
+	want := bgra(0x11, 0x22, 0x33)
+	if got := pixelAt(t, s, 2, 2); !bytes.Equal(got, want) {
+		t.Errorf("filled pixel is %v, want %v", got, want)
+	}
+	if got := pixelAt(t, s, 0, 0); bytes.Equal(got, want) {
+		t.Error("the fill spilled outside its rectangle")
+	}
+}
+
+func TestPatbltMonochromePattern(t *testing.T) {
+	s := NewScreen(8, 8)
+	// A checkerboard: alternating bits.
+	pattern := []byte{0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55}
+	s.Draw([]pdu.OrderPdu{order(&pdu.Patblt{
+		X: 0, Y: 0, Cx: 8, Cy: 8, Opcode: ropPatCopy,
+		FgColour: [4]uint8{0xff, 0xff, 0xff, 0},
+		BgColour: [4]uint8{0x00, 0x00, 0x00, 0},
+		Brush:    pdu.Brush{Style: 3, Data: pattern},
+	})})
+
+	// The leftmost pixel is the most significant bit, which is set here.
+	if got := pixelAt(t, s, 0, 0); !bytes.Equal(got, bgra(0xff, 0xff, 0xff)) {
+		t.Errorf("(0,0) is %v, want the foreground colour", got)
+	}
+	if got := pixelAt(t, s, 1, 0); !bytes.Equal(got, bgra(0, 0, 0)) {
+		t.Errorf("(1,0) is %v, want the background colour", got)
+	}
+	// The next row is the opposite phase.
+	if got := pixelAt(t, s, 0, 1); !bytes.Equal(got, bgra(0, 0, 0)) {
+		t.Errorf("(0,1) is %v, want the background colour", got)
+	}
+}
+
+func TestPatbltUnhandledRopIsCounted(t *testing.T) {
+	s := NewScreen(4, 4)
+	s.Draw([]pdu.OrderPdu{order(&pdu.Patblt{
+		X: 0, Y: 0, Cx: 2, Cy: 2, Opcode: 0x99,
+	})})
+	if len(s.Unsupported()) == 0 {
+		t.Errorf("an unhandled ROP should be counted: %v", s.Unsupported())
+	}
+}
+
+// The shape orders are drawn from points that the server sends as deltas, and
+// the polygon fill is a scanline sweep.
+func TestPolygonScFillsItsShape(t *testing.T) {
+	s := NewScreen(8, 8)
+	// A right triangle: (1,1) (6,1) (1,6), closed.
+	pts := []pdu.Point{{X: 1, Y: 1}, {X: 6, Y: 1}, {X: 1, Y: 6}, {X: 1, Y: 1}}
+	dirty, err := s.Draw([]pdu.OrderPdu{order(&pdu.PolygonSc{
+		Points: pts, Fgcolour: [4]uint8{0xff, 0x00, 0x00, 0},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty.Empty() {
+		t.Fatal("nothing was drawn")
+	}
+	inside := bgra(0xff, 0x00, 0x00)
+	// A point well inside the triangle.
+	if got := pixelAt(t, s, 2, 2); !bytes.Equal(got, inside) {
+		t.Errorf("(2,2) is %v, want the fill colour", got)
+	}
+	// A point outside it, diagonally across.
+	if got := pixelAt(t, s, 6, 6); bytes.Equal(got, inside) {
+		t.Error("(6,6) is outside the triangle but was filled")
+	}
+}
+
+func TestPolylineDrawsSegments(t *testing.T) {
+	s := NewScreen(8, 8)
+	pts := []pdu.Point{{X: 0, Y: 0}, {X: 7, Y: 0}, {X: 7, Y: 7}}
+	s.Draw([]pdu.OrderPdu{order(&pdu.Polyline{
+		Points: pts, Colour: [4]uint8{0x00, 0xff, 0x00, 0},
+	})})
+	ink := bgra(0x00, 0xff, 0x00)
+	for _, p := range [][2]int{{0, 0}, {4, 0}, {7, 0}, {7, 4}, {7, 7}} {
+		if got := pixelAt(t, s, p[0], p[1]); !bytes.Equal(got, ink) {
+			t.Errorf("(%d,%d) is %v, want the line colour", p[0], p[1], got)
+		}
+	}
+	// Nothing off the path.
+	if got := pixelAt(t, s, 3, 3); bytes.Equal(got, ink) {
+		t.Error("(3,3) is not on the path but was drawn")
+	}
+}
+
+func TestEllipseOutlineAndFill(t *testing.T) {
+	ink := bgra(0xff, 0xff, 0x00)
+
+	// Filled: the centre is drawn.
+	filled := NewScreen(20, 12)
+	filled.Draw([]pdu.OrderPdu{order(&pdu.EllipeCb{
+		Left: 0, Top: 0, Right: 20, Bottom: 12,
+		FgColour: [4]uint8{0xff, 0xff, 0x00, 0},
+	})})
+	if got := pixelAt(t, filled, 10, 6); !bytes.Equal(got, ink) {
+		t.Errorf("the centre of a filled ellipse is %v", got)
+	}
+	// And so are its ends.
+	if got := pixelAt(t, filled, 0, 6); !bytes.Equal(got, ink) {
+		t.Errorf("the left edge of a filled ellipse is %v", got)
+	}
+
+	// Outlined: the centre is not, but the edge is, and the corner never is.
+	hollow := NewScreen(20, 12)
+	hollow.Draw([]pdu.OrderPdu{order(&pdu.EllipeSc{
+		Left: 0, Top: 0, Right: 20, Bottom: 12,
+		Colour: [4]uint8{0xff, 0xff, 0x00, 0},
+	})})
+	if got := pixelAt(t, hollow, 10, 6); bytes.Equal(got, ink) {
+		t.Error("the centre of an outlined ellipse should be untouched")
+	}
+	if got := pixelAt(t, hollow, 0, 6); !bytes.Equal(got, ink) {
+		t.Errorf("the left edge of an outlined ellipse is %v", got)
+	}
+	if got := pixelAt(t, hollow, 0, 0); bytes.Equal(got, ink) {
+		t.Error("the corner is outside the ellipse but was drawn")
 	}
 }

@@ -2,6 +2,8 @@
 
 grdp is a pure Go client implementation of Microsoft's Remote Desktop Protocol.
 
+> [中文说明](README.zh-CN.md)
+
 Forked from [tomatome/grdp](https://github.com/tomatome/grdp), itself forked from
 [icodeface/grdp](https://github.com/icodeface/grdp).
 
@@ -31,10 +33,12 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       desktop, its icons and text come through over the graphics channel with
       no bitmap updates at all. Off by default, see below.
 * [x] Drawing orders: the bitmap cache and MEMBLT, with the bounds an order
-      carries as a clip. Verified against a real Windows server, where the whole
+      carries as a clip, plus PATBLT with its brush, the polygons, the polyline
+      and the ellipses. Verified against a real Windows server, where the whole
       desktop comes through the cache. It matches the bitmap path to the taskbar
       clock, which is where two runs of the same path differ too. Off by default,
       see below.
+* [x] VNC. The RFB client this fork inherited is kept and still builds.
 
 Not done, or not finished:
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own
@@ -48,10 +52,11 @@ Not done, or not finished:
       advertising them is what keeps them out of the negotiation.
 * [ ] Scaled surface placement: a surface mapped with scale factors would need
       resampling. `MapSurfaceToOutput` is honoured, the scaled variants are not.
-* [ ] PATBLT and the brush cache, and the glyph and polygon orders. None of them
-      appeared in the measured traffic, which was MEMBLT, cache fills and
-      alternate secondary orders and almost nothing else.
-* [ ] VNC. The RFB subset this fork inherited is unused and unverified.
+* [ ] Glyph rendering. The TEXT2 order draws from a cache of glyphs the server
+      sends separately, and neither half is implemented. The order reports that
+      it cannot be read rather than reading nothing, because an order of unknown
+      length would leave the rest of the batch misparsed. No server tested has
+      sent one.
 
 ## Using it as a library
 

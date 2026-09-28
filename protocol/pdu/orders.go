@@ -146,6 +146,31 @@ type Secondary struct {
 	// its bitmap cache. MEMBLT then blits those entries to the screen, so
 	// without storing them there is nothing for MEMBLT to read.
 	CacheBitmap *CacheBitmap
+
+	// CacheBrush is set by the brush cache order, which PATBLT draws with.
+	CacheBrush *CacheBrush
+}
+
+// CacheBrush is a brush a secondary order puts into the brush cache, or the one
+// PATBLT carries inline.
+type CacheBrush struct {
+	Index uint8
+	// Bpp is bits per pixel for a colour brush; 1 means the 8x8 pattern in Data
+	// is monochrome.
+	Bpp    uint8
+	Width  int
+	Height int
+	Style  uint8
+	Hatch  uint8
+	// Data is the pattern, top down, eight bytes of eight pixels for a
+	// monochrome brush.
+	Data []byte
+}
+
+// IsSolid reports whether the brush paints one colour, which is what the fills
+// a server sends almost always want.
+func (b *CacheBrush) IsSolid() bool {
+	return b == nil || b.Style == 0 || len(b.Data) == 0
 }
 
 // CacheBitmap is a bitmap a secondary order puts into the bitmap cache. The
@@ -228,19 +253,25 @@ func (f *FastPathOrdersPDU) Unpack(r io.Reader) error {
 	for i := 0; i < int(f.NumberOrders); i++ {
 		o := OrderPdu{state: f.State}
 		o.ControlFlags, _ = core.ReadUInt8(r)
-		if o.ControlFlags&TS_STANDARD == 0 {
-			//glog.Info("Altsec order")
-			o.processAltsecOrder(r)
+
+		// An order that cannot be read has to stop the batch. Its fields have
+		// unknown length, so carrying on means reading whatever follows as if it
+		// were the next order's flags, and everything after it in the batch is
+		// nonsense. Failing leaves the rest of the screen as it was.
+		var err error
+		switch {
+		case o.ControlFlags&TS_STANDARD == 0:
+			err = o.processAltsecOrder(r)
 			o.Type = ORDER_ALTSEC
-			//return errors.New("Not support")
-		} else if o.ControlFlags&TS_SECONDARY != 0 {
-			//glog.Info("Secondary order")
-			o.processSecondaryOrder(r)
+		case o.ControlFlags&TS_SECONDARY != 0:
+			err = o.processSecondaryOrder(r)
 			o.Type = ORDER_SECONDARY
-		} else {
-			//glog.Info("Primary order")
-			o.processPrimaryOrder(r)
+		default:
+			err = o.processPrimaryOrder(r)
 			o.Type = ORDER_PRIMARY
+		}
+		if err != nil {
+			return fmt.Errorf("orders: order %d of %d: %w", i+1, f.NumberOrders, err)
 		}
 
 		if f.OrderPdus == nil {
@@ -989,27 +1020,45 @@ func (d *PolygonSc) Unpack(r io.Reader, present uint32, delta bool) error {
 		d.Points = make([]Point, 0, d.Npoints+1)
 	}
 	if present&0x0040 != 0 {
-		size, _ := core.ReadUInt8(r)
-		data, _ := core.ReadBytes(int(size), r)
-		d.Points = append(d.Points, Point{d.X, d.Y})
-		var flags uint8
-		r = bytes.NewReader(data)
-		for i := 1; i <= int(d.Npoints); i++ {
-			var p Point
-			if (i-1)%4 == 0 {
-				flags, _ = core.ReadUInt8(r)
-			}
-			if (^flags)&0x80 != 0 {
-				p.X = parseDelta(r)
-			}
-			if (^flags)&0x40 != 0 {
-				p.Y = parseDelta(r)
-			}
-			flags <<= 2
-		}
+		// The points that follow are deltas from the order's own position, and
+		// the ones that are zero are flagged in a bitmap rather than written out.
+		d.Points = readDeltaPoints(r, int(d.Npoints), Point{d.X, d.Y})
 	}
 
 	return nil
+}
+
+// readDeltaPoints reads the packed point list a polygon or a polyline carries.
+//
+// Each point is a pair of deltas from the one before, starting at start, and a
+// bitmap of two bits per point says which of them are zero and therefore omitted.
+// The bitmap comes first and is re-read every four points, which is what the
+// shift below accounts for.
+func readDeltaPoints(r io.Reader, count int, start Point) []Point {
+	points := make([]Point, 0, count+1)
+	points = append(points, start)
+	if count <= 0 {
+		return points
+	}
+
+	zeroBits, _ := core.ReadBytes((count+3)/4, r)
+	zr := bytes.NewReader(zeroBits)
+	cur := start
+	var flags uint8
+	for i := 0; i < count; i++ {
+		if i%4 == 0 {
+			flags, _ = core.ReadUInt8(zr)
+		}
+		if flags&0x80 == 0 {
+			cur.X += parseDelta(r)
+		}
+		if flags&0x40 == 0 {
+			cur.Y += parseDelta(r)
+		}
+		flags <<= 2
+		points = append(points, cur)
+	}
+	return points
 }
 
 func parseDelta(r io.Reader) (v int32) {
@@ -1026,54 +1075,191 @@ func parseDelta(r io.Reader) (v int32) {
 	return
 }
 
+// PolygonCb is a polygon filled with a colour brush.
 type PolygonCb struct {
+	X, Y     int32
+	Opcode   uint8
+	Fillmode uint8
+	BgColour [4]uint8
+	FgColour [4]uint8
+	Npoints  uint8
+	Points   []Point
 }
 
 func (d *PolygonCb) Type() int {
 	return ORDER_TYPE_POLYGON_CB
 }
+
+// Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.17 lays it out, which is
+// taken from FreeRDP's parser rather than from the wording of the specification.
+// The point count sits in a later field than the rest, hence the twelfth.
 func (d *PolygonCb) Unpack(r io.Reader, present uint32, delta bool) error {
+	if present&0x0001 != 0 {
+		readOrderCoord(r, &d.X, delta)
+	}
+	if present&0x0002 != 0 {
+		readOrderCoord(r, &d.Y, delta)
+	}
+	if present&0x0004 != 0 {
+		d.Opcode, _ = core.ReadUInt8(r)
+	}
+	if present&0x0008 != 0 {
+		d.Fillmode, _ = core.ReadUInt8(r)
+	}
+	if present&0x0010 != 0 {
+		b, g, rr, a := updateReadColorRef(r)
+		d.BgColour[0], d.BgColour[1], d.BgColour[2], d.BgColour[3] = b, g, rr, a
+	}
+	if present&0x0020 != 0 {
+		b, g, rr, a := updateReadColorRef(r)
+		d.FgColour[0], d.FgColour[1], d.FgColour[2], d.FgColour[3] = b, g, rr, a
+	}
+	if present&0x0800 != 0 {
+		d.Npoints, _ = core.ReadUInt8(r)
+		d.Points = readDeltaPoints(r, int(d.Npoints), Point{d.X, d.Y})
+	}
 	return nil
 }
 
+// Polyline is a sequence of line segments.
 type Polyline struct {
+	X, Y   int32
+	Opcode uint8
+	// Word is a reserved field the order still carries.
+	Word    uint16
+	Colour  [4]uint8
+	Npoints uint8
+	Points  []Point
 }
 
 func (d *Polyline) Type() int {
 	return ORDER_TYPE_POLYLINE
 }
+
+// Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.16 lays it out.
 func (d *Polyline) Unpack(r io.Reader, present uint32, delta bool) error {
+	if present&0x0001 != 0 {
+		readOrderCoord(r, &d.X, delta)
+	}
+	if present&0x0002 != 0 {
+		readOrderCoord(r, &d.Y, delta)
+	}
+	if present&0x0004 != 0 {
+		d.Opcode, _ = core.ReadUInt8(r)
+	}
+	if present&0x0008 != 0 {
+		d.Word, _ = core.ReadUint16LE(r)
+	}
+	if present&0x0010 != 0 {
+		b, g, rr, a := updateReadColorRef(r)
+		d.Colour[0], d.Colour[1], d.Colour[2], d.Colour[3] = b, g, rr, a
+	}
+	if present&0x0020 != 0 {
+		d.Npoints, _ = core.ReadUInt8(r)
+		d.Points = readDeltaPoints(r, int(d.Npoints), Point{d.X, d.Y})
+	}
 	return nil
 }
 
+// EllipeSc is an ellipse drawn in an outline.
 type EllipeSc struct {
+	Left, Top, Right, Bottom int32
+	Opcode                   uint8
+	Fillmode                 uint8
+	Colour                   [4]uint8
 }
 
 func (d *EllipeSc) Type() int {
 	return ORDER_TYPE_ELLIPSE_SC
 }
+
+// Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.20 lays it out.
 func (d *EllipeSc) Unpack(r io.Reader, present uint32, delta bool) error {
+	if present&0x0001 != 0 {
+		readOrderCoord(r, &d.Left, delta)
+	}
+	if present&0x0002 != 0 {
+		readOrderCoord(r, &d.Top, delta)
+	}
+	if present&0x0004 != 0 {
+		readOrderCoord(r, &d.Right, delta)
+	}
+	if present&0x0008 != 0 {
+		readOrderCoord(r, &d.Bottom, delta)
+	}
+	if present&0x0010 != 0 {
+		d.Opcode, _ = core.ReadUInt8(r)
+	}
+	if present&0x0020 != 0 {
+		d.Fillmode, _ = core.ReadUInt8(r)
+	}
+	if present&0x0040 != 0 {
+		b, g, rr, a := updateReadColorRef(r)
+		d.Colour[0], d.Colour[1], d.Colour[2], d.Colour[3] = b, g, rr, a
+	}
 	return nil
 }
 
+// EllipeCb is an ellipse filled with a colour brush.
 type EllipeCb struct {
+	Left, Top, Right, Bottom int32
+	Opcode                   uint8
+	Fillmode                 uint8
+	BgColour                 [4]uint8
+	FgColour                 [4]uint8
 }
 
 func (d *EllipeCb) Type() int {
 	return ORDER_TYPE_ELLIPSE_CB
 }
+
+// Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.21 lays it out.
 func (d *EllipeCb) Unpack(r io.Reader, present uint32, delta bool) error {
+	if present&0x0001 != 0 {
+		readOrderCoord(r, &d.Left, delta)
+	}
+	if present&0x0002 != 0 {
+		readOrderCoord(r, &d.Top, delta)
+	}
+	if present&0x0004 != 0 {
+		readOrderCoord(r, &d.Right, delta)
+	}
+	if present&0x0008 != 0 {
+		readOrderCoord(r, &d.Bottom, delta)
+	}
+	if present&0x0010 != 0 {
+		d.Opcode, _ = core.ReadUInt8(r)
+	}
+	if present&0x0020 != 0 {
+		d.Fillmode, _ = core.ReadUInt8(r)
+	}
+	if present&0x0040 != 0 {
+		b, g, rr, a := updateReadColorRef(r)
+		d.BgColour[0], d.BgColour[1], d.BgColour[2], d.BgColour[3] = b, g, rr, a
+	}
+	if present&0x0080 != 0 {
+		b, g, rr, a := updateReadColorRef(r)
+		d.FgColour[0], d.FgColour[1], d.FgColour[2], d.FgColour[3] = b, g, rr, a
+	}
 	return nil
 }
 
+// GlayphIndex is the TEXT2 order, which draws from a cache of glyphs the server
+// has already sent.
+//
+// Neither half is implemented: the order is not parsed, and there is no glyph
+// cache for it to draw from. Parsing it as nothing would leave the stream out of
+// step for every order after it in the same batch, so it reports that it cannot
+// be read and the batch is dropped instead. No server tested has sent one.
 type GlayphIndex struct {
 }
 
 func (d *GlayphIndex) Type() int {
 	return ORDER_TYPE_TEXT2
 }
+
 func (d *GlayphIndex) Unpack(r io.Reader, present uint32, delta bool) error {
-	return nil
+	return fmt.Errorf("text2 order: glyph rendering needs a glyph cache, which is not implemented")
 }
 
 /*Secondary*/
@@ -1396,6 +1582,10 @@ func (s *Secondary) updateCacheBrushOrder(r io.Reader, flags uint16) {
 				scanline := 8 * 8 * bpp
 				cb.data, _ = core.ReadBytes(scanline, r)
 			}
+		}
+		if s.CacheBrush != nil {
+			s.CacheBrush.Data = cb.data
+			s.CacheBrush.Hatch = cb.index
 		}
 	}
 }

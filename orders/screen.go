@@ -3,6 +3,7 @@ package orders
 import (
 	"fmt"
 	"image"
+	"sort"
 	"sync"
 
 	"github.com/adfnekc/grdp/glog"
@@ -16,6 +17,7 @@ const (
 	ropBlack   uint8 = 0x00
 	ropWhite   uint8 = 0xFF
 	ropNoop    uint8 = 0xAA
+	ropPatCopy uint8 = 0xF0
 )
 
 // Screen is a framebuffer that renders drawing orders. It holds BGRA pixels,
@@ -113,7 +115,7 @@ func (s *Screen) drawOne(o *pdu.OrderPdu) image.Rectangle {
 		if cb := o.Secondary.CacheBitmap; cb != nil {
 			s.Cache.Put(cb)
 		}
-		// Filling the cache changes nothing on screen.
+		// Filling a cache changes nothing on screen.
 		return image.Rectangle{}
 	}
 	if o.Primary == nil || o.Primary.Data == nil {
@@ -136,6 +138,18 @@ func (s *Screen) drawOne(o *pdu.OrderPdu) image.Rectangle {
 		return s.dstblt(d, clip)
 	case *pdu.OpaqueRect:
 		return s.opaqueRect(d, clip)
+	case *pdu.Patblt:
+		return s.patblt(d, clip)
+	case *pdu.PolygonSc:
+		return s.polygon(d.Points, d.Fgcolour, clip)
+	case *pdu.PolygonCb:
+		return s.polygon(d.Points, d.FgColour, clip)
+	case *pdu.Polyline:
+		return s.polyline(d.Points, d.Colour, clip)
+	case *pdu.EllipeSc:
+		return s.ellipse(d.Left, d.Top, d.Right, d.Bottom, d.Colour, false, clip)
+	case *pdu.EllipeCb:
+		return s.ellipse(d.Left, d.Top, d.Right, d.Bottom, d.FgColour, true, clip)
 	default:
 		s.note(fmt.Sprintf("%T", o.Primary.Data))
 		return image.Rectangle{}
@@ -233,6 +247,66 @@ func (s *Screen) dstblt(d *pdu.Dstblt, clip image.Rectangle) image.Rectangle {
 	return s.fill(int(d.X), int(d.Y), int(d.Cx), int(d.Cy), c, clip)
 }
 
+// patblt fills a rectangle from a brush, which is how a server draws a solid
+// fill or a hatch.
+//
+// Almost every one of these is a solid brush with PATCOPY, which is a fill in a
+// colour. A patterned brush is drawn as an eight by eight monochrome tile, with
+// the background colour where the pattern has a zero and the foreground where it
+// has a one.
+func (s *Screen) patblt(d *pdu.Patblt, clip image.Rectangle) image.Rectangle {
+	fg := inkColour(d.FgColour)
+	bg := inkColour(d.BgColour)
+
+	switch d.Opcode {
+	case ropBlack:
+		return s.fill(int(d.X), int(d.Y), int(d.Cx), int(d.Cy), [4]uint8{0, 0, 0, 0}, clip)
+	case ropWhite:
+		return s.fill(int(d.X), int(d.Y), int(d.Cx), int(d.Cy), [4]uint8{0xff, 0xff, 0xff, 0}, clip)
+	case ropPatCopy:
+		// Handled below.
+	default:
+		s.note(fmt.Sprintf("patblt rop 0x%02x", d.Opcode))
+		return image.Rectangle{}
+	}
+
+	r := image.Rect(int(d.X), int(d.Y), int(d.X+d.Cx), int(d.Y+d.Cy)).Intersect(clip)
+	if r.Empty() {
+		return image.Rectangle{}
+	}
+
+	// The brush travels with the order rather than being named in a cache. Eight
+	// bytes of pattern is an eight by eight monochrome tile, which is the only
+	// shape that can be interpreted without more than the order carries; a solid
+	// brush is a fill, and anything else falls back to the foreground colour
+	// rather than painting something guessed.
+	pattern := d.Brush.Data
+	if len(pattern) != 8 {
+		return s.fill(int(d.X), int(d.Y), int(d.Cx), int(d.Cy), d.FgColour, clip)
+	}
+
+	for row := r.Min.Y; row < r.Max.Y; row++ {
+		bits := pattern[row%8]
+		base := (row*s.width + r.Min.X) * 4
+		for col := r.Min.X; col < r.Max.X; col++ {
+			// The pattern's most significant bit is its leftmost pixel.
+			c := fg
+			if bits&(0x80>>uint(col%8)) == 0 {
+				c = bg
+			}
+			copy(s.pixels[base:base+4], c[:])
+			base += 4
+		}
+	}
+	return r
+}
+
+// inkColour turns an order's colour into a BGRA pixel. TS_COLOR is red, green,
+// blue in that order, so it is reversed on the way into a BGRA buffer.
+func inkColour(c [4]uint8) [4]uint8 {
+	return [4]uint8{c[2], c[1], c[0], 0xff}
+}
+
 // opaqueRect fills a rectangle with the colour the order carries.
 func (s *Screen) opaqueRect(d *pdu.OpaqueRect, clip image.Rectangle) image.Rectangle {
 	return s.fill(int(d.X), int(d.Y), int(d.Cx), int(d.Cy), d.Colour, clip)
@@ -285,6 +359,147 @@ func (s *Screen) blitBGRA(src []byte, srcStride int, srcX, srcY, cx, cy, dstX, d
 		sy++
 	}
 	return r
+}
+
+// polygon fills the shape the points describe, by scanline. The last point of
+// the list is expected to be the first one again, so it is not treated as an
+// extra edge.
+func (s *Screen) polygon(points []pdu.Point, colour [4]uint8, clip image.Rectangle) image.Rectangle {
+	if len(points) < 3 {
+		return image.Rectangle{}
+	}
+	ink := inkColour(colour)
+
+	minY, maxY := points[0].Y, points[0].Y
+	for _, p := range points[1:] {
+		if p.Y < minY {
+			minY = p.Y
+		}
+		if p.Y > maxY {
+			maxY = p.Y
+		}
+	}
+
+	var dirty image.Rectangle
+	for y := int(minY); y <= int(maxY); y++ {
+		// The crossings of this scanline with each edge, at y plus a half so
+		// that a vertex is counted once.
+		var xs []int
+		for i := 0; i < len(points); i++ {
+			a := points[i]
+			b := points[(i+1)%len(points)]
+			if a.Y == b.Y {
+				continue
+			}
+			lo, hi := int(a.Y), int(b.Y)
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			if y < lo || y >= hi {
+				continue
+			}
+			// Interpolate for the centre of the pixel row.
+			num := (y-int(a.Y))*(int(b.X)-int(a.X)) + (int(b.Y)-int(a.Y))/2
+			xs = append(xs, int(a.X)+num/(int(b.Y)-int(a.Y)))
+		}
+		if len(xs) < 2 {
+			continue
+		}
+		sort.Ints(xs)
+		for i := 0; i+1 < len(xs); i += 2 {
+			r := s.fill(xs[i], y, xs[i+1]-xs[i]+1, 1, colour, clip)
+			dirty = union(dirty, r)
+		}
+	}
+	_ = ink
+	return dirty
+}
+
+// polyline draws the segments the points describe.
+func (s *Screen) polyline(points []pdu.Point, colour [4]uint8, clip image.Rectangle) image.Rectangle {
+	if len(points) < 2 {
+		return image.Rectangle{}
+	}
+	var dirty image.Rectangle
+	for i := 0; i+1 < len(points); i++ {
+		dirty = union(dirty, s.line(points[i], points[i+1], colour, clip))
+	}
+	return dirty
+}
+
+// line draws one segment, one pixel thick, which is what a thin pen is.
+func (s *Screen) line(a, b pdu.Point, colour [4]uint8, clip image.Rectangle) image.Rectangle {
+	dx, dy := int(b.X-a.X), int(b.Y-a.Y)
+	steps := abs(dx)
+	if abs(dy) > steps {
+		steps = abs(dy)
+	}
+	if steps == 0 {
+		return s.fill(int(a.X), int(a.Y), 1, 1, colour, clip)
+	}
+
+	var dirty image.Rectangle
+	for i := 0; i <= steps; i++ {
+		x := int(a.X) + dx*i/steps
+		y := int(a.Y) + dy*i/steps
+		dirty = union(dirty, s.fill(x, y, 1, 1, colour, clip))
+	}
+	return dirty
+}
+
+// ellipse draws the ellipse the rectangle inscribes: its boundary, one pixel
+// thick, or the whole shape when asked to fill it.
+func (s *Screen) ellipse(left, top, right, bottom int32, colour [4]uint8, filled bool, clip image.Rectangle) image.Rectangle {
+	r := image.Rect(int(left), int(top), int(right), int(bottom))
+	if r.Empty() {
+		return image.Rectangle{}
+	}
+	// Radii, so that the centre lands on a pixel whatever the parity of the size.
+	w, h := (r.Dx()-1)/2, (r.Dy()-1)/2
+	if w < 1 || h < 1 {
+		return s.fill(r.Min.X, r.Min.Y, r.Dx(), r.Dy(), colour, clip)
+	}
+	cx, cy := r.Min.X+w, r.Min.Y+h
+	w2, h2 := w*w, h*h
+
+	var dirty image.Rectangle
+	prevL, prevR := 0, 0
+	for y := -h; y <= h; y++ {
+		// Half the width at this row, from the equation of the ellipse.
+		inner := w2 * (1 - (y*y)/h2)
+		span := 0
+		for (span+1)*(span+1) <= inner {
+			span++
+		}
+		l, rr := cx-span, cx+span
+
+		if filled {
+			dirty = union(dirty, s.fill(l, cy+y, 2*span+1, 1, colour, clip))
+		} else {
+			// The two ends of the row, plus whatever the previous row's ends
+			// leave uncovered, so that the outline stays joined where it runs
+			// sideways near the top and bottom.
+			dirty = union(dirty, s.fill(l, cy+y, 1, 1, colour, clip))
+			dirty = union(dirty, s.fill(rr, cy+y, 1, 1, colour, clip))
+			if y > -h {
+				if l < prevL {
+					dirty = union(dirty, s.fill(l, cy+y, prevL-l, 1, colour, clip))
+				}
+				if rr > prevR {
+					dirty = union(dirty, s.fill(prevR+1, cy+y, rr-prevR, 1, colour, clip))
+				}
+			}
+		}
+		prevL, prevR = l, rr
+	}
+	return dirty
+}
+
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (s *Screen) note(kind string) {
