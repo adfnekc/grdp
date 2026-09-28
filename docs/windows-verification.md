@@ -114,3 +114,44 @@ session rather than assumed:
 * running `echo SERVER-SIDE-TEXT| clip` in the session, then asking the client
   for the clipboard, yields `SERVER-SIDE-TEXT\r\n` (the `clip` tool adds the
   line ending, and it is passed through unchanged).
+
+## Orders: used by Windows, declined by us
+
+Orders are the RDP 4/5 era drawing commands that draw GDI primitives and blit
+from a bitmap cache. This client parses them and does not render them, and it
+turns out the second half of that is a choice rather than an accident.
+
+The `OrderCapability` we send has an all zero 32 byte `orderSupport` array, which
+tells the server we can draw none of the order types. Filling it in changes what
+arrives completely:
+
+| | `orderSupport` all zero | `orderSupport` populated |
+| --- | --- | --- |
+| Orders updates (0x00) | 0 | 144 |
+| Bitmap updates (0x01) | 140 | 0 |
+
+So Windows will happily switch to orders, and the traffic becomes 144 orders
+updates instead of 140 bitmap updates, each carrying many primitives. What it
+sends, counted over one session with a little clicking around:
+
+| order | count |
+| --- | --- |
+| primary `ORDER_TYPE_MEMBLT` (13), blit from the bitmap cache | 1770 |
+| secondary `ORDER_TYPE_BITMAP_COMPRESSED_V2` (5), fill the cache | 1000 |
+| alternate secondary | 62 |
+| primary `ORDER_TYPE_SCRBLT` (2) | 1 |
+
+That is the whole drawing model: put a bitmap in the cache, then blit it to the
+screen with MEMBLT. Nothing else matters much, and in particular the cache is
+revision 2, so the interleaved RLE that revision 3 needs does not come up.
+
+Two consequences worth recording:
+
+* declining orders is safe and the current sessions are correct because of it.
+  What it costs is efficiency, not correctness, so implementing orders is an
+  optimisation rather than a fix;
+* xrdp sends no orders even when asked, so this had to be found on Windows.
+
+The placement of the `orderSupport` bits, the cache revision actually used, and
+the order types that matter were only visible from a capture. Any implementation
+should be built against one, the way the codecs were.
