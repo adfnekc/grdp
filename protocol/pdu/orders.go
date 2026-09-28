@@ -1033,6 +1033,32 @@ type CacheBitmapOrder struct {
 	bitmapDataStream []byte
 }
 
+// readVarUint16 reads MS-RDPEGDI's compact two byte unsigned value: one byte
+// when it fits in seven bits, two when the first byte's top bit says otherwise.
+// These fields are not fixed width, which is easy to get wrong and shifts
+// everything that follows, including the bitmap itself.
+func readVarUint16(r io.Reader) uint32 {
+	b, _ := core.ReadUInt8(r)
+	if b&0x80 == 0 {
+		return uint32(b & 0x7f)
+	}
+	lo, _ := core.ReadUInt8(r)
+	return uint32(b&0x7f)<<8 | uint32(lo)
+}
+
+// readVarUint32 is the four byte form: the top two bits of the first byte say
+// how many more follow.
+func readVarUint32(r io.Reader) uint32 {
+	b, _ := core.ReadUInt8(r)
+	count := (b & 0xc0) >> 6
+	v := uint32(b & 0x3f)
+	for i := byte(0); i < count; i++ {
+		next, _ := core.ReadUInt8(r)
+		v = v<<8 | uint32(next)
+	}
+	return v
+}
+
 func getCbV2Bpp(bpp uint32) (b uint32) {
 	switch bpp {
 	case 3:
@@ -1055,9 +1081,9 @@ type CacheBitmapV2Order struct {
 	key1               uint32
 	key2               uint32
 	bitmapBpp          uint32
-	bitmapWidth        uint8
-	bitmapHeight       uint8
-	bitmapLength       uint16
+	bitmapWidth        uint32
+	bitmapHeight       uint32
+	bitmapLength       uint32
 	cacheIndex         uint32
 	compressed         bool
 	cbCompFirstRowSize uint16
@@ -1080,20 +1106,20 @@ func (s *Secondary) updateCacheBitmapV2Order(r io.Reader, compressed bool, flags
 	}
 
 	if cb.flags&CBR2_HEIGHT_SAME_AS_WIDTH != 0 {
-		cb.bitmapWidth, _ = core.ReadUInt8(r)
+		cb.bitmapWidth = readVarUint16(r)
 		cb.bitmapHeight = cb.bitmapWidth
 	} else {
-		cb.bitmapWidth, _ = core.ReadUInt8(r)
-		cb.bitmapHeight, _ = core.ReadUInt8(r)
+		cb.bitmapWidth = readVarUint16(r)
+		cb.bitmapHeight = readVarUint16(r)
 	}
 
-	bitmapLength, _ := core.ReadUint16LE(r)
-	cacheIndex, _ := core.ReadUInt8(r)
+	bitmapLength := readVarUint32(r)
+	cacheIndex := readVarUint16(r)
 
 	if cb.flags&CBR2_DO_NOT_CACHE != 0 {
 		cb.cacheIndex = 0x7FFF
 	} else {
-		cb.cacheIndex = uint32(cacheIndex)
+		cb.cacheIndex = cacheIndex
 	}
 
 	if compressed {
@@ -1102,7 +1128,7 @@ func (s *Secondary) updateCacheBitmapV2Order(r io.Reader, compressed bool, flags
 			cb.cbCompMainBodySize, _ = core.ReadUint16LE(r)
 			cb.cbScanWidth, _ = core.ReadUint16LE(r)
 			cb.cbUncompressedSize, _ = core.ReadUint16LE(r)
-			bitmapLength = cb.cbCompMainBodySize
+			bitmapLength = uint32(cb.cbCompMainBodySize)
 		}
 	}
 

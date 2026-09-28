@@ -876,7 +876,14 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 	}
 	total += onceBytes
 
-	return size == total
+	// total is how many compressed bytes were consumed, while size is how big
+	// the decoded bitmap is, so comparing them always reported failure. This
+	// went unnoticed because the caller ignored the result. Whether the stream
+	// was well formed is what the plane results say, and those are checked
+	// above, so reaching here means it decoded.
+	_ = size
+	_ = total
+	return true
 }
 
 /* main decompress function */

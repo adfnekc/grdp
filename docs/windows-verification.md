@@ -162,21 +162,38 @@ The parsed cache bitmaps are now kept, in `CacheBitmap` on the secondary order,
 with compressed entries decoded on arrival so a blit is a copy. That much is
 unit tested. Two things are known and not done.
 
-**The cache stream has a byte in front of the RLE data.** A bitmap update's
-compressed payload begins straight with the RLE code:
+**The cache order's fields are not fixed width, which the parser assumed.** A
+cache order's header looked like it had one byte too many in front of the RLE
+data, and it turned out to be our own: `bitmapWidth`, `bitmapHeight` and
+`cacheIndex` use MS-RDPEGDI's compact form, one byte when the value fits in seven
+bits and two when the top bit of the first says otherwise, and `bitmapLength`
+uses the four byte form where the top two bits say how many bytes follow.
+Reading them as fixed width stole a byte from the bitmap.
+
+The captured order shows it plainly:
 
 ```
-bitmap update  10 f2 11 f2 11 f2 11 ...   decodes correctly today
-cache order    ff 10 f2 11 f2 11 f2 11 ...
+40 42 01 ff ff 10 f2 11 ...
+│  │     │  └─ cacheIndex: (0x7f<<8)|0xff = 0x7fff, the waiting list
+│  │     └──── (the first of those two bytes)
+│  └─ bitmapLength: ((0x42 & 0x3f) << 8) | 0x01 = 513, two bytes because
+│      the top bits are 01
+└─ bitmapWidth: 0x40 = 64, one byte
 ```
 
-Everything after the first byte is identical, so there is a field in the cache
-order that the parser is not consuming. Feeding it to the decoder as it stands
-produces zeros rather than pixels, which is what `decompress4` returns when its
-first byte is not the code it expects. This wants the same treatment as the
-WireToSurface header: find the field in the specification, or settle it against
-a capture, rather than guessing at an offset. Note that this is an off by one in
-our parser, not a second compression format.
+518 bytes, which is 1 + 2 + 2 + 513, and the RLE data starts with `10` exactly as
+a bitmap update does. So there was never a second compression format: the
+`0xff` was the low byte of a two byte `cacheIndex`.
+
+The parser reads the compact forms now, a captured order is a test fixture, and
+that test checks the checksum of the decoded pixels. A shift of one byte changes
+the image, and "it decoded to something" would not have noticed.
+
+**`decompress4` compared the wrong two numbers.** It ended with
+`return size == total`, where `size` is the size of the decoded bitmap and
+`total` is how many compressed bytes were consumed, so it reported failure for
+every 32bpp bitmap. Nobody noticed because the caller ignored the result. It now
+returns whether the planes decoded, and the caller checks it.
 
 **The bitmap decompressor used to hang on malformed input.** Handing
 `core.Decompress` a short compressed payload did not return an error, it did not
