@@ -887,14 +887,14 @@ const (
 	FASTPATH_FRAGMENT_NEXT   = (0x3 << 4)
 )
 
-func readFastPathUpdatePDU(r io.Reader, code uint8) (*FastPathUpdatePDU, error) {
+func readFastPathUpdatePDU(r io.Reader, code uint8, state *OrderState) (*FastPathUpdatePDU, error) {
 	f := &FastPathUpdatePDU{}
 	var err error
 	var d UpdateData
 	//glog.Debugf("FastPathPDU type %s(0x%x)", FastPathUpdateType(code), code)
 	switch code {
 	case FASTPATH_UPDATETYPE_ORDERS:
-		d = &FastPathOrdersPDU{}
+		d = &FastPathOrdersPDU{State: state}
 	case FASTPATH_UPDATETYPE_BITMAP:
 		d = &FastPathBitmapUpdateDataPDU{}
 	case FASTPATH_UPDATETYPE_SURFCMDS:

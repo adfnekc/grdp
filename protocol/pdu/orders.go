@@ -129,6 +129,9 @@ type OrderPdu struct {
 	Altsec       *Altsec
 	Primary      *Primary
 	Secondary    *Secondary
+
+	// state is the connection's parsing state, supplied by the batch.
+	state *OrderState
 }
 
 func (o *OrderPdu) HasBounds() bool {
@@ -206,6 +209,11 @@ type Primary struct {
 }
 
 type FastPathOrdersPDU struct {
+	// State is the connection's order parsing state. It has to be the same one
+	// for every update on a connection, since delta coordinates refer back to
+	// earlier orders.
+	State *OrderState
+
 	NumberOrders uint16
 	OrderPdus    []OrderPdu
 }
@@ -218,7 +226,7 @@ func (f *FastPathOrdersPDU) Unpack(r io.Reader) error {
 	f.NumberOrders, _ = core.ReadUint16LE(r)
 	//glog.Info("NumberOrders:", f.NumberOrders)
 	for i := 0; i < int(f.NumberOrders); i++ {
-		var o OrderPdu
+		o := OrderPdu{state: f.State}
 		o.ControlFlags, _ = core.ReadUInt8(r)
 		if o.ControlFlags&TS_STANDARD == 0 {
 			//glog.Info("Altsec order")
@@ -337,13 +345,32 @@ type PrimaryOrder interface {
 	Unpack(io.Reader, uint32, bool) error
 }
 
-// deltaOrders holds the last parsed order of each type, which is what delta
-// coordinates are relative to.
+// OrderState is the order parsing state that outlives a single update: the last
+// order type, the last bounds, and the last order of each type.
 //
-// It is package level, like the order type and bounds the parser already keeps
-// there, so two connections in one process share it. That is wrong and should
-// become per connection; it is noted rather than quietly relied upon.
-var deltaOrders = map[int]PrimaryOrder{}
+// All three have to persist across updates, because an order with
+// TS_DELTA_COORDINATES repeats the fields the previous order of its type left
+// out. They used to be package level variables, which meant every connection in
+// a process shared them and one connection's orders filled in another's gaps.
+// This belongs to a connection, so it is handed to the batch being parsed.
+type OrderState struct {
+	orderType uint8
+	bounds    Bounds
+	delta     map[int]PrimaryOrder
+}
+
+// NewOrderState returns fresh parsing state for one connection.
+func NewOrderState() *OrderState {
+	return &OrderState{delta: make(map[int]PrimaryOrder)}
+}
+
+// Reset forgets the previous orders, which is what a server starting over
+// implies.
+func (st *OrderState) Reset() {
+	st.orderType = 0
+	st.bounds = Bounds{}
+	st.delta = make(map[int]PrimaryOrder)
+}
 
 // copyPrimaryOrder overwrites dst with the fields of src when they are the same
 // concrete type, leaving dst alone otherwise.
@@ -359,16 +386,22 @@ func copyPrimaryOrder(dst, src PrimaryOrder) {
 	d.Elem().Set(s.Elem())
 }
 
-var (
-	orderType uint8
-	bounds    Bounds
-)
+// stateFor returns the parser state for this order, allocating a throwaway one
+// when an order is parsed on its own rather than as part of a connection.
+func (o *OrderPdu) stateFor() *OrderState {
+	if o.state == nil {
+		o.state = NewOrderState()
+	}
+	return o.state
+}
 
 func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
+	st := o.stateFor()
 	o.Primary = &Primary{}
 	if o.ControlFlags&TS_TYPE_CHANGE != 0 {
-		orderType, _ = core.ReadUInt8(r)
+		st.orderType, _ = core.ReadUInt8(r)
 	}
+	orderType := st.orderType
 	size := 1
 	switch orderType {
 	case ORDER_TYPE_MEM3BLT, ORDER_TYPE_TEXT2:
@@ -396,10 +429,10 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 
 	if o.ControlFlags&TS_BOUNDS != 0 {
 		if o.ControlFlags&TS_ZERO_BOUNDS_DELTAS == 0 {
-			bounds.updateBounds(r)
+			st.bounds.updateBounds(r)
 		}
 		//glog.Infof("updateBounds")
-		o.Primary.Bounds = bounds
+		o.Primary.Bounds = st.bounds
 	}
 
 	delta := o.ControlFlags&TS_DELTA_COORDINATES != 0
@@ -475,14 +508,14 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		// valued struct loses them, and the symptom is not a parse error: a
 		// MEMBLT that omits its cache id reads as cache 0 and finds nothing.
 		if delta {
-			if prev, ok := deltaOrders[p.Type()]; ok {
+			if prev, ok := st.delta[p.Type()]; ok {
 				copyPrimaryOrder(p, prev)
 			}
 		}
 		if err := p.Unpack(r, present, delta); err != nil {
 			return err
 		}
-		deltaOrders[p.Type()] = p
+		st.delta[p.Type()] = p
 	}
 
 	o.Primary.Data = p

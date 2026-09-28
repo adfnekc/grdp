@@ -114,3 +114,98 @@ func TestCacheBitmapV2RealWindowsOrder(t *testing.T) {
 		t.Errorf("decoded bitmap checksum is %#08x, want %#08x", got, want)
 	}
 }
+
+// With TS_DELTA_COORDINATES, the fields an order leaves out repeat the values
+// from the previous order of the same type. They are not zero, and a parser that
+// treats them as zero does not fail: it looks in the wrong place. A MEMBLT that
+// omits its cache id reads cache 0 and finds nothing there, which is a black
+// screen rather than an error.
+func TestOrderDeltaCoordinatesCarryFieldsForward(t *testing.T) {
+	// Two MEMBLTs in one batch. The first states its cache and size, the second
+	// only moves along, so everything else has to come from the first.
+	var b bytes.Buffer
+	writeU16 := func(v uint16) { b.Write([]byte{byte(v), byte(v >> 8)}) }
+	writeU16(2) // numberOrders
+
+	// First order: new type, cacheId/width/height/cacheIndex present, absolute
+	// coordinates so the values are two bytes each.
+	b.WriteByte(TS_STANDARD | TS_TYPE_CHANGE)
+	b.WriteByte(ORDER_TYPE_MEMBLT)
+	writeU16(0x0001 | 0x0008 | 0x0010 | 0x0100)
+	b.WriteByte(1) // cacheId
+	b.WriteByte(0) // colour table
+	writeU16(64)   // width
+	writeU16(64)   // height
+	writeU16(7)    // cache index
+
+	// Second order: same type, delta coordinates, only the left coordinate.
+	b.WriteByte(TS_STANDARD | TS_DELTA_COORDINATES)
+	writeU16(0x0002)
+	b.WriteByte(64) // left, as a signed change
+
+	state := NewOrderState()
+	var pdu FastPathOrdersPDU
+	pdu.State = state
+	if err := pdu.Unpack(bytes.NewReader(b.Bytes())); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	if len(pdu.OrderPdus) != 2 {
+		t.Fatalf("parsed %d orders, want 2", len(pdu.OrderPdus))
+	}
+
+	first, ok := pdu.OrderPdus[0].Primary.Data.(*Memblt)
+	if !ok {
+		t.Fatalf("first order is %T, want a MEMBLT", pdu.OrderPdus[0].Primary.Data)
+	}
+	if first.CacheId != 1 || first.Cx != 64 || first.Cy != 64 || first.CacheIdx != 7 {
+		t.Fatalf("first order is %+v", first)
+	}
+
+	second, ok := pdu.OrderPdus[1].Primary.Data.(*Memblt)
+	if !ok {
+		t.Fatalf("second order is %T, want a MEMBLT", pdu.OrderPdus[1].Primary.Data)
+	}
+	if second.CacheId != first.CacheId {
+		t.Errorf("cache id is %d, want %d from the previous order", second.CacheId, first.CacheId)
+	}
+	if second.Cx != first.Cx || second.Cy != first.Cy {
+		t.Errorf("size is %dx%d, want %dx%d from the previous order", second.Cx, second.Cy, first.Cx, first.Cy)
+	}
+	if second.CacheIdx != first.CacheIdx {
+		t.Errorf("cache index is %d, want %d from the previous order", second.CacheIdx, first.CacheIdx)
+	}
+	if second.X != 64 {
+		t.Errorf("left coordinate is %d, want 64", second.X)
+	}
+}
+
+// Two connections must not share parsing state: one connection's orders would
+// otherwise fill in the gaps in the other's.
+func TestOrderStateIsPerConnection(t *testing.T) {
+	var b bytes.Buffer
+	writeU16 := func(v uint16) { b.Write([]byte{byte(v), byte(v >> 8)}) }
+
+	// One order that states a cache id and nothing else that matters.
+	writeU16(1)
+	b.WriteByte(TS_STANDARD | TS_TYPE_CHANGE)
+	b.WriteByte(ORDER_TYPE_MEMBLT)
+	writeU16(0x0001)
+	b.WriteByte(3) // cacheId
+	b.WriteByte(0) // colour table
+
+	other := NewOrderState()
+	var pdu FastPathOrdersPDU
+	pdu.State = other
+	if err := pdu.Unpack(bytes.NewReader(b.Bytes())); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+
+	// A different connection must start from nothing.
+	if len(other.delta) != 1 {
+		t.Errorf("the parsing connection holds %d delta entries, want 1", len(other.delta))
+	}
+	fresh := NewOrderState()
+	if len(fresh.delta) != 0 {
+		t.Errorf("a new connection starts with %d delta entries, want 0", len(fresh.delta))
+	}
+}

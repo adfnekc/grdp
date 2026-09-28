@@ -140,12 +140,18 @@ type Client struct {
 	*PDULayer
 	clientCoreData *gcc.ClientCoreData
 	buff           *bytes.Buffer
+
+	// orders is the parsing state for drawing orders: the order type, bounds
+	// and per type fields that delta coordinates refer back to. It belongs to
+	// one connection, which is why it lives here and not in the parser.
+	orders *OrderState
 }
 
 func NewClient(t core.Transport) *Client {
 	c := &Client{
 		PDULayer: NewPDULayer(t),
 		buff:     &bytes.Buffer{},
+		orders:   NewOrderState(),
 	}
 	c.transport.Once("connect", c.connect)
 	return c
@@ -467,7 +473,7 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 			src = bytes.NewReader(body)
 		}
 
-		p, err := readFastPathUpdatePDU(src, updateCode)
+		p, err := readFastPathUpdatePDU(src, updateCode, c.orders)
 		if err != nil || p == nil || p.Data == nil {
 			glog.Debug("readFastPathUpdatePDU:", err)
 			return
