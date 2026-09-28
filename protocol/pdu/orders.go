@@ -516,10 +516,14 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		// values from the previous order of the same type. Parsing into a zero
 		// valued struct loses them, and the symptom is not a parse error: a
 		// MEMBLT that omits its cache id reads as cache 0 and finds nothing.
-		if delta {
-			if prev, ok := st.delta[p.Type()]; ok {
-				copyPrimaryOrder(p, prev)
-			}
+		// The fields an order leaves out repeat the previous order of the same
+		// type. This is not tied to TS_DELTA_COORDINATES, which only says that
+		// the coordinates that are present are relative to the last one:
+		// presence is what the field flags are for. Gating the carry over on the
+		// delta flag meant that an order which only moved kept nothing, and drew
+		// nothing, because its cache and its size came back as zero.
+		if prev, ok := st.delta[p.Type()]; ok {
+			copyPrimaryOrder(p, prev)
 		}
 		if err := p.Unpack(r, present, delta); err != nil {
 			return err

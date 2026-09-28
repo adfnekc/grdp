@@ -156,11 +156,32 @@ The placement of the `orderSupport` bits, the cache revision actually used, and
 the order types that matter were only visible from a capture. Any implementation
 should be built against one, the way the codecs were.
 
-### Where an implementation stands
+### Orders now render
 
-The parsed cache bitmaps are now kept, in `CacheBitmap` on the secondary order,
-with compressed entries decoded on arrival so a blit is a copy. That much is
-unit tested. Two things are known and not done.
+The parsed cache bitmaps are kept on the secondary order, with compressed entries
+decoded on arrival so a blit is a copy, and the renderer draws MEMBLT, DSTBLT,
+SCRBLT and OPAQUERECT with the bounds an order carries as a clip. A session comes
+out whole: wallpaper, icons, the text in a console window, taskbar and clock, all
+of it through the cache, with no order skipped.
+
+It is accurate rather than approximate, which the screenshot comparison shows.
+Against the same screen drawn from bitmap updates, orders differ in 155 pixels,
+every one of them in the taskbar clock, which is where two runs of the *same*
+path differ too:
+
+| comparison | mean channel difference | pixels differing visibly |
+| --- | --- | --- |
+| bitmap vs bitmap (the control) | 0.031 of 255 | 169, all in the clock |
+| bitmap vs EGFX, which is lossy | 2.886 of 255 | 1438 (0.18%) |
+| bitmap vs orders | 0.026 of 255 | 148, all in the clock |
+
+Orders are lossless because the cache holds RLE bitmaps, so they match the bitmap
+path to the clock. EGFX is RemoteFX and does not, which is expected and is why
+the control is worth running: without it, a mean difference of 2.9 could be read
+as a bug.
+
+Four things had to be fixed to get there, and each was found by running against
+the server rather than by reading the specification.
 
 **The cache order's fields are not fixed width, which the parser assumed.** A
 cache order's header looked like it had one byte too many in front of the RLE
@@ -203,13 +224,20 @@ coordinate, and shifting it up gives `0x200`, which is bit nine of a nine bit
 field and so names nothing at all. The bytes that remain are read from the bottom
 up.
 
-**An order with delta coordinates repeats the previous order's fields.** This is
-the one that took longest to see, because nothing about it looks like a bug: with
-`TS_DELTA_COORDINATES` set, the fields an order leaves out are not zero, they are
-whatever the previous order of the same type carried. Parsing into a fresh struct
-loses them, and the symptom is not a parse error but a MEMBLT that omits its
-cache id, reads cache 0, and finds nothing there. The parser keeps the last order
-of each type now and fills the gaps from it.
+**An order repeats the previous order's fields, and not only when it says it
+does.** The fields an order leaves out are not zero, they are whatever the
+previous order of the same type carried, and parsing into a fresh struct loses
+them. The symptom is not a parse error: a MEMBLT that omits its cache id reads
+cache 0, finds nothing, and draws nothing.
+
+The part that took longest to see is that this has nothing to do with
+`TS_DELTA_COORDINATES`. That flag only says the coordinates which are present are
+relative to the last ones; which fields are present at all is what the field flags
+are for. The carry over was gated on the delta flag, so an order that merely moved
+along kept nothing and drew nothing, and a session of 1300 batches produced one
+frame. Against a real server the evidence was plain once it was printed: the
+order carried `present=0x0006`, no delta flag, and discarded a perfectly good
+previous entry of cache 2 at 64x64.
 
 **`decompress4` compared the wrong two numbers.** It ended with
 `return size == total`, where `size` is the size of the decoded bitmap and

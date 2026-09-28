@@ -209,3 +209,61 @@ func TestOrderStateIsPerConnection(t *testing.T) {
 		t.Errorf("a new connection starts with %d delta entries, want 0", len(fresh.delta))
 	}
 }
+
+// The carry over of absent fields is not tied to TS_DELTA_COORDINATES.
+//
+// That flag only says the coordinates that are present are relative to the last
+// one; which fields are present at all is the field flags' business. Gating the
+// carry over on the delta flag meant that an order which merely moved along kept
+// nothing from its predecessor: its cache id and its size came back as zero, so
+// it drew nothing, and a session of 1300 batches produced one frame. This test
+// is that case: no delta flag, and fields left out all the same.
+func TestOrderCarryOverWithoutDeltaCoordinates(t *testing.T) {
+	var b bytes.Buffer
+	writeU16 := func(v uint16) { b.Write([]byte{byte(v), byte(v >> 8)}) }
+	writeU16(2)
+
+	// First order states its cache, size and index.
+	b.WriteByte(TS_STANDARD | TS_TYPE_CHANGE)
+	b.WriteByte(ORDER_TYPE_MEMBLT)
+	writeU16(0x0001 | 0x0008 | 0x0010 | 0x0100)
+	b.WriteByte(1) // cacheId
+	b.WriteByte(0) // colour table
+	writeU16(64)
+	writeU16(64)
+	writeU16(7)
+
+	// Second order moves along with absolute coordinates and says nothing else.
+	// No TS_DELTA_COORDINATES here on purpose.
+	b.WriteByte(TS_STANDARD)
+	writeU16(0x0002)
+	writeU16(64) // left, absolute
+
+	// One state for the batch, as a connection supplies. Without it each order
+	// would be parsed against a fresh state and nothing could carry over.
+	state := NewOrderState()
+	var pdu FastPathOrdersPDU
+	pdu.State = state
+	if err := pdu.Unpack(bytes.NewReader(b.Bytes())); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	if len(pdu.OrderPdus) != 2 {
+		t.Fatalf("parsed %d orders, want 2", len(pdu.OrderPdus))
+	}
+	second, ok := pdu.OrderPdus[1].Primary.Data.(*Memblt)
+	if !ok {
+		t.Fatalf("second order is %T", pdu.OrderPdus[1].Primary.Data)
+	}
+	if second.CacheId != 1 {
+		t.Errorf("cache id is %d, want 1 from the previous order", second.CacheId)
+	}
+	if second.Cx != 64 || second.Cy != 64 {
+		t.Errorf("size is %dx%d, want 64x64 from the previous order", second.Cx, second.Cy)
+	}
+	if second.CacheIdx != 7 {
+		t.Errorf("cache index is %d, want 7 from the previous order", second.CacheIdx)
+	}
+	if second.X != 64 {
+		t.Errorf("left coordinate is %d, want 64", second.X)
+	}
+}

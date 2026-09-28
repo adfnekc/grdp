@@ -30,17 +30,13 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
 * [x] EGFX (RDPGFX) rendering, verified against a real Windows server: the
       desktop, its icons and text come through over the graphics channel with
       no bitmap updates at all. Off by default, see below.
+* [x] Drawing orders: the bitmap cache and MEMBLT, with the bounds an order
+      carries as a clip. Verified against a real Windows server, where the whole
+      desktop comes through the cache. It matches the bitmap path to the taskbar
+      clock, which is where two runs of the same path differ too. Off by default,
+      see below.
 
 Not done, or not finished:
-
-* [ ] Orders render but not correctly. The bitmap cache and MEMBLT are
-      implemented, and the rendering is unit tested, including that an order's
-      bounds clip it. Against a live server the cache fills and the blits find
-      each other, but most batches draw nothing, because MEMBLTs that carry only
-      a coordinate look for cache `(0,0)` instead of the entry the previous order
-      of their type had just filled. `Setting.EnableOrders` stays off by default
-      and the server keeps to bitmap updates without it; the two cannot be mixed,
-      since advertising MEMBLT stops bitmap updates entirely.
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own
       arithmetic decoder. The `THINCLIENT` capability flag asks the server not
       to use it, and the dispatch error names it if a server does anyway.
@@ -81,8 +77,10 @@ on, an unsupported codec means a blank screen rather than a degraded one. Use
 
 `Setting.EnableOrders` advertises MEMBLT and renders the drawing orders that
 follow, into a framebuffer reachable through `Client.Screen`, with
-`OnOrdersFrame` reporting what changed. It is off by default and the rendering is
-not finished, so it is there to work on rather than to use.
+`OnOrdersFrame` reporting what changed. It is off by default because it changes
+how the server draws and the two paths cannot be mixed: advertising MEMBLT stops
+bitmap updates entirely. With it off the server stays on bitmap updates, which is
+correct, just larger on the wire.
 
 ## Trying it out
 
