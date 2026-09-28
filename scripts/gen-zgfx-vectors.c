@@ -130,6 +130,8 @@ int main(int argc, char** argv)
 	if (!out)
 		die("cannot write", argv[2]);
 
+	uint32_t mismatches = 0;
+
 	fwrite("ZGFX", 1, 4, out);
 	write_u32(out, streamCount);
 
@@ -148,11 +150,9 @@ int main(int argc, char** argv)
 
 		if (decodedSize != plains[i].size || (decodedSize && memcmp(decoded, plains[i].data, decodedSize) != 0))
 		{
-			fprintf(stderr,
-			        "gen-zgfx-vectors: stream %u decodes to %u bytes that differ from the expected %u; the stream "
-			        "is not what we think it is\n",
-			        i, decodedSize, plains[i].size);
-			return 1;
+			fprintf(stderr, "gen-zgfx-vectors: stream %u decodes to %u bytes, expected %u, and they differ\n", i, decodedSize,
+			        plains[i].size);
+			mismatches++;
 		}
 
 		write_u32(out, streams[i].size);
@@ -166,6 +166,12 @@ int main(int argc, char** argv)
 
 	fclose(out);
 	zgfx_context_free(zgfx);
+
+	if (mismatches)
+	{
+		fprintf(stderr, "gen-zgfx-vectors: %u of %u streams disagree with the expected plaintext\n", mismatches, streamCount);
+		return 1;
+	}
 
 	printf("gen-zgfx-vectors: %u streams decoded by the reference, written to %s\n", streamCount, argv[2]);
 	return 0;

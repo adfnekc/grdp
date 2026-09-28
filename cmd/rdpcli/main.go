@@ -20,6 +20,7 @@ import (
 
 	"github.com/adfnekc/grdp/client"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
 )
 
@@ -222,6 +223,7 @@ func main() {
 	failed := make(chan error, 1)
 	closed := make(chan struct{}, 1)
 	var bitmapCount int
+	var gfxFrames, gfxSurfaces int
 	done := make(chan struct{}, 1)
 
 	var fb *image.RGBA
@@ -243,7 +245,24 @@ func main() {
 			return
 		}
 		fmt.Println("wrote framebuffer to", *dump)
+		if gfxFrames > 0 {
+			fmt.Printf("gfx: %d frames carrying %d surfaces\n", gfxFrames, gfxSurfaces)
+		}
 	}
+
+	// With EGFX the server draws into offscreen surfaces instead of sending
+	// bitmap updates, and it is the client that puts them on screen. Each
+	// surface is drawn where the server mapped it.
+	c.OnSurfaceFrame(func(frameID uint32, surfaces []*rdpgfx.Surface) {
+		gfxFrames++
+		gfxSurfaces += len(surfaces)
+		if fb == nil {
+			return
+		}
+		for _, s := range surfaces {
+			blitSurface(fb, s)
+		}
+	})
 
 	var inputPlayed bool
 	c.OnReady(func() {
@@ -251,8 +270,10 @@ func main() {
 		case ready <- struct{}{}:
 		default:
 		}
-		if len(actions) > 0 && !inputPlayed {
-			inputPlayed = true
+		// The clipboard is independent of input playback. It used to sit inside
+		// the guard below, so -set-clipboard was silently ignored unless some
+		// input action happened to be given too.
+		if *setClip != "" || *clipReq > 0 {
 			go func() {
 				if *setClip != "" {
 					if err := c.SetClipboardText(*setClip); err != nil {
@@ -263,15 +284,19 @@ func main() {
 					time.Sleep(800 * time.Millisecond)
 				}
 				if *clipReq > 0 {
-					// Request outside the handler's own retry window, so
-					// the server has had time to acquire the selection.
-					go func() {
-						time.Sleep(*clipReq)
-						if err := c.RequestClipboardText(); err != nil {
-							fmt.Fprintln(os.Stderr, "request clipboard:", err)
-						}
-					}()
+					// Request outside the handler's own retry window, so the
+					// server has had time to acquire the selection.
+					time.Sleep(*clipReq)
+					if err := c.RequestClipboardText(); err != nil {
+						fmt.Fprintln(os.Stderr, "request clipboard:", err)
+					}
 				}
+			}()
+		}
+
+		if len(actions) > 0 && !inputPlayed {
+			inputPlayed = true
+			go func() {
 				for _, a := range actions {
 					if a.isType {
 						typeString(c, a.value)
@@ -384,6 +409,31 @@ func main() {
 
 // blit composites one decoded bitmap into the framebuffer.
 // Note: client.Bitmap.BitsPerPixel already holds bytes-per-pixel.
+// blitSurface copies a decoded EGFX surface into the framebuffer where the
+// server mapped it. The surface is BGRA, top down, and is clipped to the
+// framebuffer.
+func blitSurface(fb *image.RGBA, s *rdpgfx.Surface) {
+	px := s.Pixels()
+	ox, oy := s.Origin()
+	for y := 0; y < s.Height; y++ {
+		dy := oy + y
+		if dy < 0 || dy >= fb.Rect.Dy() {
+			continue
+		}
+		for x := 0; x < s.Width; x++ {
+			dx := ox + x
+			if dx < 0 || dx >= fb.Rect.Dx() {
+				continue
+			}
+			i := (y*s.Width + x) * 4
+			if i+4 > len(px) {
+				return
+			}
+			fb.Set(dx, dy, color.RGBA{R: px[i+2], G: px[i+1], B: px[i], A: 255})
+		}
+	}
+}
+
 func blit(fb *image.RGBA, b client.Bitmap) {
 	bpp := b.BitsPerPixel
 	if bpp <= 0 {

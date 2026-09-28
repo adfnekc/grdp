@@ -24,24 +24,25 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
 * [x] NSCodec and RemoteFX (RFX) bitmap codecs, checked byte for byte against
       libfreerdp's own decoder
 * [x] ZGFX, the bulk compression the EGFX channel wraps its messages in, also
-      checked byte for byte against libfreerdp
+      checked byte for byte against libfreerdp, including against captures of
+      real Windows traffic
 * [x] Surface commands, `drdynvc`, RDPGFX command parsing
+* [x] EGFX (RDPGFX) rendering, verified against a real Windows server: the
+      desktop, its icons and text come through over the graphics channel with
+      no bitmap updates at all. Off by default, see below.
 
 Not done:
 
-* [ ] EGFX rendering has not been seen working against a live server yet. The
-      pieces are in place (the channel, ZGFX, RemoteFX, and a capability set
-      that asks for plain RemoteFX rather than the progressive codec), but it
-      still has to be watched. It is off by default, and while it is on the
-      server stops sending bitmap updates, so a failure there looks like a
-      black screen rather than a partial one.
-* [ ] Orders and the bitmap cache. xrdp never sends orders, so this path is only
-      needed for Windows' partial updates.
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own
       arithmetic decoder. The `THINCLIENT` capability flag asks the server not
-      to use it.
+      to use it, and the dispatch error names it if a server does anyway.
+* [ ] Orders and the bitmap cache. xrdp never sends orders, so this path is only
+      needed for Windows' partial updates.
 * [ ] Interleaved RLE bitmaps, which the bitmap cache revision 3 needs.
-* [ ] H.264 (AVC420 / AVC444) codecs, which EGFX servers may choose.
+* [ ] H.264 (AVC420 / AVC444) codecs, which EGFX servers may choose. Not
+      advertising them is what keeps them out of the negotiation.
+* [ ] Scaled surface placement: a surface mapped with scale factors would need
+      resampling. `MapSurfaceToOutput` is honoured, the scaled variants are not.
 * [ ] VNC. The RFB subset this fork inherited is unused and unverified.
 
 ## Using it as a library
@@ -62,7 +63,10 @@ c.KeyUp(0x1c, "")
 ```
 
 `Setting.EnableClipboard` opens the clipboard channel, and
-`Setting.EnableEGFX` opts into the graphics channel described above.
+`Setting.EnableEGFX` opts into the graphics channel described above. EGFX is off
+by default because a server that picks it stops sending bitmap updates: with it
+on, an unsupported codec means a blank screen rather than a degraded one. Use
+`OnSurfaceFrame` to receive the surfaces and `Surface.Origin` to place them.
 
 ## Trying it out
 

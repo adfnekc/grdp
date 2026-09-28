@@ -70,13 +70,13 @@ func TestCreateAndWireUncompressed(t *testing.T) {
 	c, _ := newTestClient(t)
 
 	// Create a 4x2 surface.
-	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20)...)))
 	// Fill it with uncompressed BGRA pixels.
 	pixels := []byte{
 		1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255,
 		13, 14, 15, 255, 16, 17, 18, 255, 19, 20, 21, 255, 22, 23, 24, 255,
 	}
-	body := append(append(append([]byte{}, u16(1)...), u16(codecUncompressed)...), 0x20, 0)
+	body := append(append(append([]byte{}, u16(1)...), u16(codecUncompressed)...), 0x20)
 	body = append(body, rect16(0, 0, 4, 2)...)
 	body = append(body, u32(uint32(len(pixels)))...)
 	body = append(body, pixels...)
@@ -95,14 +95,14 @@ func TestCreateAndWireUncompressed(t *testing.T) {
 
 func TestWireToSurfaceClipping(t *testing.T) {
 	c, _ := newTestClient(t)
-	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20)...)))
 
 	// A 2x2 update at (3,3) on a 4x4 surface: only (3,3) is inside.
 	pixels := []byte{
 		1, 1, 1, 255, 2, 2, 2, 255,
 		3, 3, 3, 255, 4, 4, 4, 255,
 	}
-	body := append(append(append([]byte{}, u16(1)...), u16(codecUncompressed)...), 0x20, 0)
+	body := append(append(append([]byte{}, u16(1)...), u16(codecUncompressed)...), 0x20)
 	body = append(body, rect16(3, 3, 5, 5)...)
 	body = append(body, u32(uint32(len(pixels)))...)
 	body = append(body, pixels...)
@@ -129,7 +129,7 @@ func TestWireToSurfaceClipping(t *testing.T) {
 
 func TestWireToSurfaceRejectsUnknownSurface(t *testing.T) {
 	c, _ := newTestClient(t)
-	body := append(append(append([]byte{}, u16(99)...), u16(codecUncompressed)...), 0x20, 0)
+	body := append(append(append([]byte{}, u16(99)...), u16(codecUncompressed)...), 0x20)
 	body = append(body, rect16(0, 0, 1, 1)...)
 	body = append(body, u32(4)...)
 	body = append(body, 0, 0, 0, 255)
@@ -166,9 +166,9 @@ func TestWireToSurfaceRemoteFX(t *testing.T) {
 	defer func() { codec.RFXMode = old }()
 
 	c, _ := newTestClient(t)
-	feed(c, pdu(cmdCreateSurface, append(append(u16(5), u16(64)...), append(u16(64), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(5), u16(64)...), append(u16(64), 0x20)...)))
 
-	body := append(append(append([]byte{}, u16(5)...), u16(codecCAVideo)...), 0x20, 0)
+	body := append(append(append([]byte{}, u16(5)...), u16(codecCAVideo)...), 0x20)
 	body = append(body, rect16(0, 0, 64, 64)...)
 	body = append(body, u32(uint32(len(rfxData)))...)
 	body = append(body, rfxData...)
@@ -211,7 +211,7 @@ func TestStartAndEndFrame(t *testing.T) {
 
 func TestResetGraphicsClearsSurfaces(t *testing.T) {
 	c, _ := newTestClient(t)
-	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(8)...), append(u16(8), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(8)...), append(u16(8), 0x20)...)))
 	// width(4) height(4) monitorCount(4)
 	reset := append(append(u32(1920), u32(1080)...), u32(0)...)
 	feed(c, pdu(cmdResetGraphics, reset))
@@ -229,7 +229,7 @@ func TestResetGraphicsClearsSurfaces(t *testing.T) {
 
 func TestDeleteSurface(t *testing.T) {
 	c, _ := newTestClient(t)
-	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20)...)))
 	feed(c, pdu(cmdDeleteSurface, u16(1)))
 	c.mu.Lock()
 	n := len(c.surfaces)
@@ -241,7 +241,7 @@ func TestDeleteSurface(t *testing.T) {
 
 func TestSolidFill(t *testing.T) {
 	c, _ := newTestClient(t)
-	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(4), 0x20)...)))
 
 	// RDPGFX_COLOR32 is XRGB: 0x00332211 means R=0x33 G=0x22 B=0x11.
 	body := append(append([]byte{}, u16(1)...), u32(0x00332211)...)
@@ -266,15 +266,15 @@ func TestSolidFill(t *testing.T) {
 
 func TestSurfaceToSurface(t *testing.T) {
 	c, _ := newTestClient(t)
-	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)))
-	feed(c, pdu(cmdCreateSurface, append(append(u16(2), u16(4)...), append(u16(4), 0x20, 0)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20)...)))
+	feed(c, pdu(cmdCreateSurface, append(append(u16(2), u16(4)...), append(u16(4), 0x20)...)))
 
 	// Fill surface 1 with known pixels.
 	pixels := []byte{
 		1, 1, 1, 255, 2, 2, 2, 255,
 		3, 3, 3, 255, 4, 4, 4, 255,
 	}
-	body := append(append(append([]byte{}, u16(1)...), u16(codecUncompressed)...), 0x20, 0)
+	body := append(append(append([]byte{}, u16(1)...), u16(codecUncompressed)...), 0x20)
 	body = append(body, rect16(0, 0, 2, 2)...)
 	body = append(body, u32(uint32(len(pixels)))...)
 	body = append(body, pixels...)
@@ -303,7 +303,7 @@ func TestMultiplePdusInOnePayload(t *testing.T) {
 	c, _ := newTestClient(t)
 	// Two completions back to back: a create followed by a delete.
 	payload := append(
-		pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20, 0)...)),
+		pdu(cmdCreateSurface, append(append(u16(1), u16(2)...), append(u16(2), 0x20)...)),
 		pdu(cmdDeleteSurface, u16(1))...)
 
 	feed(c, payload)
@@ -390,12 +390,53 @@ func TestCapsAdvertiseFlags(t *testing.T) {
 // payload that is not a ZGFX stream has to be refused rather than parsed.
 func TestOnDataRequiresZGFX(t *testing.T) {
 	c, _ := newTestClient(t)
-	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20, 0)...)))
+	c.OnData(pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20)...)))
 
 	c.mu.Lock()
 	created := c.surfaces[1] != nil
 	c.mu.Unlock()
 	if created {
 		t.Fatal("a bare PDU should not have been accepted")
+	}
+}
+
+// A surface mapped away from the origin has to be composited at that offset, so
+// the placement must be recorded rather than assumed to be the corner.
+func TestMapSurfaceToOutputRecordsOffset(t *testing.T) {
+	c, _ := newTestClient(t)
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20)...)))
+
+	// surfaceId(2) reserved(2) outputOriginX(4) outputOriginY(4). The origins
+	// are signed.
+	body := append(append(u16(1), u16(0)...), append(u32(10), u32(20)...)...)
+	feed(c, pdu(cmdMapSurfaceToOutput, body))
+
+	c.mu.Lock()
+	s := c.surfaces[1]
+	c.mu.Unlock()
+	if s == nil {
+		t.Fatal("surface was not created")
+	}
+	if x, y := s.Origin(); x != 10 || y != 20 {
+		t.Errorf("origin is (%d,%d), want (10,20)", x, y)
+	}
+}
+
+// A negative origin is legal, since the fields are signed.
+func TestMapSurfaceToOutputNegativeOrigin(t *testing.T) {
+	c, _ := newTestClient(t)
+	feed(c, pdu(cmdCreateSurface, append(append(u16(1), u16(4)...), append(u16(2), 0x20)...)))
+
+	body := append(append(u16(1), u16(0)...), append(u32(0xfffffffb), u32(0xfffffff6)...)...)
+	feed(c, pdu(cmdMapSurfaceToOutput, body))
+
+	c.mu.Lock()
+	s := c.surfaces[1]
+	c.mu.Unlock()
+	if s == nil {
+		t.Fatal("surface was not created")
+	}
+	if x, y := s.Origin(); x != -5 || y != -10 {
+		t.Errorf("origin is (%d,%d), want (-5,-10)", x, y)
 	}
 }

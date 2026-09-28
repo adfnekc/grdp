@@ -10,6 +10,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
+	"io"
+	"os"
 	"sync"
 
 	"github.com/adfnekc/grdp/codec"
@@ -115,6 +117,13 @@ type Reset struct {
 	Width, Height int
 }
 
+// SurfacePlacement reports that the server mapped a surface somewhere on the
+// desktop.
+type SurfacePlacement struct {
+	ID   uint16
+	X, Y int
+}
+
 // Surface is a decoded surface: a set of pixels that the server composites
 // into frames. Surfaces are addressed by a 16 bit id.
 type Surface struct {
@@ -122,8 +131,23 @@ type Surface struct {
 	Width       int
 	Height      int
 	PixelFormat uint8
-	pixels      []byte
-	mu          sync.Mutex
+
+	// Where the server maps this surface onto the desktop. It stays at the
+	// origin until a mapping command says otherwise, which is where the main
+	// desktop surface belongs anyway.
+	originX, originY int
+
+	pixels []byte
+	mu     sync.Mutex
+}
+
+// Origin returns where the surface is mapped on the desktop. A client that
+// composites surfaces itself has to offset them by this, or everything ends up
+// in the top left corner.
+func (s *Surface) Origin() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.originX, s.originY
 }
 
 // Pixels returns a copy of the surface contents as BGRA, top down.
@@ -170,6 +194,27 @@ func NewGfxClient() *GfxClient {
 // channel. It must be called before the channel is opened.
 func (c *GfxClient) SetSender(f func(channelID uint32, data []byte) error) { c.send = f }
 
+// dumpZGFX records every payload received on the graphics channel, in arrival
+// order, when GRDP_DUMP_ZGFX names a file. It exists because the decompressor is
+// easiest to trust when it can be run against real traffic: the capture feeds
+// codec/realdata_test.go, which decodes it and compares against the reference
+// decoder. Nothing happens unless the variable is set.
+//
+// The framing is the one that test reads: each payload as a little endian
+// uint32 length followed by that many bytes.
+var dumpZGFX = func() io.Writer {
+	name := os.Getenv("GRDP_DUMP_ZGFX")
+	if name == "" {
+		return nil
+	}
+	f, err := os.Create(name)
+	if err != nil {
+		glog.Errorf("rdpgfx: cannot open %s: %v", name, err)
+		return nil
+	}
+	return f
+}()
+
 // OnOpen implements drdynvc.DynChannel.
 func (c *GfxClient) OnOpen(channelID uint32) {
 	c.mu.Lock()
@@ -193,6 +238,13 @@ func (c *GfxClient) OnClose() {
 // OnData implements drdynvc.DynChannel. The payload is a ZGFX stream that may
 // hold several PDUs.
 func (c *GfxClient) OnData(data []byte) {
+	if dumpZGFX != nil {
+		var l [4]byte
+		binary.LittleEndian.PutUint32(l[:], uint32(len(data)))
+		dumpZGFX.Write(l[:])
+		dumpZGFX.Write(data)
+	}
+
 	pdu, err := c.zgfx.Decompress(data)
 	if err != nil {
 		glog.Errorf("rdpgfx: cannot decompress %d bytes: %v", len(data), err)
@@ -244,9 +296,11 @@ func (c *GfxClient) handle(h headerBuf, body []byte) error {
 	case cmdCacheImportOffer:
 		// Caching is optional; answering with an empty reply is valid.
 		return c.sendCacheImportReply()
-	case cmdMapSurfaceToOutput, cmdMapSurfaceToScaledOutput,
-		cmdMapSurfaceToWindow, cmdMapSurfaceToScaledWindow:
-		// Placement only matters for a windowed consumer.
+	case cmdMapSurfaceToOutput:
+		return c.processMapSurfaceToOutput(body)
+	case cmdMapSurfaceToScaledOutput, cmdMapSurfaceToWindow, cmdMapSurfaceToScaledWindow:
+		// Scaled and windowed placement are not modelled: a scaled surface would
+		// need resampling, and there is no window to place it in.
 		return nil
 	default:
 		// Unknown commands are skipped: the length field lets us stay in
@@ -282,6 +336,30 @@ func (c *GfxClient) processResetGraphics(body []byte) error {
 	c.mu.Unlock()
 
 	c.Emit("gfx-reset", Reset{Width: width, Height: height})
+	return nil
+}
+
+// processMapSurfaceToOutput records where a surface sits on the desktop.
+func (c *GfxClient) processMapSurfaceToOutput(body []byte) error {
+	// surfaceId(2) reserved(2) outputOriginX(4, signed) outputOriginY(4, signed).
+	if len(body) < 12 {
+		return fmt.Errorf("map surface to output: %w", errShort)
+	}
+	id := binary.LittleEndian.Uint16(body)
+	x := int(int32(binary.LittleEndian.Uint32(body[4:])))
+	y := int(int32(binary.LittleEndian.Uint32(body[8:])))
+
+	c.mu.Lock()
+	s := c.surfaces[id]
+	c.mu.Unlock()
+	if s == nil {
+		return fmt.Errorf("map surface to output: unknown surface %d", id)
+	}
+
+	s.mu.Lock()
+	s.originX, s.originY = x, y
+	s.mu.Unlock()
+	c.Emit("gfx-surface-mapped", SurfacePlacement{ID: id, X: x, Y: y})
 	return nil
 }
 
@@ -326,25 +404,28 @@ func (c *GfxClient) processDeleteSurface(body []byte) error {
 
 // processWireToSurface1 decodes a bitmap into a surface.
 func (c *GfxClient) processWireToSurface1(body []byte) error {
-	// surfaceId(2) codecId(2) pixelFormat(1) reserved(1) destRect(8, four
-	// little endian uint16) bitmapDataLength(4) bitmapData. The fixed part is
-	// 18 bytes and RDPGFX_WIRE_TO_SURFACE_PDU_1_SIZE includes the header.
-	if len(body) < 18 {
+	// surfaceId(2) codecId(2) pixelFormat(1) destRect(8, four little endian
+	// uint16) bitmapDataLength(4) bitmapData. There is no reserved byte between
+	// the pixel format and the rectangle: the fields add up to
+	// RDPGFX_WIRE_TO_SURFACE_PDU_1_SIZE, which is 17. Getting this wrong shifts
+	// the destination and turns the length into 0xC00000xx. See
+	// testdata/README.md, which is how it was found.
+	if len(body) < 17 {
 		return fmt.Errorf("wire to surface 1: %w", errShort)
 	}
 	surfaceID := binary.LittleEndian.Uint16(body)
 	codecID := binary.LittleEndian.Uint16(body[2:])
 	pixelFormat := body[4]
-	left := int(binary.LittleEndian.Uint16(body[6:]))
-	top := int(binary.LittleEndian.Uint16(body[8:]))
-	right := int(binary.LittleEndian.Uint16(body[10:]))
-	bottom := int(binary.LittleEndian.Uint16(body[12:]))
-	dataLen := int(binary.LittleEndian.Uint32(body[14:]))
-	if dataLen < 0 || 18+dataLen > len(body) {
+	left := int(binary.LittleEndian.Uint16(body[5:]))
+	top := int(binary.LittleEndian.Uint16(body[7:]))
+	right := int(binary.LittleEndian.Uint16(body[9:]))
+	bottom := int(binary.LittleEndian.Uint16(body[11:]))
+	dataLen := int(binary.LittleEndian.Uint32(body[13:]))
+	if dataLen < 0 || 17+dataLen > len(body) {
 		return fmt.Errorf("wire to surface 1: declared %d bytes, have %d: %w",
-			dataLen, len(body)-18, errShort)
+			dataLen, len(body)-17, errShort)
 	}
-	payload := body[18 : 18+dataLen]
+	payload := body[17 : 17+dataLen]
 
 	c.mu.Lock()
 	s := c.surfaces[surfaceID]

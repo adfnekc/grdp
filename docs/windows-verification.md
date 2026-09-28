@@ -60,8 +60,7 @@ against Windows (which offers version 3) and the server asks for
 Microsoft::Windows::RDS::Graphics
 ```
 
-It then stops sending bitmap updates entirely, so the session renders nothing
-until the graphics channel is understood.
+It then stops sending bitmap updates entirely.
 
 The reason nothing was understood is that the payload is not a bare RDPGFX PDU:
 
@@ -76,11 +75,42 @@ Every message on that channel is a ZGFX stream, the RDP 8.0 bulk compression
 calls `zgfx_decompress` on every message it receives there without checking, so
 the framing is mandatory rather than optional.
 
-That decoder now exists, in `codec/zgfx.go`, and the graphics channel unwraps
-its messages before parsing them. Two nearby traps that were checked and are
-**not** at fault:
+Two nearby traps that were checked and are **not** at fault:
 
 * channel data in general is fine against Windows, the clipboard channel parses
   its capabilities and monitor ready PDUs correctly;
 * the platform is only a problem for the legacy path, `Setting.EnableEGFX` is
 off by default so Windows keeps using bitmap updates.
+
+## EGFX now renders
+
+With ZGFX unwrapped, the graphics channel decodes and the desktop appears: the
+wallpaper, the icons, the taskbar and the watermark text, all from surfaces
+rather than from a single bitmap update.
+
+What is worth recording is how the last bug was found, because it is a testing
+lesson rather than a protocol one.
+
+Every `WireToSurface` was being dropped with a nonsense length (`0xC000001D`).
+The header the parser expected and the PDUs the tests wrote had the same
+mistake: both had a byte between the pixel format and the destination
+rectangle, so the tests passed and the parser was wrong in exactly the way its
+tests were. The specification and FreeRDP's struct both say the fields add up to
+`RDPGFX_WIRE_TO_SURFACE_PDU_1_SIZE`, which is 17, with no gap. A capture settled
+it: the rectangle is `(971,728,1019,768)`, the declared length is exactly the
+bytes that follow, and the RemoteFX sync marker sits at offset 17.
+
+So `plugin/rdpgfx/testdata` holds those captured messages, and the test that
+replays them checks that pixels land inside the rectangle and nowhere else. Hand
+written bytes cannot catch a misunderstanding that the bytes were written from.
+
+## Clipboard, both ways
+
+Verified against the same Windows host, each direction driven from inside the
+session rather than assumed:
+
+* publishing to the server, then `powershell -command Get-Clipboard` in the
+  session prints back exactly what was published;
+* running `echo SERVER-SIDE-TEXT| clip` in the session, then asking the client
+  for the clipboard, yields `SERVER-SIDE-TEXT\r\n` (the `clip` tool adds the
+  line ending, and it is passed through unchanged).
