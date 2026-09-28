@@ -304,26 +304,26 @@ func (b *Bounds) updateBounds(r io.Reader) {
 	present, _ := core.ReadUInt8(r)
 
 	if present&1 != 0 {
-		readOrderCoord(r, &b.left, false)
+		readOrderCoord(r, &b.Left, false)
 	} else if present&16 != 0 {
-		readOrderCoord(r, &b.left, true)
+		readOrderCoord(r, &b.Left, true)
 	}
 
 	if present&2 != 0 {
-		readOrderCoord(r, &b.top, false)
+		readOrderCoord(r, &b.Top, false)
 	} else if present&32 != 0 {
-		readOrderCoord(r, &b.top, true)
+		readOrderCoord(r, &b.Top, true)
 	}
 
 	if present&4 != 0 {
-		readOrderCoord(r, &b.right, false)
+		readOrderCoord(r, &b.Right, false)
 	} else if present&64 != 0 {
-		readOrderCoord(r, &b.right, true)
+		readOrderCoord(r, &b.Right, true)
 	}
 	if present&8 != 0 {
-		readOrderCoord(r, &b.bottom, false)
+		readOrderCoord(r, &b.Bottom, false)
 	} else if present&128 != 0 {
-		readOrderCoord(r, &b.bottom, true)
+		readOrderCoord(r, &b.Bottom, true)
 	}
 }
 
@@ -462,11 +462,11 @@ func readOrderCoord(r io.Reader, coord *int32, delta bool) {
 }
 
 type Dstblt struct {
-	x      int32
-	y      int32
-	cx     int32
-	cy     int32
-	opcode uint8
+	X      int32
+	Y      int32
+	Cx     int32
+	Cy     int32
+	Opcode uint8
 }
 
 func (d *Dstblt) Type() int {
@@ -475,32 +475,32 @@ func (d *Dstblt) Type() int {
 func (d *Dstblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("Dstblt Order")
 	if present&0x01 != 0 {
-		readOrderCoord(r, &d.x, delta)
+		readOrderCoord(r, &d.X, delta)
 	}
 	if present&0x02 != 0 {
-		readOrderCoord(r, &d.y, delta)
+		readOrderCoord(r, &d.Y, delta)
 	}
 	if present&0x04 != 0 {
-		readOrderCoord(r, &d.cx, delta)
+		readOrderCoord(r, &d.Cx, delta)
 	}
 	if present&0x08 != 0 {
-		readOrderCoord(r, &d.cy, delta)
+		readOrderCoord(r, &d.Cy, delta)
 	}
 	if present&0x10 != 0 {
-		d.opcode, _ = core.ReadUInt8(r)
+		d.Opcode, _ = core.ReadUInt8(r)
 	}
 	return nil
 }
 
 type Patblt struct {
-	x        int32
-	y        int32
-	cx       int32
-	cy       int32
-	opcode   uint8
-	bgcolour [4]uint8
-	fgcolour [4]uint8
-	brush    Brush
+	X        int32
+	Y        int32
+	Cx       int32
+	Cy       int32
+	Opcode   uint8
+	BgColour [4]uint8
+	FgColour [4]uint8
+	Brush    Brush
 }
 
 func (d *Patblt) Type() int {
@@ -509,29 +509,29 @@ func (d *Patblt) Type() int {
 func (d *Patblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("Patblt Order")
 	if present&0x01 != 0 {
-		readOrderCoord(r, &d.x, delta)
+		readOrderCoord(r, &d.X, delta)
 	}
 	if present&0x02 != 0 {
-		readOrderCoord(r, &d.y, delta)
+		readOrderCoord(r, &d.Y, delta)
 	}
 	if present&0x04 != 0 {
-		readOrderCoord(r, &d.cx, delta)
+		readOrderCoord(r, &d.Cx, delta)
 	}
 	if present&0x08 != 0 {
-		readOrderCoord(r, &d.cy, delta)
+		readOrderCoord(r, &d.Cy, delta)
 	}
 	if present&0x10 != 0 {
-		d.opcode, _ = core.ReadUInt8(r)
+		d.Opcode, _ = core.ReadUInt8(r)
 	}
 	if present&0x0020 != 0 {
 		b, g, r, a := updateReadColorRef(r)
-		d.bgcolour[0], d.bgcolour[1], d.bgcolour[2], d.bgcolour[3] = b, g, r, a
+		d.BgColour[0], d.BgColour[1], d.BgColour[2], d.BgColour[3] = b, g, r, a
 	}
 	if present&0x0040 != 0 {
 		b, g, r, a := updateReadColorRef(r)
-		d.fgcolour[0], d.fgcolour[1], d.fgcolour[2], d.fgcolour[3] = b, g, r, a
+		d.FgColour[0], d.FgColour[1], d.FgColour[2], d.FgColour[3] = b, g, r, a
 	}
-	d.brush.updateBrush(r, present>>7)
+	d.Brush.updateBrush(r, present>>7)
 
 	return nil
 }
@@ -1342,12 +1342,21 @@ func update_decompress_brush(in []uint8, bpp int) []uint8 {
 }
 
 /*Primary*/
+// Bounds is the clip rectangle an order may carry: the order must only affect
+// the area inside it. Rendered orders have to honour it, or a blit that the
+// server meant to clip paints over the rest of the screen.
 type Bounds struct {
-	left   int32
-	top    int32
-	right  int32
-	bottom int32
+	Left   int32
+	Top    int32
+	Right  int32
+	Bottom int32
 }
+
+// Rect returns the bounds as left, top, right, bottom.
+func (b Bounds) Rect() (int, int, int, int) {
+	return int(b.Left), int(b.Top), int(b.Right), int(b.Bottom)
+}
+
 type OrderInfo struct {
 	controlFlags     uint32
 	orderType        uint32
