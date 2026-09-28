@@ -330,3 +330,26 @@ Worth noting for anyone who does want it: the premise that revision 3 means
 interleaved RLE is only half true. Its entries carry a codec id, so a
 `CacheBitmapDataEx` may well hold NSCodec or RemoteFX data, which this library
 already decodes. The blob only appears for the banded form.
+
+## An independent review was worth more than another test
+
+The order parser had been tested, fuzzed and watched on a live server, and it
+still had three remotely reachable panics and two ways to exhaust memory. They
+were found by handing the work to a reviewer with fresh context and the specific
+question of what a server could do to it, and it found them in the parsers
+nobody had exercised: a colour table order with the colour count it is required
+to carry wrote past the end of its own array, a monochrome brush wrote into a
+slice that was never allocated, and a compressed brush was decoded from whatever
+bytes followed it.
+
+Two things about that are worth keeping. The first is that "the path works" is
+not the same as "the parser is safe": every one of these sits in an order no
+server tested sends, which is exactly where nobody looks. The second is that the
+reviewer also found the one byte shift in the polygon and polyline point lists,
+which the tests could not see because they built their orders directly instead of
+parsing them. Tests written by the same person who wrote the parser share its
+reading of the wire, and this project has now been caught by that three times.
+
+The order fuzzer covers the parse path now. It runs 1.4 million executions in
+ninety seconds without stalling; before these fixes it panicked after thirty-five
+thousand.
