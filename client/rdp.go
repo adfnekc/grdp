@@ -8,6 +8,7 @@ import (
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/orders"
 	"github.com/adfnekc/grdp/plugin"
 	"github.com/adfnekc/grdp/plugin/cliprdr"
 	"github.com/adfnekc/grdp/plugin/drdynvc"
@@ -36,6 +37,9 @@ type RdpClient struct {
 
 	// Set when the clipboard channel is enabled; nil otherwise.
 	clip *cliprdr.CliprdrClient
+
+	// Set when drawing orders are enabled; nil otherwise.
+	screen *orders.Screen
 }
 
 type pendingEvent struct {
@@ -117,6 +121,31 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 		// early capability flag has to say we support the dynamic channel
 		// and graphics protocol.
 		c.mcs.SetClientDynvcProtocol()
+	}
+
+	// Drawing orders. Enabling them means advertising MEMBLT, which makes the
+	// server stop sending bitmap updates and put everything through the bitmap
+	// cache, so the renderer has to exist before the capability is announced.
+	if c.setting != nil && c.setting.EnableOrders {
+		c.screen = orders.NewScreen(c.setting.Width, c.setting.Height)
+		c.pdu.SetOrderSupport(true)
+		c.pdu.Once("ready", func(data interface{}) {
+			c.pdu.On("orders", func(d interface{}) {
+				pdus, ok := d.([]pdu.OrderPdu)
+				if !ok {
+					return
+				}
+				dirty, err := c.screen.Draw(pdus)
+				if err != nil {
+					glog.Errorf("orders: %v", err)
+					return
+				}
+				if dirty.Empty() {
+					return
+				}
+				c.pdu.Emit("orders-frame", dirty)
+			})
+		})
 	}
 
 	if c.setting != nil && c.setting.EnableClipboard {

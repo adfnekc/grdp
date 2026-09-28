@@ -20,6 +20,7 @@ import (
 
 	"github.com/adfnekc/grdp/client"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/orders"
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
 )
@@ -202,6 +203,7 @@ func main() {
 	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
 	pointerLog := flag.Bool("pointer", false, "log server-side pointer updates (position and shape)")
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
+	ordersFlag := flag.Bool("orders", false, "advertise and render drawing orders (bitmap cache and MEMBLT)")
 	clip := flag.Bool("clipboard", false, "enable the clipboard channel and log text received")
 	setClip := flag.String("set-clipboard", "", "publish this text on the shared clipboard once ready")
 	clipReq := flag.Duration("request-clipboard-after", 0, "ask the server for its clipboard text this long after ready (0 disables)")
@@ -215,6 +217,7 @@ func main() {
 	s.LogLevel = glog.LEVEL(*logLevel)
 	s.NoFastPathInput = *slowInput
 	s.EnableEGFX = *egfx
+	s.EnableOrders = *ordersFlag
 	s.EnableClipboard = *clip
 
 	c := client.NewClient(*host, *user, *pass, client.TC_RDP, s)
@@ -223,7 +226,7 @@ func main() {
 	failed := make(chan error, 1)
 	closed := make(chan struct{}, 1)
 	var bitmapCount int
-	var gfxFrames, gfxSurfaces int
+	var gfxFrames, gfxSurfaces, orderFrames int
 	done := make(chan struct{}, 1)
 
 	var fb *image.RGBA
@@ -248,7 +251,22 @@ func main() {
 		if gfxFrames > 0 {
 			fmt.Printf("gfx: %d frames carrying %d surfaces\n", gfxFrames, gfxSurfaces)
 		}
+		if orderFrames > 0 {
+			fmt.Printf("orders: %d frames rendered\n", orderFrames)
+		}
 	}
+
+	// With orders the server draws through the bitmap cache and does not send
+	// bitmap updates at all, so the renderer's screen is the whole desktop.
+	c.OnOrdersFrame(func(dirty image.Rectangle) {
+		orderFrames++
+		if fb == nil {
+			return
+		}
+		if screen := c.Screen(); screen != nil {
+			blitScreen(fb, screen)
+		}
+	})
 
 	// With EGFX the server draws into offscreen surfaces instead of sending
 	// bitmap updates, and it is the client that puts them on screen. Each
@@ -409,6 +427,22 @@ func main() {
 
 // blit composites one decoded bitmap into the framebuffer.
 // Note: client.Bitmap.BitsPerPixel already holds bytes-per-pixel.
+// blitScreen copies an order rendered screen into the framebuffer. Orders draw
+// the whole desktop, so this is a full frame rather than a patch.
+func blitScreen(fb *image.RGBA, s *orders.Screen) {
+	w, h := s.Size()
+	px := s.Pixels()
+	for y := 0; y < h && y < fb.Rect.Dy(); y++ {
+		for x := 0; x < w && x < fb.Rect.Dx(); x++ {
+			i := (y*w + x) * 4
+			if i+4 > len(px) {
+				return
+			}
+			fb.Set(x, y, color.RGBA{R: px[i+2], G: px[i+1], B: px[i], A: 255})
+		}
+	}
+}
+
 // blitSurface copies a decoded EGFX surface into the framebuffer where the
 // server mapped it. The surface is BGRA, top down, and is clipped to the
 // framebuffer.

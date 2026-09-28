@@ -2,9 +2,12 @@
 package client
 
 import (
+	"image"
+
 	"context"
 	"errors"
 	"fmt"
+	"github.com/adfnekc/grdp/orders"
 	"log"
 	"os"
 	"time"
@@ -196,6 +199,24 @@ func (c *Client) OnPointer(f func(p *pdu.PointerDataPDU)) {
 	})
 }
 
+// Screen returns the framebuffer that drawing orders are rendered into, or nil
+// when Setting.EnableOrders was not set. It holds BGRA pixels, top down, and is
+// safe to read while the connection is running.
+func (c *Client) Screen() *orders.Screen {
+	if r, ok := c.ctl.(*RdpClient); ok {
+		return r.screen
+	}
+	return nil
+}
+
+// OnOrdersFrame reports that a batch of drawing orders changed the screen,
+// giving the area that changed. The pixels are in Client.Screen.
+func (c *Client) OnOrdersFrame(f func(dirty image.Rectangle)) {
+	c.ctl.On("orders-frame", func(data interface{}) {
+		f(data.(image.Rectangle))
+	})
+}
+
 // OnSurfaceFrame reports each completed EGFX frame and the surfaces it
 // touched. The pixel data lives on the surfaces, so callers that need it
 // should copy what they need before returning.
@@ -344,6 +365,17 @@ type Setting struct {
 	// with the server. Use Client.OnClipboardText and Client.SetClipboardText
 	// to bridge it to the local clipboard.
 	EnableClipboard bool
+
+	// EnableOrders advertises support for the MEMBLT drawing order and renders
+	// the drawing orders that follow, into a framebuffer reachable through
+	// Client.Screen.
+	//
+	// It is off by default because it changes how the server draws the session
+	// and it cannot mix: once MEMBLT is advertised the server stops sending
+	// bitmap updates and puts everything through the bitmap cache instead. With
+	// it off the session is drawn from bitmap updates, which is correct, just
+	// larger on the wire.
+	EnableOrders bool
 }
 
 func NewSetting() *Setting {

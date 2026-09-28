@@ -151,6 +151,26 @@ func NewClient(t core.Transport) *Client {
 	return c
 }
 
+// SetOrderSupport declares whether the client can draw MEMBLT, the primary order
+// that blits a bitmap out of the cache and onto the screen.
+//
+// It is off by default, and that is deliberate. MEMBLT is the only way a cached
+// bitmap reaches the screen, so a server that sees it advertised moves to orders
+// entirely, cache fills included, instead of mixing the two paths. A client that
+// advertises it without being able to draw it gets a blank screen rather than a
+// slower one, so this is a switch rather than a default.
+func (c *Client) SetOrderSupport(memblt bool) {
+	capa, ok := c.clientCapabilities[CAPSTYPE_ORDER].(*OrderCapability)
+	if !ok || capa == nil {
+		return
+	}
+	if memblt {
+		capa.OrderSupport[TS_NEG_MEMBLT_INDEX] = 1
+	} else {
+		capa.OrderSupport[TS_NEG_MEMBLT_INDEX] = 0
+	}
+}
+
 func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint16) {
 	glog.Debug("pdu connect:", userId, ",", channelId)
 	c.clientCoreData = data
