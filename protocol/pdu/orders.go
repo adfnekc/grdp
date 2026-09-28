@@ -138,6 +138,58 @@ type Altsec struct {
 }
 
 type Secondary struct {
+	// CacheBitmap is set by the cache orders, which are how the server fills
+	// its bitmap cache. MEMBLT then blits those entries to the screen, so
+	// without storing them there is nothing for MEMBLT to read.
+	CacheBitmap *CacheBitmap
+}
+
+// CacheBitmap is a bitmap a secondary order puts into the bitmap cache. The
+// pixels are decoded on arrival, so blitting one is a straight copy.
+type CacheBitmap struct {
+	// CacheID is one of the four caches a client advertises, and CacheIndex is
+	// the slot within it.
+	CacheID    uint32
+	CacheIndex uint32
+
+	Width  int
+	Height int
+	// Bpp is bits per pixel of Pixels, and is 8, 16, 24 or 32.
+	Bpp int
+	// Pixels are top down, in Bpp format, already decompressed.
+	Pixels []byte
+
+	// NotCached is set when the order says the entry must not be kept, which is
+	// what a bitmap that is blitted once and discarded looks like.
+	NotCached bool
+
+	// CodecID is non-zero for a revision 3 entry whose data is encoded with a
+	// bitmap codec rather than compressed. Pixels is empty in that case and
+	// Data holds the encoded bytes.
+	CodecID uint8
+	Data    []byte
+}
+
+// cachePixels decodes a cache order's bitmap. The compression is the same
+// RDP 6.0 scheme used for bitmap updates, so it is the same decoder; the
+// argument is bytes per pixel there, which is why it is divided by eight.
+func cachePixels(data []byte, width, height, bitsPerPixel int, compressed bool) []byte {
+	if width <= 0 || height <= 0 || bitsPerPixel <= 0 || bitsPerPixel%8 != 0 {
+		return nil
+	}
+	bpp := bitsPerPixel / 8
+	if !compressed {
+		if len(data) != width*height*bpp {
+			return nil
+		}
+		out := make([]byte, len(data))
+		copy(out, data)
+		return out
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return core.Decompress(data, width, height, bpp)
 }
 
 type Primary struct {
@@ -952,6 +1004,15 @@ func (s *Secondary) updateCacheBitmapOrder(r io.Reader, compressed bool, flags u
 	cb.bitmapDataStream, _ = core.ReadBytes(int(bitmapLength), r)
 	cb.bitmapLength = bitmapLength
 
+	s.CacheBitmap = &CacheBitmap{
+		CacheID:    uint32(cb.cacheId),
+		CacheIndex: uint32(cb.cacheIndex),
+		Width:      int(cb.bitmapWidth),
+		Height:     int(cb.bitmapHeight),
+		Bpp:        int(cb.bitmapBpp),
+		Pixels: cachePixels(cb.bitmapDataStream, int(cb.bitmapWidth), int(cb.bitmapHeight),
+			int(cb.bitmapBpp), compressed),
+	}
 }
 
 type CacheBitmapOrder struct {
@@ -1042,6 +1103,16 @@ func (s *Secondary) updateCacheBitmapV2Order(r io.Reader, compressed bool, flags
 	cb.bitmapLength = bitmapLength
 	cb.compressed = compressed
 
+	s.CacheBitmap = &CacheBitmap{
+		CacheID:    cb.cacheId,
+		CacheIndex: cb.cacheIndex,
+		Width:      int(cb.bitmapWidth),
+		Height:     int(cb.bitmapHeight),
+		Bpp:        int(cb.bitmapBpp),
+		NotCached:  cb.flags&CBR2_DO_NOT_CACHE != 0,
+		Pixels: cachePixels(cb.bitmapDataStream, int(cb.bitmapWidth), int(cb.bitmapHeight),
+			int(cb.bitmapBpp), compressed),
+	}
 }
 
 type CacheBitmapV3Order struct {
@@ -1092,6 +1163,18 @@ func (s *Secondary) updateCacheBitmapV3Order(r io.Reader, flags uint16) {
 	bitmapData.Data, _ = core.ReadBytes(int(new_len), r)
 	bitmapData.Length = new_len
 
+	// Revision 3 entries carry a codec id: the data is still encoded, and the
+	// codec that produced it has to decode it. The pixels are left empty so the
+	// caller can tell the difference.
+	s.CacheBitmap = &CacheBitmap{
+		CacheID:    cb.cacheId,
+		CacheIndex: uint32(cb.cacheIndex),
+		Width:      int(bitmapData.Width),
+		Height:     int(bitmapData.Height),
+		Bpp:        int(bitmapData.Bpp),
+		CodecID:    bitmapData.CodecID,
+		Data:       bitmapData.Data,
+	}
 }
 
 type CacheColorTableOrder struct {

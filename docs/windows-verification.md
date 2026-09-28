@@ -155,3 +155,33 @@ Two consequences worth recording:
 The placement of the `orderSupport` bits, the cache revision actually used, and
 the order types that matter were only visible from a capture. Any implementation
 should be built against one, the way the codecs were.
+
+### Where an implementation stands
+
+The parsed cache bitmaps are now kept, in `CacheBitmap` on the secondary order,
+with compressed entries decoded on arrival so a blit is a copy. That much is
+unit tested. Two things are known and not done.
+
+**The cache stream has a byte in front of the RLE data.** A bitmap update's
+compressed payload begins straight with the RLE code:
+
+```
+bitmap update  10 f2 11 f2 11 f2 11 ...   decodes correctly today
+cache order    ff 10 f2 11 f2 11 f2 11 ...
+```
+
+Everything after the first byte is identical, so there is a field in the cache
+order that the parser is not consuming. Feeding it to the decoder as it stands
+produces zeros rather than pixels, which is what `decompress4` returns when its
+first byte is not the code it expects. This wants the same treatment as the
+WireToSurface header: find the field in the specification, or settle it against
+a capture, rather than guessing at an offset. Note that this is an off by one in
+our parser, not a second compression format.
+
+**The bitmap decompressor does not survive malformed input.** Handing
+`core.Decompress` a short compressed payload does not return an error, it does
+not return, and it does not stop: a four byte run of `{0x10, 0, 0, 0}` ran for
+over five minutes before the test was killed. That is reachable from the network,
+since the same decoder serves bitmap updates, so it is a robustness bug rather
+than a testing inconvenience. It is pre existing and unrelated to orders, but it
+is worth fixing before anything else touches that code.
