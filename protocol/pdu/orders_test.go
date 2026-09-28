@@ -317,3 +317,68 @@ func TestReadDeltaPoints(t *testing.T) {
 		t.Errorf("got %+v, want the x to be unchanged and the y advanced", got[1])
 	}
 }
+
+// secondaryBatch frames one secondary order, which is the shape a server sends
+// them in: a count, then the control flags, the order length, the extra flags,
+// the order type and the body.
+func secondaryBatch(orderType uint8, flags uint16, body []byte) []byte {
+	var b bytes.Buffer
+	writeU16 := func(v uint16) { b.Write([]byte{byte(v), byte(v >> 8)}) }
+	writeU16(1) // numberOrders
+	b.WriteByte(TS_STANDARD | TS_SECONDARY)
+	writeU16(uint16(7 + len(body))) // order length includes its own header
+	writeU16(flags)
+	b.WriteByte(orderType)
+	b.Write(body)
+	return b.Bytes()
+}
+
+// A colour table of the mandated 256 colours used to write four bytes from each
+// offset, which ran one past the end of the array on the last colour. Three
+// bytes of input were enough to panic.
+func TestCacheColorTableDoesNotOverrun(t *testing.T) {
+	// A colour count of 256 and then nothing: the parser must stop, not read on.
+	body := []byte{0x00, 0x00, 0x01}
+	batch := secondaryBatch(ORDER_TYPE_CACHE_COLOR_TABLE, 0, body)
+
+	var pdu FastPathOrdersPDU
+	_ = pdu.Unpack(bytes.NewReader(batch))
+}
+
+// A monochrome brush wrote into a slice that was never allocated, so the first
+// assignment indexed a nil slice.
+func TestCacheBrushMonochromeDoesNotPanic(t *testing.T) {
+	// index, bpp 1, cx 8, cy 8, style, length 8, then the pattern.
+	body := []byte{0x00, 0x01, 0x08, 0x08, 0x00, 0x08, 0x00}
+	batch := secondaryBatch(ORDER_TYPE_CACHE_BRUSH, 0, body)
+
+	var pdu FastPathOrdersPDU
+	_ = pdu.Unpack(bytes.NewReader(batch))
+}
+
+// A compressed brush whose declared length is longer than the bytes that follow
+// used to be decoded from a shortened slice, and a twelve byte order was enough
+// to run off the end of the palette.
+func TestTruncatedCompressedBrushDoesNotPanic(t *testing.T) {
+	// index, bpp 3, cx 8, cy 8, style, length 20, then a single byte.
+	body := []byte{0x00, 0x03, 0x08, 0x08, 0x00, 0x14, 0x30}
+	batch := secondaryBatch(ORDER_TYPE_CACHE_BRUSH, 0, body)
+
+	var pdu FastPathOrdersPDU
+	if err := pdu.Unpack(bytes.NewReader(batch)); err != nil {
+		t.Fatalf("a short brush should be dropped without failing the batch: %v", err)
+	}
+}
+
+// A cache order may declare a length far larger than any bitmap cell, and
+// core.ReadBytes allocates before it reads, so the length has to be refused
+// rather than reserved.
+func TestAbsurdCacheBitmapLengthIsRefused(t *testing.T) {
+	// Cache id 2, 32bpp, height-same-as-width and no compression header, a width
+	// of 64, a length of 0x3fffffff, then nothing at all.
+	body := []byte{0x40, 0xff, 0xff, 0xff, 0x3f, 0x00}
+	batch := secondaryBatch(ORDER_TYPE_BITMAP_COMPRESSED_V2, 0x0cb2, body)
+
+	var pdu FastPathOrdersPDU
+	_ = pdu.Unpack(bytes.NewReader(batch))
+}

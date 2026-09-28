@@ -277,13 +277,14 @@ func TestOpaqueRectIsClippedToTheScreen(t *testing.T) {
 // tell a half drawn screen from a complete one.
 func TestUnsupportedOrdersAreCounted(t *testing.T) {
 	s := NewScreen(4, 4)
-	// An order type that parses but has no renderer. Memory blits with a third
-	// colour table are parsed and not drawn, and a server that sends one should
-	// show up here rather than silently leaving part of the screen stale.
-	s.Draw([]pdu.OrderPdu{order(&pdu.Mem3blt{})})
+	// An order type that parses but has no renderer. FastIndex is a glyph order,
+	// so it needs the glyph cache the TEXT2 order does, and until that is wired
+	// it is counted rather than drawn. A server sending one should show up here
+	// rather than silently leaving part of the screen stale.
+	s.Draw([]pdu.OrderPdu{order(&pdu.FastIndex{})})
 	found := false
 	for kind := range s.Unsupported() {
-		if strings.Contains(kind, "Mem3blt") {
+		if strings.Contains(kind, "FastIndex") {
 			found = true
 		}
 	}

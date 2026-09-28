@@ -149,6 +149,10 @@ type Secondary struct {
 
 	// CacheBrush is set by the brush cache order, which PATBLT draws with.
 	CacheBrush *CacheBrush
+
+	// CacheGlyphs is set by the glyph cache order, which the TEXT2 order draws
+	// from.
+	CacheGlyphs *GlyphCacheOrder
 }
 
 // CacheBrush is a brush a secondary order puts into the brush cache, or the one
@@ -206,7 +210,14 @@ func cachePixels(data []byte, width, height, bitsPerPixel int, compressed bool) 
 	if width <= 0 || height <= 0 || bitsPerPixel <= 0 || bitsPerPixel%8 != 0 {
 		return nil
 	}
+	// The decoder allocates width by height up front, so a declared size that
+	// cannot be a cache cell has to be refused before it gets there: a one byte
+	// payload with a 32767 square size is four gigabytes.
 	bpp := bitsPerPixel / 8
+	if width > 1<<14 || height > 1<<14 || width*height*bpp > maxCachePixels {
+		glog.Debugf("cache bitmap: refusing %dx%d at %d bpp", width, height, bitsPerPixel)
+		return nil
+	}
 	if !compressed {
 		if len(data) != width*height*bpp {
 			return nil
@@ -331,7 +342,11 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 	case ORDER_TYPE_CACHE_COLOR_TABLE:
 		sec.updateCacheColorTableOrder(r0, flags)
 	case ORDER_TYPE_CACHE_GLYPH:
-		sec.updateCacheGlyphOrder(r0, flags)
+		glyphs, err := ParseGlyphCacheOrder(b, flags)
+		if err != nil {
+			return fmt.Errorf("cache glyph order: %w", err)
+		}
+		sec.CacheGlyphs = glyphs
 	case ORDER_TYPE_CACHE_BRUSH:
 		sec.updateCacheBrushOrder(r0, flags)
 	default:
@@ -441,6 +456,11 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 	case ORDER_TYPE_PATBLT, ORDER_TYPE_MEMBLT, ORDER_TYPE_LINETO, ORDER_TYPE_POLYGON_CB, ORDER_TYPE_ELLIPSE_CB:
 		size = 2
 	}
+	// The multi rectangle orders carry their own field count, which is more
+	// than three in places, so they say how many bytes of flags they have.
+	if n, ok := MultiFieldBytes(orderType); ok {
+		size = n
+	}
 
 	// The field flags shrink by a byte for each of these control flags, and the
 	// bytes that remain are read from the bottom up.
@@ -537,10 +557,13 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		p = &EllipeCb{}
 
 	case ORDER_TYPE_TEXT2:
-		p = &GlayphIndex{}
+		p = &GlyphIndex{}
 	default:
-		glog.Error("Not Support order type:", orderType)
-		return errors.New("Not Support order type")
+		p = NewMultiOrder(orderType)
+		if p == nil {
+			glog.Error("Not Support order type:", orderType)
+			return errors.New("Not Support order type")
+		}
 	}
 	if p != nil {
 		// With delta coordinates the fields an order leaves out repeat the
@@ -697,9 +720,11 @@ func (d *Scrblt) Type() int {
 	return ORDER_TYPE_SCRBLT
 }
 
-var d Scrblt
-
-func (d1 *Scrblt) Unpack(r io.Reader, present uint32, delta bool) error {
+// Unpack reads the order into its receiver. It used to read into a package level
+// variable and then copy that over the receiver, which meant two connections in
+// one process shared the last SCRBLT either of them saw, and overrode the per
+// connection carry over of the fields an order leaves out.
+func (d *Scrblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("Scrblt Order")
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
@@ -722,7 +747,6 @@ func (d1 *Scrblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0040 != 0 {
 		readOrderCoord(r, &d.Srcy, delta)
 	}
-	*d1 = d
 	return nil
 }
 
@@ -1041,7 +1065,10 @@ func readDeltaPoints(r io.Reader, count int, start Point) []Point {
 		return points
 	}
 
-	zeroBits, _ := core.ReadBytes((count+3)/4, r)
+	zeroBits, err := core.ReadBytes((count+3)/4, r)
+	if err != nil || len(zeroBits) != (count+3)/4 {
+		return points
+	}
 	zr := bytes.NewReader(zeroBits)
 	cur := start
 	var flags uint8
@@ -1116,6 +1143,11 @@ func (d *PolygonCb) Unpack(r io.Reader, present uint32, delta bool) error {
 	}
 	if present&0x0800 != 0 {
 		d.Npoints, _ = core.ReadUInt8(r)
+	}
+	if present&0x1000 != 0 {
+		if _, err := core.ReadUInt8(r); err != nil {
+			return fmt.Errorf("polygon cb: %w", err)
+		}
 		d.Points = readDeltaPoints(r, int(d.Npoints), Point{d.X, d.Y})
 	}
 	return nil
@@ -1156,6 +1188,11 @@ func (d *Polyline) Unpack(r io.Reader, present uint32, delta bool) error {
 	}
 	if present&0x0020 != 0 {
 		d.Npoints, _ = core.ReadUInt8(r)
+	}
+	if present&0x0040 != 0 {
+		if _, err := core.ReadUInt8(r); err != nil {
+			return fmt.Errorf("polyline: %w", err)
+		}
 		d.Points = readDeltaPoints(r, int(d.Npoints), Point{d.X, d.Y})
 	}
 	return nil
@@ -1207,6 +1244,7 @@ type EllipeCb struct {
 	Fillmode                 uint8
 	BgColour                 [4]uint8
 	FgColour                 [4]uint8
+	Brush                    Brush
 }
 
 func (d *EllipeCb) Type() int {
@@ -1241,6 +1279,9 @@ func (d *EllipeCb) Unpack(r io.Reader, present uint32, delta bool) error {
 		b, g, rr, a := updateReadColorRef(r)
 		d.FgColour[0], d.FgColour[1], d.FgColour[2], d.FgColour[3] = b, g, rr, a
 	}
+	// The brush travels in the other half of the field flags, as it does for
+	// PATBLT. Not reading it would leave the rest of the batch shifted.
+	d.Brush.updateBrush(r, present>>8)
 	return nil
 }
 
@@ -1404,7 +1445,12 @@ func (s *Secondary) updateCacheBitmapV2Order(r io.Reader, compressed bool, flags
 		}
 	}
 
-	cb.bitmapDataStream, _ = core.ReadBytes(int(bitmapLength), r)
+	data, err := readChecked(r, int(bitmapLength), maxCacheBitmapBytes)
+	if err != nil {
+		glog.Debugf("cache bitmap: %v", err)
+		return
+	}
+	cb.bitmapDataStream = data
 	cb.bitmapLength = bitmapLength
 	cb.compressed = compressed
 
@@ -1465,7 +1511,12 @@ func (s *Secondary) updateCacheBitmapV3Order(r io.Reader, flags uint16) {
 	bitmapData.Height, _ = core.ReadUint16LE(r)
 	new_len, _ := core.ReadUInt32LE(r)
 
-	bitmapData.Data, _ = core.ReadBytes(int(new_len), r)
+	data, err := readChecked(r, int(new_len), maxCacheBitmapBytes)
+	if err != nil {
+		glog.Debugf("cache bitmap v3: %v", err)
+		return
+	}
+	bitmapData.Data = data
 	bitmapData.Length = new_len
 
 	// Revision 3 entries carry a codec id: the data is still encoded, and the
@@ -1498,16 +1549,51 @@ func (s *Secondary) updateCacheColorTableOrder(r io.Reader, flags uint16) {
 		return
 	}
 
-	for i := 0; i < int(cb.numberColors)*4; i++ {
-		cb.colorTable[i], cb.colorTable[i+1], cb.colorTable[i+2], cb.colorTable[i+3] = updateReadColorRef(r)
+	// One colour per iteration: stepping four at a time and writing four bytes
+	// from each offset ran past the end of the table on the last one.
+	for i := 0; i < int(cb.numberColors) && i < 256; i++ {
+		cb.colorTable[i*4], cb.colorTable[i*4+1], cb.colorTable[i*4+2], cb.colorTable[i*4+3] = updateReadColorRef(r)
 	}
 }
+
+// updateReadColorRef reads a colour an order carries, which is three bytes: blue,
+// green and red, in that order.
+//
+// It used to read four, a fourth byte being discarded, which shifted every field
+// after a colour by one byte. Nothing caught it because no server tested sends an
+// order with a colour in it, and the drawing tests build their orders directly
+// rather than parsing them. FreeRDP's update_read_color is the authority.
+// Bounds on the lengths a secondary order declares. They come off the wire, and
+// core.ReadBytes allocates the declared size before reading a byte of it, so an
+// unchecked length costs that much memory whether or not the data exists.
+const (
+	maxCacheBitmapBytes = 16 << 20
+	maxBrushBytes       = 4 << 10
+	// maxCachePixels is the most a cached bitmap may decode to, which bounds the
+	// buffer the decoder allocates from geometry that also came off the wire.
+	maxCachePixels = 16 << 20
+)
+
+// readChecked reads exactly n bytes, refusing a length above limit before it
+// allocates anything, and refusing a short read.
+func readChecked(r io.Reader, n, limit int) ([]byte, error) {
+	if n < 0 || n > limit {
+		return nil, fmt.Errorf("length %d is out of range, at most %d", n, limit)
+	}
+	b, err := core.ReadBytes(n, r)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != n {
+		return nil, fmt.Errorf("wanted %d bytes, got %d", n, len(b))
+	}
+	return b, nil
+}
+
 func updateReadColorRef(r io.Reader) (uint8, uint8, uint8, uint8) {
 	blue, _ := core.ReadUInt8(r)
 	green, _ := core.ReadUInt8(r)
 	red, _ := core.ReadUInt8(r)
-	core.ReadUInt8(r)
-
 	return blue, green, red, 255
 }
 
@@ -1568,19 +1654,33 @@ func (s *Secondary) updateCacheBrushOrder(r io.Reader, flags uint16) {
 	cb.length, _ = core.ReadUInt8(r)
 	if cb.cx == 8 && cb.cy == 8 {
 		if cb.bpp == 1 {
+			if cb.length != 8 {
+				glog.Debugf("cache brush: monochrome brush of %d bytes", cb.length)
+				return
+			}
+			cb.data = make([]uint8, 8)
 			for i := 7; i >= 0; i-- {
 				cb.data[i], _ = core.ReadUInt8(r)
 			}
 		} else {
 			bpp := int(cb.bpp) - 2
 			if int(cb.length) == 16+4*bpp {
-				/* compressed brush */
-				data, _ := core.ReadBytes(int(cb.length), r)
+				// compressed brush
+				data, err := readChecked(r, int(cb.length), maxBrushBytes)
+				if err != nil {
+					glog.Debugf("cache brush: %v", err)
+					return
+				}
 				cb.data = update_decompress_brush(data, bpp)
 			} else {
-				/* uncompressed brush */
+				// uncompressed brush
 				scanline := 8 * 8 * bpp
-				cb.data, _ = core.ReadBytes(scanline, r)
+				data, err := readChecked(r, scanline, maxBrushBytes)
+				if err != nil {
+					glog.Debugf("cache brush: %v", err)
+					return
+				}
+				cb.data = data
 			}
 		}
 		if s.CacheBrush != nil {
@@ -1590,6 +1690,12 @@ func (s *Secondary) updateCacheBrushOrder(r io.Reader, flags uint16) {
 	}
 }
 func update_decompress_brush(in []uint8, bpp int) []uint8 {
+	// The palette follows a sixteen byte run map, and the body indexes it by
+	// two bit values, so both have to be there before anything is read.
+	if bpp < 1 || len(in) < 16+4*bpp {
+		return nil
+	}
+
 	var pal_index, in_index, shift int
 
 	pal := in[16:]

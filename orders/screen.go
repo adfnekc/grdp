@@ -32,6 +32,10 @@ type Screen struct {
 	// nothing to read.
 	Cache *Cache
 
+	// Glyphs holds the glyph cache the TEXT2 order draws from. The server fills
+	// it with cache glyph orders before it sends any text.
+	Glyphs *GlyphCache
+
 	// unsupported counts orders that were recognised but not drawn, so a caller
 	// can tell "rendered" from "rendered what I could". Use Unsupported for the
 	// breakdown.
@@ -40,7 +44,7 @@ type Screen struct {
 
 // NewScreen returns a black screen of the given size.
 func NewScreen(width, height int) *Screen {
-	s := &Screen{Cache: NewCache(), unsupported: make(map[string]int)}
+	s := &Screen{Cache: NewCache(), Glyphs: NewGlyphCache(), unsupported: make(map[string]int)}
 	s.Resize(width, height)
 	return s
 }
@@ -150,6 +154,10 @@ func (s *Screen) drawOne(o *pdu.OrderPdu) image.Rectangle {
 		return s.ellipse(d.Left, d.Top, d.Right, d.Bottom, d.Colour, false, clip)
 	case *pdu.EllipeCb:
 		return s.ellipse(d.Left, d.Top, d.Right, d.Bottom, d.FgColour, true, clip)
+	case *pdu.GlyphIndex:
+		return s.DrawText2(d, s.Glyphs, clip)
+	case *pdu.Mem3blt, *pdu.MultiDstBlt, *pdu.MultiPatBlt, *pdu.MultiScrBlt, *pdu.MultiOpaqueRect:
+		return s.DrawMulti(o, clip)
 	default:
 		s.note(fmt.Sprintf("%T", o.Primary.Data))
 		return image.Rectangle{}
@@ -370,18 +378,28 @@ func (s *Screen) polygon(points []pdu.Point, colour [4]uint8, clip image.Rectang
 	}
 	ink := inkColour(colour)
 
-	minY, maxY := points[0].Y, points[0].Y
+	// The rows are bounded by the clip before the sweep, not by the coordinates:
+	// a polygon only carries its vertices, and a pair of them can be millions of
+	// rows apart, so sweeping the whole span costs that many iterations for a
+	// shape that is mostly off screen.
+	y0, y1 := int(points[0].Y), int(points[0].Y)
 	for _, p := range points[1:] {
-		if p.Y < minY {
-			minY = p.Y
+		if int(p.Y) < y0 {
+			y0 = int(p.Y)
 		}
-		if p.Y > maxY {
-			maxY = p.Y
+		if int(p.Y) > y1 {
+			y1 = int(p.Y)
 		}
+	}
+	if y0 < clip.Min.Y {
+		y0 = clip.Min.Y
+	}
+	if y1 > clip.Max.Y-1 {
+		y1 = clip.Max.Y - 1
 	}
 
 	var dirty image.Rectangle
-	for y := int(minY); y <= int(maxY); y++ {
+	for y := y0; y <= y1; y++ {
 		// The crossings of this scanline with each edge, at y plus a half so
 		// that a vertex is counted once.
 		var xs []int
@@ -428,7 +446,17 @@ func (s *Screen) polyline(points []pdu.Point, colour [4]uint8, clip image.Rectan
 }
 
 // line draws one segment, one pixel thick, which is what a thin pen is.
+//
+// The segment is clipped to the order's bounds first. The step count follows the
+// coordinates, and delta coordinates accumulate across orders, so an unclipped
+// segment can ask for a number of steps no screen has pixels for.
 func (s *Screen) line(a, b pdu.Point, colour [4]uint8, clip image.Rectangle) image.Rectangle {
+	var ok bool
+	a, b, ok = clipSegment(a, b, clip)
+	if !ok {
+		return image.Rectangle{}
+	}
+
 	dx, dy := int(b.X-a.X), int(b.Y-a.Y)
 	steps := abs(dx)
 	if abs(dy) > steps {
@@ -450,8 +478,15 @@ func (s *Screen) line(a, b pdu.Point, colour [4]uint8, clip image.Rectangle) ima
 // ellipse draws the ellipse the rectangle inscribes: its boundary, one pixel
 // thick, or the whole shape when asked to fill it.
 func (s *Screen) ellipse(left, top, right, bottom int32, colour [4]uint8, filled bool, clip image.Rectangle) image.Rectangle {
+	// The rectangle comes from coordinates that delta encoding can grow without
+	// limit, so it is bounded before radii are derived from it: a row loop of two
+	// billion iterations is otherwise one order away.
+	const maxEllipseSpan = 1 << 14
 	r := image.Rect(int(left), int(top), int(right), int(bottom))
-	if r.Empty() {
+	if r.Empty() || r.Dx() > maxEllipseSpan || r.Dy() > maxEllipseSpan {
+		return image.Rectangle{}
+	}
+	if clipped := r.Intersect(clip); clipped.Empty() {
 		return image.Rectangle{}
 	}
 	// Radii, so that the centre lands on a pixel whatever the parity of the size.
@@ -493,6 +528,46 @@ func (s *Screen) ellipse(left, top, right, bottom int32, colour [4]uint8, filled
 		prevL, prevR = l, rr
 	}
 	return dirty
+}
+
+// clipSegment clips a segment to a rectangle, returning false when none of it is
+// inside. Liang-Barsky, which is enough for one pixel wide lines.
+func clipSegment(a, b pdu.Point, clip image.Rectangle) (pdu.Point, pdu.Point, bool) {
+	x0, y0 := float64(a.X), float64(a.Y)
+	x1, y1 := float64(b.X), float64(b.Y)
+	dx, dy := x1-x0, y1-y0
+
+	left, top := float64(clip.Min.X), float64(clip.Min.Y)
+	right, bottom := float64(clip.Max.X-1), float64(clip.Max.Y-1)
+
+	t0, t1 := 0.0, 1.0
+	for _, e := range [4][2]float64{{-dx, x0 - left}, {dx, right - x0}, {-dy, y0 - top}, {dy, bottom - y0}} {
+		p, q := e[0], e[1]
+		if p == 0 {
+			if q < 0 {
+				return a, b, false
+			}
+			continue
+		}
+		r := q / p
+		if p < 0 {
+			if r > t1 {
+				return a, b, false
+			}
+			if r > t0 {
+				t0 = r
+			}
+		} else {
+			if r < t0 {
+				return a, b, false
+			}
+			if r < t1 {
+				t1 = r
+			}
+		}
+	}
+	return pdu.Point{X: int32(x0 + t0*dx), Y: int32(y0 + t0*dy)},
+		pdu.Point{X: int32(x0 + t1*dx), Y: int32(y0 + t1*dy)}, true
 }
 
 func abs(v int) int {
