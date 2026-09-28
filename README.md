@@ -128,6 +128,10 @@ reference implementation rather than against hand written expectations.
 come from our test encoder because FreeRDP's compressor is a stub; FreeRDP's
 decoder still supplies the expected output.
 
+`scripts/compare-shots.py` compares two screenshots of the same screen, taken
+over different drawing paths, and reports whether they differ like a lossy codec
+or like a region that never got drawn.
+
 ## Take ideas from
 
 * [rdpy](https://github.com/citronneur/rdpy)

@@ -235,3 +235,35 @@ Worth knowing: only the interleaved form can tell that a stream ended early,
 because it carries an explicit size. The 8, 16 and 24 bit forms are terminated
 by the buffer ending, so a short stream is not distinguishable from a complete
 one and no error is reported for them.
+
+## The two drawing paths agree
+
+The legacy path sends lossless RLE bitmaps and EGFX sends RemoteFX, which is
+lossy, so the two are not expected to produce identical pixels. Comparing them is
+still worth doing, as long as the comparison says which kind of difference it is:
+noise spread thinly, or a region that never got drawn.
+
+`scripts/compare-shots.py` reports that. Run the same session twice, once with
+`-egfx` and once without, and compare; then compare two runs of the *same* path,
+which is the control and establishes the noise floor.
+
+Against a Windows desktop, unchanged between runs:
+
+| comparison | mean channel difference | pixels differing visibly |
+| --- | --- | --- |
+| bitmap vs bitmap (the control) | 0.031 of 255 | 169, all inside the taskbar clock |
+| bitmap vs EGFX | 2.886 of 255 | 1438 of 786432 (0.18%) |
+
+The control is the useful half. Two runs of the same path differ in 169 pixels,
+every one of them in the clock, so the method's noise floor outside the clock is
+nothing. Against that, EGFX differs by an average of about one count per channel
+and only 0.18% of pixels by more than sixteen: a lossy codec doing its job, not a
+region left blank. A surface that was never drawn would show up as a large solid
+patch, and there is none.
+
+Comparing sessions that involved input did not work, and the reason is worth
+recording because it is a trap: the runs are not independent. Keystrokes land in
+whichever window has focus, so the second run inherits the first one's windows and
+ends in a different state. The screenshots then differ by a whole window, which
+looks like a rendering fault and is not one. A comparison that involves input
+needs each run to start from a state it established itself.
