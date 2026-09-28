@@ -3,6 +3,7 @@ package orders
 import (
 	"bytes"
 	"image"
+	"strings"
 	"testing"
 
 	"github.com/adfnekc/grdp/protocol/pdu"
@@ -132,7 +133,6 @@ func TestMembltDrawsFromCache(t *testing.T) {
 		Y:        1,
 		Cx:       2,
 		Cy:       2,
-		Opcode:   ropSrcCopy,
 	})})
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestMembltHonoursBounds(t *testing.T) {
 	// Ask to blit 4x4 at the origin, but only allow the middle two columns of
 	// the first two rows to be touched.
 	_, err := s.Draw([]pdu.OrderPdu{orderWithin(&pdu.Memblt{
-		CacheId: 1, CacheIdx: 0, X: 0, Y: 0, Cx: 4, Cy: 4, Opcode: ropSrcCopy,
+		CacheId: 1, CacheIdx: 0, X: 0, Y: 0, Cx: 4, Cy: 4,
 	}, 1, 0, 3, 2)})
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestDegenerateBoundsDrawNothing(t *testing.T) {
 	for _, b := range [][4]int32{{2, 2, 2, 4}, {2, 2, 4, 2}, {3, 3, 1, 1}} {
 		before := s.Pixels()
 		s.Draw([]pdu.OrderPdu{orderWithin(&pdu.Memblt{
-			CacheId: 1, CacheIdx: 0, X: 0, Y: 0, Cx: 4, Cy: 4, Opcode: ropSrcCopy,
+			CacheId: 1, CacheIdx: 0, X: 0, Y: 0, Cx: 4, Cy: 4,
 		}, b[0], b[1], b[2], b[3])})
 		if !bytes.Equal(before, s.Pixels()) {
 			t.Errorf("bounds %v drew something", b)
@@ -207,7 +207,7 @@ func TestMembltOfEmptySlotDrawsNothing(t *testing.T) {
 	s := NewScreen(4, 4)
 	before := s.Pixels()
 	dirty, err := s.Draw([]pdu.OrderPdu{order(&pdu.Memblt{
-		CacheId: 1, CacheIdx: 42, X: 0, Y: 0, Cx: 4, Cy: 4, Opcode: ropSrcCopy,
+		CacheId: 1, CacheIdx: 42, X: 0, Y: 0, Cx: 4, Cy: 4,
 	})})
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestMembltFromASourceOffset(t *testing.T) {
 
 	// Copy the bottom right pixel to the top left of the screen.
 	s.Draw([]pdu.OrderPdu{order(&pdu.Memblt{
-		CacheId: 1, CacheIdx: 0, Srcx: 1, Srcy: 1, X: 0, Y: 0, Cx: 1, Cy: 1, Opcode: ropSrcCopy,
+		CacheId: 1, CacheIdx: 0, Srcx: 1, Srcy: 1, X: 0, Y: 0, Cx: 1, Cy: 1,
 	})})
 	if got := pixelAt(t, s, 0, 0); !bytes.Equal(got, bgra(4, 4, 4)) {
 		t.Errorf("got %v, want the bottom right pixel", got)
@@ -277,18 +277,19 @@ func TestOpaqueRectIsClippedToTheScreen(t *testing.T) {
 // tell a half drawn screen from a complete one.
 func TestUnsupportedOrdersAreCounted(t *testing.T) {
 	s := NewScreen(4, 4)
-	// A ROP we do not implement.
-	s.Draw([]pdu.OrderPdu{order(&pdu.Memblt{
-		CacheId: 1, CacheIdx: 0, Cx: 1, Cy: 1, Opcode: 0x42,
-	})})
-	if n := s.Unsupported()["memblt rop 0x42"]; n != 1 {
-		t.Errorf("unhandled ROP counted %d times, want 1", n)
-	}
-
-	// And an order type with no renderer at all.
+	// An order type with no renderer at all.
 	s.Draw([]pdu.OrderPdu{order(&pdu.Polyline{})})
-	if len(s.Unsupported()) < 2 {
+	if len(s.Unsupported()) == 0 {
 		t.Errorf("expected the unrendered order type to be counted: %v", s.Unsupported())
+	}
+	found := false
+	for kind := range s.Unsupported() {
+		if strings.Contains(kind, "Polyline") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the unrendered order should be counted by type, got %v", s.Unsupported())
 	}
 }
 

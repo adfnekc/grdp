@@ -167,11 +167,9 @@ func (s *Screen) memblt(d *pdu.Memblt, clip image.Rectangle) image.Rectangle {
 		s.note("memblt from the stream")
 		return image.Rectangle{}
 	}
-	if d.Opcode != ropSrcCopy {
-		s.note(fmt.Sprintf("memblt rop 0x%02x", d.Opcode))
-		return image.Rectangle{}
-	}
-
+	// MEMBLT carries no raster operation: it copies. The byte the order holds
+	// is a colour index, used only for palettised bitmaps, and reading it as a
+	// ROP made every one of these look like an unhandled BLACKNESS fill.
 	entry := s.Cache.Get(uint32(d.CacheId), uint32(d.CacheIdx))
 	if entry == nil {
 		// Blitting a slot that was never filled leaves the screen as it is,

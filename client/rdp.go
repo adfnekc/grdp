@@ -129,7 +129,8 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	if c.setting != nil && c.setting.EnableOrders {
 		c.screen = orders.NewScreen(c.setting.Width, c.setting.Height)
 		c.pdu.SetOrderSupport(true)
-		c.pdu.Once("ready", func(data interface{}) {
+		// The ready event carries no argument, unlike the ones that follow.
+		c.pdu.Once("ready", func() {
 			c.pdu.On("orders", func(d interface{}) {
 				pdus, ok := d.([]pdu.OrderPdu)
 				if !ok {

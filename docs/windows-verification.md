@@ -189,6 +189,20 @@ The parser reads the compact forms now, a captured order is a test fixture, and
 that test checks the checksum of the decoded pixels. A shift of one byte changes
 the image, and "it decoded to something" would not have noticed.
 
+**MEMBLT has no raster operation, and the parser read its colour index as one.**
+The field at present bit 0x0020 is `TS_NEG_COLORINDEX_INDEX`, a colour index for
+palettised bitmaps; MEMBLT always copies. Reading it as a ROP made every MEMBLT
+look like an unhandled BLACKNESS fill, which is exactly what a black screen
+would have suggested too.
+
+**An order with delta coordinates repeats the previous order's fields.** This is
+the one that took longest to see, because nothing about it looks like a bug: with
+`TS_DELTA_COORDINATES` set, the fields an order leaves out are not zero, they are
+whatever the previous order of the same type carried. Parsing into a fresh struct
+loses them, and the symptom is not a parse error but a MEMBLT that omits its
+cache id, reads cache 0, and finds nothing there. The parser keeps the last order
+of each type now and fills the gaps from it.
+
 **`decompress4` compared the wrong two numbers.** It ended with
 `return size == total`, where `size` is the size of the decoded bitmap and
 `total` is how many compressed bytes were consumed, so it reported failure for

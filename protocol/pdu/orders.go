@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 
 	"github.com/adfnekc/grdp/glog"
 
@@ -298,6 +299,10 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 		glog.Debugf("Unsupport order type 0x%x", orderType)
 	}
 
+	// The parsed order has to be attached: a renderer reaches the cache bitmaps
+	// through it, and leaving it out makes every cache fill look like an order
+	// nobody understood.
+	o.Secondary = &sec
 	return nil
 }
 func (b *Bounds) updateBounds(r io.Reader) {
@@ -330,6 +335,28 @@ func (b *Bounds) updateBounds(r io.Reader) {
 type PrimaryOrder interface {
 	Type() int
 	Unpack(io.Reader, uint32, bool) error
+}
+
+// deltaOrders holds the last parsed order of each type, which is what delta
+// coordinates are relative to.
+//
+// It is package level, like the order type and bounds the parser already keeps
+// there, so two connections in one process share it. That is wrong and should
+// become per connection; it is noted rather than quietly relied upon.
+var deltaOrders = map[int]PrimaryOrder{}
+
+// copyPrimaryOrder overwrites dst with the fields of src when they are the same
+// concrete type, leaving dst alone otherwise.
+func copyPrimaryOrder(dst, src PrimaryOrder) {
+	d := reflect.ValueOf(dst)
+	s := reflect.ValueOf(src)
+	if d.Kind() != reflect.Ptr || d.IsNil() || s.Kind() != reflect.Ptr || s.IsNil() {
+		return
+	}
+	if d.Elem().Type() != s.Elem().Type() {
+		return
+	}
+	d.Elem().Set(s.Elem())
 }
 
 var (
@@ -443,9 +470,19 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		return errors.New("Not Support order type")
 	}
 	if p != nil {
+		// With delta coordinates the fields an order leaves out repeat the
+		// values from the previous order of the same type. Parsing into a zero
+		// valued struct loses them, and the symptom is not a parse error: a
+		// MEMBLT that omits its cache id reads as cache 0 and finds nothing.
+		if delta {
+			if prev, ok := deltaOrders[p.Type()]; ok {
+				copyPrimaryOrder(p, prev)
+			}
+		}
 		if err := p.Unpack(r, present, delta); err != nil {
 			return err
 		}
+		deltaOrders[p.Type()] = p
 	}
 
 	o.Primary.Data = p
@@ -752,13 +789,16 @@ func (d *SaveBitmap) Unpack(r io.Reader, present uint32, delta bool) error {
 }
 
 type Memblt struct {
-	ColourTable uint8
 	CacheId     uint8
+	ColourTable uint8
 	X           int32
 	Y           int32
 	Cx          int32
 	Cy          int32
-	Opcode      uint8
+	// ColourIndex is the byte the order carries in its colorIndex field. It is
+	// not a raster operation: MEMBLT always copies, and the field is only used
+	// when the cached bitmap is palettised.
+	ColourIndex uint8
 	Srcx        int32
 	Srcy        int32
 	CacheIdx    uint16
@@ -785,7 +825,7 @@ func (d *Memblt) Unpack(r io.Reader, present uint32, delta bool) error {
 		readOrderCoord(r, &d.Cy, delta)
 	}
 	if present&0x0020 != 0 {
-		d.Opcode, _ = core.ReadUInt8(r)
+		d.ColourIndex, _ = core.ReadUInt8(r)
 	}
 	if present&0x0040 != 0 {
 		readOrderCoord(r, &d.Srcx, delta)

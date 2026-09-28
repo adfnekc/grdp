@@ -101,6 +101,16 @@ func (c *Cache) Reset() {
 	c.mu.Unlock()
 }
 
+func (c *Cache) keys() []cacheKey {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]cacheKey, 0, len(c.entries))
+	for k := range c.entries {
+		out = append(out, k)
+	}
+	return out
+}
+
 // Len is the number of entries held, for tests and diagnostics.
 func (c *Cache) Len() int {
 	c.mu.Lock()
