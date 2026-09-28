@@ -1285,24 +1285,6 @@ func (d *EllipeCb) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
-// GlayphIndex is the TEXT2 order, which draws from a cache of glyphs the server
-// has already sent.
-//
-// Neither half is implemented: the order is not parsed, and there is no glyph
-// cache for it to draw from. Parsing it as nothing would leave the stream out of
-// step for every order after it in the same batch, so it reports that it cannot
-// be read and the batch is dropped instead. No server tested has sent one.
-type GlayphIndex struct {
-}
-
-func (d *GlayphIndex) Type() int {
-	return ORDER_TYPE_TEXT2
-}
-
-func (d *GlayphIndex) Unpack(r io.Reader, present uint32, delta bool) error {
-	return fmt.Errorf("text2 order: glyph rendering needs a glyph cache, which is not implemented")
-}
-
 /*Secondary*/
 func (s *Secondary) updateCacheBitmapOrder(r io.Reader, compressed bool, flags uint16) {
 	var cb CacheBitmapOrder
