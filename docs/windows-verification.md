@@ -195,6 +195,14 @@ palettised bitmaps; MEMBLT always copies. Reading it as a ROP made every MEMBLT
 look like an unhandled BLACKNESS fill, which is exactly what a black screen
 would have suggested too.
 
+**The field flags of a primary order are read from the bottom up.** It is
+tempting to read the two control flags that shorten them as meaning the low byte
+is absent and the following bytes shift up to leave room for a zero. The wire
+says otherwise: a MEMBLT carrying one flag byte carries `0x02`, which is the left
+coordinate, and shifting it up gives `0x200`, which is bit nine of a nine bit
+field and so names nothing at all. The bytes that remain are read from the bottom
+up.
+
 **An order with delta coordinates repeats the previous order's fields.** This is
 the one that took longest to see, because nothing about it looks like a bug: with
 `TS_DELTA_COORDINATES` set, the fields an order leaves out are not zero, they are

@@ -411,6 +411,15 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		size = 2
 	}
 
+	// The field flags shrink by a byte for each of these control flags, and the
+	// bytes that remain are read from the bottom up.
+	//
+	// It is tempting to read this the other way, with the absent byte being the
+	// low one and the bytes that follow shifted up to make room for a zero. That
+	// reading is wrong here, and the wire settles it: a MEMBLT with only one
+	// flag byte carries 0x02, which is the left coordinate. Shifting it up gives
+	// 0x200, which is bit nine of a nine bit field, so it would name no field at
+	// all.
 	if o.ControlFlags&TS_ZERO_FIELD_BYTE_BIT0 != 0 {
 		size--
 	}
