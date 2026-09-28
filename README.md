@@ -7,9 +7,9 @@ Forked from [tomatome/grdp](https://github.com/tomatome/grdp), itself forked fro
 
 ## Status
 
-The connection, authentication, rendering and input paths are implemented and
-have been verified against real servers. The graphics paths that newer servers
-prefer are not done yet.
+The connection, authentication, rendering, input and clipboard paths are
+implemented and verified against real servers, over both the legacy bitmap path
+and the newer graphics channel.
 
 Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
 
@@ -31,18 +31,29 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       desktop, its icons and text come through over the graphics channel with
       no bitmap updates at all. Off by default, see below.
 
-Not done:
+Not done, or not finished:
 
+* [ ] Orders render but not correctly. The bitmap cache and MEMBLT are
+      implemented, and the rendering is unit tested, including that an order's
+      bounds clip it. Against a live server the cache fills and the blits find
+      each other, but most batches draw nothing, because MEMBLTs that carry only
+      a coordinate look for cache `(0,0)` instead of the entry the previous order
+      of their type had just filled. `Setting.EnableOrders` stays off by default
+      and the server keeps to bitmap updates without it; the two cannot be mixed,
+      since advertising MEMBLT stops bitmap updates entirely.
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own
       arithmetic decoder. The `THINCLIENT` capability flag asks the server not
       to use it, and the dispatch error names it if a server does anyway.
-* [ ] Orders and the bitmap cache. xrdp never sends orders, so this path is only
-      needed for Windows' partial updates.
-* [ ] Interleaved RLE bitmaps, which the bitmap cache revision 3 needs.
+* [ ] Interleaved RLE bitmaps. Only bitmap cache revision 3 asks for them, and
+      no server tested has used revision 3: the measured traffic was all
+      revision 2, which uses the same decoder bitmap updates do.
 * [ ] H.264 (AVC420 / AVC444) codecs, which EGFX servers may choose. Not
       advertising them is what keeps them out of the negotiation.
 * [ ] Scaled surface placement: a surface mapped with scale factors would need
       resampling. `MapSurfaceToOutput` is honoured, the scaled variants are not.
+* [ ] PATBLT and the brush cache, and the glyph and polygon orders. None of them
+      appeared in the measured traffic, which was MEMBLT, cache fills and
+      alternate secondary orders and almost nothing else.
 * [ ] VNC. The RFB subset this fork inherited is unused and unverified.
 
 ## Using it as a library
@@ -68,6 +79,11 @@ by default because a server that picks it stops sending bitmap updates: with it
 on, an unsupported codec means a blank screen rather than a degraded one. Use
 `OnSurfaceFrame` to receive the surfaces and `Surface.Origin` to place them.
 
+`Setting.EnableOrders` advertises MEMBLT and renders the drawing orders that
+follow, into a framebuffer reachable through `Client.Screen`, with
+`OnOrdersFrame` reporting what changed. It is off by default and the rendering is
+not finished, so it is there to work on rather than to use.
+
 ## Trying it out
 
 `cmd/rdpcli` is a headless client that connects, decodes, and writes what it
@@ -85,7 +101,18 @@ go run ./cmd/rdpcli -host 192.0.2.10:3389 -user user -pass secret -proto nla \
 
 Flags worth knowing: `-type` types a string (handling shift), `-key` sends raw
 input events, `-clipboard` and `-set-clipboard` exercise the clipboard,
-`-pointer` logs pointer updates, `-log 0` is a full trace.
+`-egfx` and `-orders` switch the drawing path, `-pointer` logs pointer updates,
+and `-log 0` is a full trace.
+
+## How the verification was done
+
+`docs/windows-verification.md` records what was checked against a real Windows
+host and, more usefully, how: which symptom means the protocol is at fault and
+which means the account is, where a capture settled a question the specification
+left ambiguous, and which mistakes were made on the way. The codecs and ZGFX are
+checked byte for byte against libfreerdp rather than against expectations written
+by the same person who wrote the decoder, which is how the interpretations behind
+several bugs were caught.
 
 ## Development
 
