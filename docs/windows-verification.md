@@ -295,3 +295,25 @@ whichever window has focus, so the second run inherits the first one's windows a
 ends in a different state. The screenshots then differ by a whole window, which
 looks like a rendering fault and is not one. A comparison that involves input
 needs each run to start from a state it established itself.
+
+## Revision 3 bitmap caches are not used, even when offered
+
+Bitmap cache revision 3 is the one that would ask for an RDP 6.1 compressed
+blob, which is where the unimplemented interleaved and banded RLE would come in.
+Nothing tested asks for it.
+
+`ORDERFLAGS_EX_CACHE_BITMAP_REV3_SUPPORT` was not being advertised, which is the
+same shape as MEMBLT being commented out, so it was worth checking whether
+offering it changes anything. It does not: with it set, Windows sends revision 2
+anyway, 1373 cache fills of `ORDER_TYPE_BITMAP_COMPRESSED_V2` and not one of
+revision 3. xrdp sends no orders at all.
+
+The flag is left unset deliberately, since a revision 3 entry carries either a
+bitmap codec or an RDP 6.1 compressed blob, and the second is not decoded here.
+Advertising it would claim support that does not exist, for a server behaviour
+that does not happen anyway.
+
+Worth noting for anyone who does want it: the premise that revision 3 means
+interleaved RLE is only half true. Its entries carry a codec id, so a
+`CacheBitmapDataEx` may well hold NSCodec or RemoteFX data, which this library
+already decodes. The blob only appears for the banded form.

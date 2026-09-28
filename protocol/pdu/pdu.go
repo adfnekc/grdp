@@ -231,6 +231,11 @@ func (c *Client) sendConfirmActivePDU() {
 	orderCapa := c.clientCapabilities[CAPSTYPE_ORDER].(*OrderCapability)
 	orderCapa.OrderFlags = NEGOTIATEORDERSUPPORT | ZEROBOUNDSDELTASSUPPORT | COLORINDEXSUPPORT | ORDERFLAGS_EXTRA_FLAGS
 	orderCapa.OrderSupportExFlags |= ORDERFLAGS_EX_ALTSEC_FRAME_MARKER_SUPPORT
+	// ORDERFLAGS_EX_CACHE_BITMAP_REV3_SUPPORT is deliberately not set. Rev3
+	// entries carry either a bitmap codec or an RDP 6.1 compressed blob, and the
+	// latter is not decoded here, so advertising it would claim support that is
+	// not there. Measured against Windows it makes no difference: the server
+	// sends revision 2 whether or not it is offered.
 	orderCapa.OrderSupport[TS_NEG_DSTBLT_INDEX] = 1
 	orderCapa.OrderSupport[TS_NEG_PATBLT_INDEX] = 1
 	orderCapa.OrderSupport[TS_NEG_SCRBLT_INDEX] = 1

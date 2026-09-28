@@ -40,9 +40,10 @@ Not done, or not finished:
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own
       arithmetic decoder. The `THINCLIENT` capability flag asks the server not
       to use it, and the dispatch error names it if a server does anyway.
-* [ ] Interleaved RLE bitmaps. Only bitmap cache revision 3 asks for them, and
-      no server tested has used revision 3: the measured traffic was all
-      revision 2, which uses the same decoder bitmap updates do.
+* [ ] Interleaved and banded RLE bitmaps. Only bitmap cache revision 3 asks for
+      them, and offering revision 3 to Windows changes nothing: it sends revision
+      2 either way, which uses the same decoder bitmap updates do. So this is not
+      implemented because nothing tested reaches it, not because it was skipped.
 * [ ] H.264 (AVC420 / AVC444) codecs, which EGFX servers may choose. Not
       advertising them is what keeps them out of the negotiation.
 * [ ] Scaled surface placement: a surface mapped with scale factors would need
