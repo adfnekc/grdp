@@ -161,6 +161,12 @@ func (s *Screen) drawOne(o *pdu.OrderPdu) image.Rectangle {
 		return s.DrawText2(d, s.Glyphs, clip)
 	case *pdu.Mem3blt, *pdu.MultiDstBlt, *pdu.MultiPatBlt, *pdu.MultiScrBlt, *pdu.MultiOpaqueRect:
 		return s.DrawMulti(o, clip)
+	case *pdu.LineTo:
+		return s.lineTo(d, clip)
+	case *pdu.SaveBitmap:
+		return s.saveBitmap(d, clip)
+	case *pdu.FastIndex:
+		return s.drawFastIndex(d, clip)
 	default:
 		s.note(fmt.Sprintf("%T", o.Primary.Data))
 		return image.Rectangle{}

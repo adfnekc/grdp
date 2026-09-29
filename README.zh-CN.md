@@ -17,6 +17,8 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 
 * [x] 连接、MCS、能力交换
 * [x] TLS 与 NLA（CredSSP + NTLMv2，含 **版本 6** 的公钥绑定）
+* [x] **Standard RDP Security**（无 TLS 的老路径）—— 已对本地 xrdp 实测通过；
+      `scripts/dev-rdp.sh standard` 可把 xrdp 配置成要求它
 * [x] 许可（Licensing）交换
 * [x] 位图更新、RLE、24/32bpp
 * [x] 光标位置与光标形状更新
@@ -29,11 +31,13 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 * [x] **EGFX (RDPGFX) 渲染** —— 在真实 Windows 上验证：桌面、图标、文字全部经由
       图形通道送达，**完全不依赖位图更新**。默认关闭，见下文。
 * [x] **绘图订单（Drawing Orders）** —— 位图缓存与 MEMBLT，按订单自带的 bounds 裁剪；
-      另有 PATBLT（含画刷）、多边形、折线、椭圆、多矩形订单，以及 TEXT2 背后的字形缓存。
+      另有 PATBLT（含画刷）、多边形、折线、椭圆、多矩形订单、TEXT2 背后的字形缓存，
+      以及 LineTo、SaveBitmap、FastIndex。
       已在真实 Windows 上验证：整个锁屏界面经由缓存送达，**渐变与文字都正确**。与位图路径**差异仅剩任务栏时钟**（而同一路径跑两次的差异也在那里）。
       默认关闭，见下文。
-* [ ] VNC（RFB）。本 fork 继承的 RFB 客户端**保留、仍能编译通过**，但**未经验证**：
-      本项目从未对 VNC 服务端实际运行过它，也没有任何测试，其剪贴板尚未实现。
+* [ ] VNC（RFB）。本 fork 继承的 RFB 客户端**保留**，并且经过一轮加固：修掉 6 个线上格式 bug
+      （包括剪贴板文本长度**字节序错误**、以及一条 Bell 消息就会终止整个解析链 ✗），
+      现在对脚本化的握手有测试。但**仍未对真实 VNC 服务端运行过** —— "不支持"就是这个意思。
 
 未实现 / 未完成：
 
@@ -43,8 +47,8 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
       广告 rev3，它**仍然只发 rev2**，而 rev2 用的解码器与位图更新相同。所以这是
       「没有实测路径能到达」，不是「跳过了」。
 * [ ] **H.264（AVC420 / AVC444）** —— EGFX 服务端可能选用。**不广告**即排除在协商之外。
-* [ ] **缩放 surface 的摆放** —— 带缩放的 surface 需要重采样。`MapSurfaceToOutput`
-      已支持，带缩放的几个变体未支持。
+* [ ] **窗口化 surface 的摆放** —— `MapSurfaceToScaledOutput` 已实现（会重采样到服务端
+      要求的尺寸），但两个窗口变体只**记录并对外暴露**、不实际应用，因为没有"窗口"可摆放。
 
 ## 作为库使用
 
@@ -106,8 +110,9 @@ go run ./cmd/rdpcli -host 192.0.2.10:3389 -user user -pass secret -proto nla \
 ## 开发
 
 * `scripts/dev-rdp.sh` —— 管理本地 xrdp 靶机：`setup`（一次性，之后免密）、`up`、
-  `down`、`status`、`probe`、`probe-session`。其中 `probe-session` 会准备一个把 X
-  输入事件记录下来的会话来**验证输入**，而不是靠截图猜。
+  `down`、`status`、`probe`、`probe-session`（准备一个把 X 输入事件记录下来的会话，
+  用来**验证输入**而不是靠截图猜）、以及 `standard`（把 xrdp 重启成要求
+  Standard RDP Security，以便测试那条路径）。
 * `scripts/gen-codec-vectors.sh` —— 用 libfreerdp 的编码器/解码器重新生成编解码器测试
   向量，使图像编解码器对齐**参照实现**，而不是手写期望值。
 * `scripts/gen-zgfx-vectors.sh` —— ZGFX 同样处理；区别是 FreeRDP 的压缩器是个桩

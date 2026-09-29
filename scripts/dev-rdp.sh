@@ -13,6 +13,15 @@
 #   scripts/dev-rdp.sh status
 #   scripts/dev-rdp.sh probe [host]    # check that the port accepts connections
 #   scripts/dev-rdp.sh probe-session   # deterministic session for input testing
+#   scripts/dev-rdp.sh standard        # restart xrdp with security_layer=rdp
+#   scripts/dev-rdp.sh negotiate       # restore security_layer=negotiate (TLS/NLA)
+#   scripts/dev-rdp.sh security-layer L # set security_layer to rdp, tls or negotiate
+#
+# `standard` is how the Standard RDP Security path is exercised: xrdp then
+# offers no TLS and no NLA, so a client that asks for it with `-proto rdp` has
+# to use the legacy security exchange and licensing. It derives a config copy
+# from the installed xrdp.ini and starts xrdp on it, so no root owned file is
+# edited and no additional grant is needed.
 #
 # `probe-session` rewrites ~rdptest/.xsession so the session logs every X input
 # event to /tmp/xi.log and then runs a single xterm. That is how keyboard and
@@ -32,6 +41,8 @@ PKILL_BIN=${PKILL_BIN:-/usr/bin/pkill}
 RUN_DIR=${RUN_DIR:-/var/run/xrdp}
 PORT=${PORT:-3389}
 TARGET_USER=${TARGET_USER:-rdptest}
+XRDP_INI=${XRDP_INI:-/etc/xrdp/xrdp.ini}
+CONFIG_DIR=${CONFIG_DIR:-/tmp}
 
 # The root owned copy that `setup` installs. Root operations are funnelled
 # through it so no user-writable file is ever run as root.
@@ -194,6 +205,73 @@ probe_session() {
   exit 1
 }
 
+# --- security layer -------------------------------------------------------
+
+# xrdp's security_layer decides what the server offers: "rdp" is Standard RDP
+# Security only (no TLS, no NLA, the legacy RC4 and licensing path), "tls" is
+# Enhanced RDP Security with TLS, and "negotiate" (the stock default) offers
+# everything.
+#
+# The setting is read at startup, so a target that requires Standard RDP
+# Security is started from a generated copy of the installed configuration.
+# Deriving the copy keeps everything else the operator set and, unlike editing
+# the root owned /etc/xrdp/xrdp.ini, needs no extra privilege: the grant
+# `setup` already installs lets this script start xrdp with a config path.
+
+# security_layer_ini <layer> prints the path of a config with that layer.
+security_layer_ini() {
+  layer=$1
+  case "$layer" in
+    rdp|tls|negotiate) ;;
+    *)
+      echo "error: security layer must be rdp, tls or negotiate" >&2
+      exit 2
+      ;;
+  esac
+  if [ ! -f "$XRDP_INI" ]; then
+    echo "error: $XRDP_INI does not exist" >&2
+    exit 1
+  fi
+  if ! grep -q '^security_layer=' "$XRDP_INI"; then
+    echo "error: no uncommented security_layer= line in $XRDP_INI" >&2
+    exit 1
+  fi
+  ini="$CONFIG_DIR/xrdp-$layer.ini"
+  mkdir -p "$CONFIG_DIR"
+  sed "s/^security_layer=.*/security_layer=$layer/" "$XRDP_INI" > "$ini"
+  echo "$ini"
+}
+
+# security_layer <layer> restarts xrdp on the generated config. The running
+# server is stopped first because xrdp refuses to start while another
+# instance's pid file is present.
+security_layer() {
+  ini=$(security_layer_ini "${1:-}")
+  need_root security-layer
+
+  if is_running "$XRDP_BIN"; then
+    as_root "$PKILL_BIN" -x "$(basename "$XRDP_BIN")" || true
+    for _ in $(seq 1 20); do
+      is_running "$XRDP_BIN" || break
+      sleep 0.25
+    done
+  fi
+
+  as_root mkdir -p "$RUN_DIR"
+  if ! is_running "$SESMAN_BIN"; then
+    echo "starting xrdp-sesman..."
+    as_root "$SESMAN_BIN"
+  fi
+  layer=$(grep '^security_layer=' "$ini")
+  echo "starting xrdp on $ini ($layer)..."
+  as_root "$XRDP_BIN" -c "$ini"
+  for _ in $(seq 1 20); do
+    port_listening && break
+    sleep 0.25
+  done
+  status
+}
+
 # --- one time setup -------------------------------------------------------
 
 setup() {
@@ -252,6 +330,9 @@ case "${1:-}" in
   status) status ;;
   probe) shift; probe "${1:-}" ;;
   probe-session) probe_session ;;
+  standard) security_layer rdp ;;
+  negotiate) security_layer negotiate ;;
+  security-layer) shift; security_layer "${1:-}" ;;
   *)
     cat >&2 <<EOF
 usage: $0 <command>
@@ -263,6 +344,9 @@ usage: $0 <command>
   status
   probe [host]   check that the RDP port accepts connections
   probe-session  deterministic session for input testing (needs setup)
+  standard       restart xrdp with security_layer=rdp (Standard RDP Security)
+  negotiate      restart xrdp with security_layer=negotiate (TLS/NLA, the default)
+  security-layer L  set and restart xrdp with security_layer L (rdp, tls, negotiate)
 EOF
     exit 2
     ;;

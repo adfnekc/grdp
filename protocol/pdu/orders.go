@@ -463,6 +463,9 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 	if n, ok := MultiFieldBytes(orderType); ok {
 		size = n
 	}
+	if n, ok := MissingFieldBytes(orderType); ok {
+		size = n
+	}
 
 	// The field flags shrink by a byte for each of these control flags, and the
 	// bytes that remain are read from the bottom up.
@@ -562,6 +565,9 @@ func (o *OrderPdu) processPrimaryOrder(r io.Reader) error {
 		p = &GlyphIndex{}
 	default:
 		p = NewMultiOrder(orderType)
+		if p == nil {
+			p = NewMissingOrder(orderType)
+		}
 		if p == nil {
 			glog.Error("Not Support order type:", orderType)
 			return errors.New("Not Support order type")

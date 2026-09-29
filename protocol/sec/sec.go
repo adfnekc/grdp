@@ -9,6 +9,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"unicode/utf16"
 
@@ -492,7 +493,15 @@ func (c *Client) connect(clientData []interface{}, serverData []interface{}, use
 	c.enableEncryption = c.ClientCoreData().ServerSelectedProtocol == 0
 
 	if c.enableEncryption {
-		c.sendClientRandom()
+		// Standard RDP Security. The key exchange reads the server's
+		// random and certificate off the wire, so a failure here must stop
+		// the connection rather than carry on with no session keys.
+		if err := c.sendClientRandom(); err != nil {
+			glog.Error("sec: Standard RDP Security: ", err)
+			c.Emit("error", err)
+			_ = c.Close()
+			return
+		}
 	}
 
 	c.sendInfoPkt()
@@ -611,7 +620,18 @@ func sessionKeyBlob(secret, random1, random2 []byte) []byte {
 	return ms.Bytes()
 
 }
+
+// generateKeys derives the MAC key and the two RC4 keys for Standard RDP
+// Security from the client and server randoms (MS-RDPBCGR 5.3.5). Both
+// randoms take part in every hash and must be 32 bytes; a shorter one means the
+// security exchange was truncated. The slices are bounded here so such a
+// server fails instead of reading past the end.
 func generateKeys(clientRandom, serverRandom []byte, method uint32) ([]byte, []byte, []byte) {
+	if len(clientRandom) < 32 || len(serverRandom) < 32 {
+		glog.Error("sec: session keys need 32 byte randoms, got ", len(clientRandom), " and ", len(serverRandom))
+		return nil, nil, nil
+	}
+
 	b := &bytes.Buffer{}
 	b.Write(clientRandom[:24])
 	b.Write(serverRandom[:24])
@@ -656,32 +676,67 @@ func (e *ClientSecurityExchangePDU) serialize() []byte {
 
 	return buff.Bytes()
 }
-func (c *Client) sendClientRandom() {
+
+// sendClientRandom performs the Standard RDP Security key exchange
+// (MS-RDPBCGR 5.3.4): it generates the 32 byte client random, encrypts it with
+// the server's RSA public key and sends it in the Client Security Exchange PDU,
+// then derives the session keys from it and the server random. Every value used
+// here came off the wire, so each one is checked before use; a short server
+// random or a missing certificate would otherwise panic rather than fail the
+// connection.
+func (c *Client) sendClientRandom() error {
 	glog.Debug("send Client Random")
 
 	clientRandom := core.Random(32)
 	glog.Debug("clientRandom:", hex.EncodeToString(clientRandom))
 
-	serverRandom := c.ServerSecurityData().ServerRandom
+	ssd := c.ServerSecurityData()
+	if ssd == nil {
+		return errors.New("sec: security exchange carried no security data")
+	}
+
+	serverRandom := ssd.ServerRandom
 	glog.Debug("ServerRandom:", hex.EncodeToString(serverRandom))
+	if len(serverRandom) != 32 {
+		return fmt.Errorf("sec: server random is %d bytes, want 32", len(serverRandom))
+	}
 
 	c.macKey, c.initialDecrytKey, c.initialEncryptKey = generateKeys(clientRandom,
-		serverRandom, c.ServerSecurityData().EncryptionMethod)
+		serverRandom, ssd.EncryptionMethod)
+	if c.macKey == nil || c.initialDecrytKey == nil || c.initialEncryptKey == nil {
+		return errors.New("sec: could not derive the session keys")
+	}
 
 	//initialize keys
 	c.currentDecrytKey = c.initialDecrytKey
 	c.currentEncryptKey = c.initialEncryptKey
 
+	if ssd.ServerCertificate.CertData == nil {
+		return errors.New("sec: security exchange carried no server certificate")
+	}
+	if chain, ok := ssd.ServerCertificate.CertData.(*gcc.X509CertificateChain); ok && len(chain.CertBlobArray) == 0 {
+		// GetPublicKey indexes the last blob of the chain.
+		return errors.New("sec: server certificate chain is empty")
+	}
+
 	//verify certificate
-	if !c.ServerSecurityData().ServerCertificate.CertData.Verify() {
+	if !ssd.ServerCertificate.CertData.Verify() {
 		glog.Warn("Cannot verify server identity")
 	}
 
-	serverPubKey, _ := c.ServerSecurityData().ServerCertificate.CertData.GetPublicKey()
+	serverPubKey, err := ssd.ServerCertificate.CertData.GetPublicKey()
+	if err != nil {
+		return fmt.Errorf("sec: server public key: %w", err)
+	}
+	if serverPubKey == nil {
+		return errors.New("sec: server certificate has no public key")
+	}
+
 	ret, err := rsa.EncryptPKCS1v15(rand.Reader, serverPubKey, core.Reverse(clientRandom))
 	if err != nil {
-		glog.Error("err:", err)
+		return fmt.Errorf("sec: encrypt client random: %w", err)
 	}
+
 	message := ClientSecurityExchangePDU{}
 	message.EncryptedClientRandom = core.Reverse(ret)
 	message.Length = uint32(len(message.EncryptedClientRandom) + 8)
@@ -690,6 +745,7 @@ func (c *Client) sendClientRandom() {
 	glog.Debug("message:", message)
 
 	c.sendFlagged(EXCHANGE_PKT, message.serialize())
+	return nil
 }
 func (c *Client) sendInfoPkt() {
 	var secFlag uint16 = INFO_PKT

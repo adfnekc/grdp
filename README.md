@@ -18,6 +18,8 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
 * [x] Connection, MCS, capability exchange
 * [x] TLS and NLA (CredSSP with NTLMv2, including the version 6 public key
       binding)
+* [x] Standard RDP Security, the old path with no TLS: verified against a local
+      xrdp configured for it, which `scripts/dev-rdp.sh standard` sets up
 * [x] Licensing exchange
 * [x] Bitmap updates, RLE, 24 and 32 bpp
 * [x] Pointer position and pointer shape updates
@@ -34,9 +36,10 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       no bitmap updates at all. Off by default, see below.
 * [x] Drawing orders: the bitmap cache and MEMBLT, with the bounds an order
       carries as a clip, plus PATBLT with its brush, the polygons, the polyline,
-      the ellipses, the multi rectangle orders and the glyph cache behind TEXT2.
-      Verified against a real Windows server, where a whole lock screen comes
-      through the cache, gradients and text included. It matches the bitmap path to the taskbar
+      the ellipses, the multi rectangle orders, the glyph cache behind TEXT2,
+      LineTo, SaveBitmap and FastIndex. Verified against a real Windows server,
+      where a whole lock screen comes through the cache, gradients and text
+      included. It matches the bitmap path to the taskbar
       clock, which is where two runs of the same path differ too. Off by default,
       see below.
 * [ ] VNC. The RFB client inherited from upstream is kept and still builds, but
@@ -53,8 +56,10 @@ Not done, or not finished:
       implemented because nothing tested reaches it, not because it was skipped.
 * [ ] H.264 (AVC420 / AVC444) codecs, which EGFX servers may choose. Not
       advertising them is what keeps them out of the negotiation.
-* [ ] Scaled surface placement: a surface mapped with scale factors would need
-      resampling. `MapSurfaceToOutput` is honoured, the scaled variants are not.
+* [ ] Windowed surface placement: `MapSurfaceToScaledOutput` is applied, with the
+      pixels resampled to the size the server asked for, but the two window
+      variants are recorded and exposed rather than applied, because there is no
+      window to place anything in.
 
 ## Using it as a library
 
@@ -120,8 +125,9 @@ several bugs were caught.
 
 `scripts/dev-rdp.sh` manages a local xrdp target for integration testing:
 `setup` (once, makes the rest passwordless), `up`, `down`, `status`, `probe`,
-and `probe-session`, which prepares a session whose X input events are logged so
-that input can be verified rather than eyeballed.
+`probe-session` (which prepares a session whose X input events are logged so that
+input can be verified rather than eyeballed), and `standard`, which restarts xrdp
+requiring Standard RDP Security so that path can be tested too.
 
 `scripts/gen-codec-vectors.sh` regenerates the codec test vectors from
 libfreerdp's encoders and decoders, so the image codecs are checked against a

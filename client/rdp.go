@@ -52,8 +52,10 @@ func newRdpClient(s *Setting) *RdpClient {
 }
 
 // requestedProtocol maps the configured security protocol name to the X.224
-// negotiation bitmask. The default is TLS, which is what modern servers offer;
-// Standard RDP Security is not supported by this client yet.
+// negotiation bitmask. "rdp" asks for Standard RDP Security: no negotiation
+// block is sent, so the server cannot upgrade the connection to TLS or NLA and
+// the RC4 / licensing path in protocol/sec is used instead. The default is TLS,
+// which is what modern servers offer.
 func requestedProtocol(s *Setting) uint32 {
 	if s == nil {
 		return x224.PROTOCOL_SSL
@@ -63,7 +65,10 @@ func requestedProtocol(s *Setting) uint32 {
 		return x224.PROTOCOL_RDP
 	case "nla", "hybrid", "credssp":
 		return x224.PROTOCOL_HYBRID
-	default: // "", "auto", "tls", "ssl"
+	case "", "auto", "tls", "ssl":
+		return x224.PROTOCOL_SSL
+	default:
+		glog.Warnf("unknown security protocol %q, using TLS", s.Protocol)
 		return x224.PROTOCOL_SSL
 	}
 }

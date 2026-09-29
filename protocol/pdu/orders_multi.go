@@ -95,16 +95,16 @@ func (d *MultiDstBlt) Type() int {
 }
 
 func (d *MultiDstBlt) Unpack(r io.Reader, present uint32, delta bool) error {
-	if err := readPresentCoord(r, present, 0x0001, &d.X); err != nil {
+	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0002, &d.Y); err != nil {
+	if err := readPresentCoord(r, present, 0x0002, delta, &d.Y); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0004, &d.Cx); err != nil {
+	if err := readPresentCoord(r, present, 0x0004, delta, &d.Cx); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0008, &d.Cy); err != nil {
+	if err := readPresentCoord(r, present, 0x0008, delta, &d.Cy); err != nil {
 		return err
 	}
 	if err := readPresentByte(r, present, 0x0010, &d.Opcode); err != nil {
@@ -136,16 +136,16 @@ func (d *MultiPatBlt) Type() int {
 }
 
 func (d *MultiPatBlt) Unpack(r io.Reader, present uint32, delta bool) error {
-	if err := readPresentCoord(r, present, 0x0001, &d.X); err != nil {
+	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0002, &d.Y); err != nil {
+	if err := readPresentCoord(r, present, 0x0002, delta, &d.Y); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0004, &d.Cx); err != nil {
+	if err := readPresentCoord(r, present, 0x0004, delta, &d.Cx); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0008, &d.Cy); err != nil {
+	if err := readPresentCoord(r, present, 0x0008, delta, &d.Cy); err != nil {
 		return err
 	}
 	if err := readPresentByte(r, present, 0x0010, &d.Opcode); err != nil {
@@ -191,25 +191,25 @@ func (d *MultiScrBlt) Type() int {
 }
 
 func (d *MultiScrBlt) Unpack(r io.Reader, present uint32, delta bool) error {
-	if err := readPresentCoord(r, present, 0x0001, &d.X); err != nil {
+	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0002, &d.Y); err != nil {
+	if err := readPresentCoord(r, present, 0x0002, delta, &d.Y); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0004, &d.Cx); err != nil {
+	if err := readPresentCoord(r, present, 0x0004, delta, &d.Cx); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0008, &d.Cy); err != nil {
+	if err := readPresentCoord(r, present, 0x0008, delta, &d.Cy); err != nil {
 		return err
 	}
 	if err := readPresentByte(r, present, 0x0010, &d.Opcode); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0020, &d.Srcx); err != nil {
+	if err := readPresentCoord(r, present, 0x0020, delta, &d.Srcx); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0040, &d.Srcy); err != nil {
+	if err := readPresentCoord(r, present, 0x0040, delta, &d.Srcy); err != nil {
 		return err
 	}
 	n, rects, err := readMultiRects(r, present, 0x0080, 0x0100, d.NumRectangles, d.Rectangles)
@@ -236,16 +236,16 @@ func (d *MultiOpaqueRect) Type() int {
 }
 
 func (d *MultiOpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error {
-	if err := readPresentCoord(r, present, 0x0001, &d.X); err != nil {
+	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0002, &d.Y); err != nil {
+	if err := readPresentCoord(r, present, 0x0002, delta, &d.Y); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0004, &d.Cx); err != nil {
+	if err := readPresentCoord(r, present, 0x0004, delta, &d.Cx); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0008, &d.Cy); err != nil {
+	if err := readPresentCoord(r, present, 0x0008, delta, &d.Cy); err != nil {
 		return err
 	}
 	// The colour is carried as three separate one-byte fields, low byte first,
@@ -314,34 +314,34 @@ func (d *FastIndex) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readPresentColour(r, present, 0x0008, &d.ForeColour); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0010, &d.BkLeft); err != nil {
+	if err := readPresentCoord(r, present, 0x0010, delta, &d.BkLeft); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0020, &d.BkTop); err != nil {
+	if err := readPresentCoord(r, present, 0x0020, delta, &d.BkTop); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0040, &d.BkRight); err != nil {
+	if err := readPresentCoord(r, present, 0x0040, delta, &d.BkRight); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0080, &d.BkBottom); err != nil {
+	if err := readPresentCoord(r, present, 0x0080, delta, &d.BkBottom); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0100, &d.OpLeft); err != nil {
+	if err := readPresentCoord(r, present, 0x0100, delta, &d.OpLeft); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0200, &d.OpTop); err != nil {
+	if err := readPresentCoord(r, present, 0x0200, delta, &d.OpTop); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0400, &d.OpRight); err != nil {
+	if err := readPresentCoord(r, present, 0x0400, delta, &d.OpRight); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x0800, &d.OpBottom); err != nil {
+	if err := readPresentCoord(r, present, 0x0800, delta, &d.OpBottom); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x1000, &d.X); err != nil {
+	if err := readPresentCoord(r, present, 0x1000, delta, &d.X); err != nil {
 		return err
 	}
-	if err := readPresentCoord(r, present, 0x2000, &d.Y); err != nil {
+	if err := readPresentCoord(r, present, 0x2000, delta, &d.Y); err != nil {
 		return err
 	}
 	if present&0x4000 != 0 {
@@ -362,8 +362,23 @@ func (d *FastIndex) Unpack(r io.Reader, present uint32, delta bool) error {
 // flags. Multi-rectangle orders and FastIndex always state absolute
 // coordinates: FreeRDP passes FALSE for the delta argument of every one of these
 // fields, so the order's TS_DELTA_COORDINATES flag does not apply to them.
-func readPresentCoord(r io.Reader, present, bit uint32, v *int32) error {
+// readPresentCoord reads one of an order's own coordinates, when its bit is set
+// in the field flags.
+//
+// It has to honour TS_DELTA_COORDINATES, which is what readOrderCoord does: an
+// order that sets that flag sends the coordinate as a single byte relative to the
+// previous order of its type, not as two absolute ones. Reading two bytes anyway
+// does not just get the coordinate wrong, it moves the rest of the batch.
+func readPresentCoord(r io.Reader, present, bit uint32, delta bool, v *int32) error {
 	if present&bit == 0 {
+		return nil
+	}
+	if delta {
+		change, err := core.ReadUInt8(r)
+		if err != nil {
+			return err
+		}
+		*v += int32(int8(change))
 		return nil
 	}
 	b, err := core.ReadUint16LE(r)

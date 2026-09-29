@@ -1,8 +1,9 @@
 // Package rfb is the RFB (VNC) client protocol this fork inherited from
 // upstream.
 //
-// It builds and is kept, but it has never been run against a VNC server in this
-// project and has no tests, so it is not a supported path.
+// It builds and is kept. Its parse steps have unit tests that drive them over a
+// scripted net.Pipe server, but nothing in this project has run the client
+// against a real VNC server, so it is not a supported path.
 package rfb
 
 import (
@@ -12,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 
 	"github.com/lunixbochs/struc"
@@ -46,17 +46,14 @@ type RFBConn struct {
 	Password string
 }
 
-// The RFB client in this package is inherited from the upstream fork and is not
-// tested here: nothing in this project has run it against a VNC server, and its
-// clipboard is not implemented. It builds, and it is deliberately kept, but it
-// should be read as unsupported until someone exercises it. The bounds below were
-// added because a length from the server was used to size an allocation before
-// any of the data arrived; the rest of what it gets wrong is noted rather than
-// quietly changed, since there is no test that could tell a fix from a
-// regression.
+// The RFB client in this package is inherited from the upstream fork. Nothing
+// in this project has run it against a VNC server. The tests here drive the
+// parse steps over a scripted net.Pipe server, which covers the wire formats
+// but not a live session; the clipboard is not implemented.
 
 // maxRectBytes bounds a framebuffer rectangle, and maxCutTextBytes bounds a
-// server cut text. Both lengths come off the wire.
+// server cut text. Both lengths come off the wire and are checked before they
+// size an allocation.
 const (
 	maxRectBytes    = 64 << 20
 	maxCutTextBytes = 16 << 20
@@ -69,10 +66,18 @@ func NewRFBConn(s net.Conn, passwd string) *RFBConn {
 		BitRect:  new(BitRect),
 		Password: passwd,
 	}
-	core.StartReadBytes(12, fc, fc.recvProtocolVersion)
 
 	return fc
 }
+
+// start reads the server's protocol version banner. RFB.Connect calls it after
+// registering the version handler: the server sends the banner as soon as the
+// connection opens, and an event that arrives before there is a listener is
+// dropped, which would leave the handshake waiting forever.
+func (fc *RFBConn) start() {
+	core.StartReadBytes(12, fc, fc.recvProtocolVersion)
+}
+
 func (fc *RFBConn) Read(b []byte) (n int, err error) {
 	return fc.Conn.Read(b)
 }
@@ -160,19 +165,24 @@ func fixDesKey(key []byte) []byte {
 
 func (fc *RFBConn) recvVNCChallenge(s []byte, err error) {
 	glog.Debug("RFBConn recvVNCChallenge", hex.EncodeToString(s), len(s), err)
-	key := core.UnicodeEncode(fc.Password)
-	bk, err := des.NewCipher(fixDesKey(key))
 	if err != nil {
-		log.Printf("Error generating authentication cipher: %s\n", err.Error())
+		fc.Emit("error", err)
+		return
+	}
+	if len(s) < 16 {
+		fc.Emit("error", fmt.Errorf("rfb: short VNC challenge (%d bytes)", len(s)))
+		return
+	}
+	// VNC uses the password's own bytes as the DES key, truncated or padded to
+	// eight bytes; it is not a UTF-16 encoding of the password.
+	bk, err := des.NewCipher(fixDesKey([]byte(fc.Password)))
+	if err != nil {
+		fc.Emit("error", fmt.Errorf("rfb: VNC authentication cipher: %w", err))
 		return
 	}
 	result := make([]byte, 16)
-	bk.Encrypt(result, s) //Encrypt first 8 bytes
-	bk.Encrypt(result[8:], s[8:])
-	if err != nil {
-		fmt.Println(err)
-	}
-	fmt.Println(string(result))
+	bk.Encrypt(result, s)         // challenge bytes 0..7
+	bk.Encrypt(result[8:], s[8:]) // challenge bytes 8..15
 	fc.Write(result)
 	core.StartReadBytes(4, fc, fc.recvSecurityResult)
 }
@@ -273,21 +283,29 @@ func (fc *RFBConn) sendFramebufferUpdateRequest(Incremental uint8,
 }
 func (fc *RFBConn) recvServerOrder(s []byte, err error) {
 	glog.Debug("RFBConn recvServerOrder", hex.EncodeToString(s), err)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
 	packetType, _ := core.ReadUInt8(r)
 	switch packetType {
 	case 0:
 		core.StartReadBytes(3, fc, fc.recvFrameBufferUpdateHeader)
 	case 2:
-		// Bell carries no body. Handling it would mean reading the next message
-		// type; as written the read chain is not re-armed here, so a Bell ends
-		// parsing for the rest of the session instead of being skipped.
+		// Bell carries no body, so the next byte is the next message type.
+		// Re-arm here: without it a single Bell ends parsing for the rest of
+		// the session because nothing reads the byte after it.
+		core.StartReadBytes(1, fc, fc.recvServerOrder)
 	case 3:
 		core.StartReadBytes(7, fc, fc.recvServerCutTextHeader)
 	default:
+		// An unknown message type has an unknown length, so its fields cannot
+		// be read and the batch cannot continue: report it instead of re-arming,
+		// which would parse the body as though it were the next message type.
 		glog.Errorf("Unknown message type %d", packetType)
+		fc.Emit("error", fmt.Errorf("rfb: unknown server message type %d", packetType))
 	}
-
 }
 
 type BitRect struct {
@@ -302,12 +320,19 @@ type Rectangles struct {
 
 func (fc *RFBConn) recvFrameBufferUpdateHeader(s []byte, err error) {
 	glog.Debug("RFBConn recvFrameBufferUpdateHeader", hex.EncodeToString(s), err)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
 	core.ReadUInt8(r)
 	NbRect, _ := core.ReadUint16BE(r)
 	fc.NbRect = NbRect
 	fc.BitRect.Rects = make([]Rectangles, fc.NbRect)
 	if NbRect == 0 {
+		// No rectangles follow, so the update is complete. Re-arm so the next
+		// message is read instead of the chain stopping here.
+		core.StartReadBytes(1, fc, fc.recvServerOrder)
 		return
 	}
 	glog.Info("NbRect:", NbRect)
@@ -357,30 +382,39 @@ func (fc *RFBConn) recvRectBody(s []byte, err error) {
 	}
 }
 
-type ServerCutTextHeader struct {
-	Padding [3]byte `struc:"little"`
-	Size    uint32  `struc:"little"`
-}
-
 func (fc *RFBConn) recvServerCutTextHeader(s []byte, err error) {
-	glog.Debug("RFBConn recvServerCutTextHeader", string(s), err)
-	r := bytes.NewReader(s)
-	header := &ServerCutTextHeader{}
-	err = struc.Unpack(r, header)
+	glog.Debug("RFBConn recvServerCutTextHeader", len(s), err)
 	if err != nil {
 		fc.Emit("error", err)
 		return
 	}
-
-	if header.Size > maxCutTextBytes {
-		glog.Errorf("rfb: cut text of %d bytes is out of range", header.Size)
-		fc.Emit("error", fmt.Errorf("rfb: cut text of %d bytes is out of range", header.Size))
+	r := bytes.NewReader(s)
+	// The header is three padding bytes and then a 32 bit big-endian length.
+	// RFB is big-endian throughout, so reading the length little-endian (as
+	// this used to) decodes a five byte cut text as 83886080: large enough to
+	// matter when it sizes the read scheduled below.
+	if _, err := core.ReadBytes(3, r); err != nil {
+		fc.Emit("error", err)
 		return
 	}
-	core.StartReadBytes(int(header.Size), fc, fc.recvServerCutTextBody)
+	size, err := core.ReadUInt32BE(r)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	if size > maxCutTextBytes {
+		glog.Errorf("rfb: cut text of %d bytes is out of range", size)
+		fc.Emit("error", fmt.Errorf("rfb: cut text of %d bytes is out of range", size))
+		return
+	}
+	core.StartReadBytes(int(size), fc, fc.recvServerCutTextBody)
 }
 func (fc *RFBConn) recvServerCutTextBody(s []byte, err error) {
 	glog.Debug("RFBConn recvServerCutTextBody", string(s), err)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	fc.Emit("CutText", s)
 	core.StartReadBytes(1, fc, fc.recvServerOrder)
 }
@@ -443,7 +477,13 @@ func (fb *RFB) Connect() error {
 	if fb.Transport == nil {
 		return errors.New("no transport")
 	}
+	// Register the version handler before starting the read. The server sends
+	// its banner as soon as the connection opens, so reading it before there is
+	// a listener would drop the only response the handshake needs.
 	fb.Once("data", fb.recvProtocolVersion)
+	if fc, ok := fb.Transport.(*RFBConn); ok {
+		fc.start()
+	}
 	return nil
 }
 
@@ -469,7 +509,6 @@ func (fb *RFB) SendKeyEvent(k *KeyEvent) {
 	core.WriteUInt8(k.DownFlag, b)
 	core.WriteUInt16BE(k.Padding, b)
 	core.WriteUInt32BE(k.Key, b)
-	fmt.Println(b.Bytes())
 	fb.Write(b.Bytes())
 }
 
@@ -485,20 +524,22 @@ func (fb *RFB) SendPointEvent(p *PointerEvent) {
 	core.WriteUInt8(p.Mask, b)
 	core.WriteUInt16BE(p.XPos, b)
 	core.WriteUInt16BE(p.YPos, b)
-	fmt.Println(b.Bytes())
 	fb.Write(b.Bytes())
 }
 
+// ClientCutText is a client to server cut text message. RFB carries it as the
+// message type, three padding bytes, a big-endian length and then the raw text;
+// the length is the byte length of Message.
 type ClientCutText struct {
-	Padding  uint16 `struc:"little"`
-	Padding1 uint8  `struc:"little"`
-	Size     uint32 `struc:"little"`
-	Message  string `struc:"little"`
+	Message string
 }
 
 func (fb *RFB) SendClientCutText(t *ClientCutText) {
 	b := &bytes.Buffer{}
 	core.WriteUInt8(6, b)
-	struc.Pack(b, t)
+	core.WriteUInt8(0, b)    // padding
+	core.WriteUInt16BE(0, b) // padding
+	core.WriteUInt32BE(uint32(len(t.Message)), b)
+	b.WriteString(t.Message)
 	fb.Write(b.Bytes())
 }
