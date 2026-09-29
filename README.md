@@ -42,9 +42,10 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       included. It matches the bitmap path to the taskbar
       clock, which is where two runs of the same path differ too. Off by default,
       see below.
-* [ ] VNC. The RFB client inherited from upstream is kept and still builds, but
-      it is untested: it has never been run against a VNC server in this project,
-      it has no tests, and its clipboard is not implemented.
+* [x] VNC, against a real TigerVNC server: a frame is received and parsed, and
+      the clipboard works in both directions. `scripts/vnc-dev.sh` fetches
+      TigerVNC without root and runs the live tests. Raw and CopyRect encodings
+      only, and `RequestClipboardText` is not implemented, which a test records.
 
 Not done, or not finished:
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own
@@ -54,8 +55,11 @@ Not done, or not finished:
       them, and offering revision 3 to Windows changes nothing: it sends revision
       2 either way, which uses the same decoder bitmap updates do. So this is not
       implemented because nothing tested reaches it, not because it was skipped.
-* [ ] H.264 (AVC420 / AVC444) codecs, which EGFX servers may choose. Not
-      advertising them is what keeps them out of the negotiation.
+* [ ] Decoding H.264. The framing is implemented, with an `AVCDecoder` interface
+      for a caller to supply one, and the codecs are advertised only when it is
+      set: a pure Go decoder is out of scope and cgo would change what this
+      library is. Without one nothing is advertised, so the negotiation is
+      unchanged.
 * [ ] Windowed surface placement: `MapSurfaceToScaledOutput` is applied, with the
       pixels resampled to the size the server asked for, but the two window
       variants are recorded and exposed rather than applied, because there is no

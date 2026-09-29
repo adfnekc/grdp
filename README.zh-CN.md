@@ -35,9 +35,11 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
       以及 LineTo、SaveBitmap、FastIndex。
       已在真实 Windows 上验证：整个锁屏界面经由缓存送达，**渐变与文字都正确**。与位图路径**差异仅剩任务栏时钟**（而同一路径跑两次的差异也在那里）。
       默认关闭，见下文。
-* [ ] VNC（RFB）。本 fork 继承的 RFB 客户端**保留**，并且经过一轮加固：修掉 6 个线上格式 bug
-      （包括剪贴板文本长度**字节序错误**、以及一条 Bell 消息就会终止整个解析链 ✗），
-      现在对脚本化的握手有测试。但**仍未对真实 VNC 服务端运行过** —— "不支持"就是这个意思。
+
+
+* [x] **VNC（RFB）** —— 已对**真实 TigerVNC 服务端**验证：能收到并解析帧，
+      且**剪贴板双向可用**。`scripts/vnc-dev.sh` 无需 root 即可拉取 TigerVNC 并跑实机测试。
+      目前只支持 Raw 与 CopyRect 编码，`RequestClipboardText` 未实现（有测试记录这一点）。
 
 未实现 / 未完成：
 
@@ -46,7 +48,9 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 * [ ] **交错 / 带状 RLE 位图** —— 只有位图缓存 **rev3** 会用到。实测：即使向 Windows
       广告 rev3，它**仍然只发 rev2**，而 rev2 用的解码器与位图更新相同。所以这是
       「没有实测路径能到达」，不是「跳过了」。
-* [ ] **H.264（AVC420 / AVC444）** —— EGFX 服务端可能选用。**不广告**即排除在协商之外。
+* [ ] **H.264 的解码** —— **分帧已实现**，并提供了 `AVCDecoder` 接口供调用方注入解码器；
+      只有在设置了它时才广告这两个编解码器。纯 Go 写 H.264 解码器超出范围，
+      而引入 cgo 会改变这个库的本质。没有解码器时**什么都不广告**，协商行为不变。
 * [ ] **窗口化 surface 的摆放** —— `MapSurfaceToScaledOutput` 已实现（会重采样到服务端
       要求的尺寸），但两个窗口变体只**记录并对外暴露**、不实际应用，因为没有"窗口"可摆放。
 
