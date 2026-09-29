@@ -18,7 +18,8 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 * [x] 连接、MCS、能力交换
 * [x] TLS 与 NLA（CredSSP + NTLMv2，含 **版本 6** 的公钥绑定）
 * [x] **Standard RDP Security**（无 TLS 的老路径）—— 已对本地 xrdp 实测通过；
-      `scripts/dev-rdp.sh standard` 可把 xrdp 配置成要求它
+      `scripts/dev-rdp.sh standard` 可把 xrdp 配置成要求它。它在同一目标上的输出与 TLS 路径
+      **逐像素相同**，这比"能连上"强得多
 * [x] 许可（Licensing）交换
 * [x] 位图更新、RLE、24/32bpp
 * [x] 光标位置与光标形状更新
@@ -53,6 +54,23 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
       而引入 cgo 会改变这个库的本质。没有解码器时**什么都不广告**，协商行为不变。
 * [ ] **窗口化 surface 的摆放** —— `MapSurfaceToScaledOutput` 已实现（会重采样到服务端
       要求的尺寸），但两个窗口变体只**记录并对外暴露**、不实际应用，因为没有"窗口"可摆放。
+
+## 什么被验证过、怎么验证的
+
+这张表画出的区别，正是本仓库的意义所在。上面每一条主张都落在第一列或第二列，
+而**凡在第一列的，都是用"不是写测试的那一方"验证过的**。
+
+| | 依据 |
+| --- | --- |
+| 连接、TLS、NLA、许可、输入、剪贴板、位图更新 | 对 xrdp 0.9.24 与真实 Windows 10 运行过 |
+| Standard RDP Security | 对要求它的本地 xrdp 运行过，且与同目标 TLS 路径**逐像素相同** |
+| EGFX 渲染 | 整个 Windows 桌面经图形通道送达，并与位图路径对比 |
+| 绘图订单 | 整个 Windows 锁屏经位图缓存送达，两条路径差异仅剩时钟 |
+| VNC | 真实 TigerVNC：帧能收到，剪贴板双向可用 |
+| NSCodec、RemoteFX、ZGFX | 与 libfreerdp **逐字节**比对（输入由其编码器产生，期望输出由其解码器给出）|
+| 健壮性 | 模糊测试（抓到 2 个死循环、3 个 panic；语料已留存）|
+| 形状/字形/九宫格/多矩形订单 | **仅**依据 FreeRDP 解析器 + 单测：没有可达服务端会发它们 |
+| AVC420 / AVC444 分帧 | **仅**依据 FreeRDP 解析器 + 单测：解码需要本库不自带的解码器 |
 
 ## 作为库使用
 

@@ -19,7 +19,9 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
 * [x] TLS and NLA (CredSSP with NTLMv2, including the version 6 public key
       binding)
 * [x] Standard RDP Security, the old path with no TLS: verified against a local
-      xrdp configured for it, which `scripts/dev-rdp.sh standard` sets up
+      xrdp configured for it, which `scripts/dev-rdp.sh standard` sets up. It
+      produces output pixel-identical to the TLS path on the same target, which
+      is a stronger check than "it connects".
 * [x] Licensing exchange
 * [x] Bitmap updates, RLE, 24 and 32 bpp
 * [x] Pointer position and pointer shape updates
@@ -64,6 +66,34 @@ Not done, or not finished:
       pixels resampled to the size the server asked for, but the two window
       variants are recorded and exposed rather than applied, because there is no
       window to place anything in.
+* [ ] Compressed dynamic virtual channel data is refused with an error rather than
+      decoded, which is visible rather than silent, and the negotiation does not
+      ask for it.
+* [ ] The shape, glyph and nine grid orders have no server to be verified
+      against. A Windows 10 host was watched with every one of them advertised
+      and sent 1473 MEMBLTs and nothing else, and xrdp sends no orders at all.
+      They are implemented from FreeRDP's parsers and unit tested, which is the
+      honest extent of it, and for that reason the capability advertisement
+      offers MEMBLT alone: asking an older server for orders never watched
+      working would be worse than leaving it on bitmap updates.
+
+## What is verified, and how
+
+The distinction this table draws is the point of the repository. Every claim in
+the list above is in the first column or the second, and nothing is in the first
+without having been run against something that did not write the test.
+
+| | How it is known |
+| --- | --- |
+| Connection, TLS, NLA, licensing, input, clipboard, bitmap updates | Run against xrdp 0.9.24 and a real Windows 10 host |
+| Standard RDP Security | Run against a local xrdp requiring it, and pixel-identical to the TLS path on the same target |
+| EGFX rendering | A whole Windows desktop through the graphics channel, compared against the bitmap path |
+| Drawing orders | A whole Windows lock screen through the bitmap cache, and the two drawing paths agree to the taskbar clock |
+| VNC | A real TigerVNC server: a frame arrives, and the clipboard works both ways |
+| NSCodec, RemoteFX, ZGFX | Byte for byte against libfreerdp, whose encoder produced the input and whose decoder produced the expected output |
+| Robustness | Fuzzing, which found two infinite loops and three panics; the corpus is kept |
+| The shape, glyph, nine grid and multi rectangle orders | FreeRDP's parsers and unit tests only: no reachable server sends them |
+| The AVC420 and AVC444 framing | FreeRDP's parsers and unit tests only: decoding needs a decoder this does not ship |
 
 ## Using it as a library
 
