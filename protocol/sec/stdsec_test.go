@@ -235,8 +235,12 @@ func TestSendClientRandomSecurityExchange(t *testing.T) {
 		t.Fatalf("PDU is %d bytes, want %d", len(raw), wantLen)
 	}
 
-	if flag := binary.LittleEndian.Uint16(raw[0:2]); flag != EXCHANGE_PKT {
-		t.Fatalf("security flag = 0x%04x, want 0x%04x", flag, EXCHANGE_PKT)
+	// MS-RDPBCGR's own annotated Client Security Exchange PDU shows
+	// flags = 0x0201 = 0x0200 | 0x0001 = SEC_LICENSE_ENCRYPT_SC |
+	// SEC_EXCHANGE_PKT, and FreeRDP's client sends the same pair. An earlier
+	// expectation of bare SEC_EXCHANGE_PKT was wrong, not the code.
+	if flag := binary.LittleEndian.Uint16(raw[0:2]); flag != EXCHANGE_PKT|LICENSE_ENCRYPT_SC {
+		t.Fatalf("security flag = 0x%04x, want 0x%04x", flag, EXCHANGE_PKT|LICENSE_ENCRYPT_SC)
 	}
 	if hi := binary.LittleEndian.Uint16(raw[2:4]); hi != 0 {
 		t.Fatalf("security flag hi = 0x%04x, want 0", hi)

@@ -68,7 +68,9 @@ func NewMissingOrder(orderType uint8) PrimaryOrder {
 // order type: every coordinate these orders carry is read that way.
 //
 // It is separate from the readPresentCoord the multi-rectangle orders use, which
-// reads every coordinate as two absolute bytes and ignores TS_DELTA_COORDINATES.
+// honours TS_DELTA_COORDINATES, as every other primary order here does: an order
+// that sets it sends a coordinate as one byte relative to the previous order of
+// the same type, not as two absolute ones.
 // FreeRDP is the authority for the wire, and it applies the delta.
 func readMissingPresentCoord(r io.Reader, present, bit uint32, v *int32, delta bool) error {
 	if present&bit == 0 {

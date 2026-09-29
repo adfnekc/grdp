@@ -511,7 +511,17 @@ func (s *Screen) ellipse(left, top, right, bottom int32, colour [4]uint8, filled
 	if r.Empty() || r.Dx() > maxEllipseSpan || r.Dy() > maxEllipseSpan {
 		return image.Rectangle{}
 	}
-	if clipped := r.Intersect(clip); clipped.Empty() {
+	// Bound the rows by the clip before sweeping them, as the polygon does: the
+	// order's own rectangle can be far larger than the area it may draw in, and
+	// every row costs an inner scan proportional to its width.
+	rowMin, rowMax := r.Min.Y, r.Max.Y
+	if rowMin < clip.Min.Y {
+		rowMin = clip.Min.Y
+	}
+	if rowMax > clip.Max.Y {
+		rowMax = clip.Max.Y
+	}
+	if rowMin >= rowMax {
 		return image.Rectangle{}
 	}
 	// Radii, so that the centre lands on a pixel whatever the parity of the size.
@@ -525,6 +535,9 @@ func (s *Screen) ellipse(left, top, right, bottom int32, colour [4]uint8, filled
 	var dirty image.Rectangle
 	prevL, prevR := 0, 0
 	for y := -h; y <= h; y++ {
+		if cy+y < rowMin || cy+y >= rowMax {
+			continue
+		}
 		// Half the width at this row, from the equation of the ellipse.
 		inner := w2 * (1 - (y*y)/h2)
 		span := 0

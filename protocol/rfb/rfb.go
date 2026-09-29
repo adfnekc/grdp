@@ -55,8 +55,10 @@ type RFBConn struct {
 // server cut text. Both lengths come off the wire and are checked before they
 // size an allocation.
 const (
-	maxRectBytes    = 64 << 20
-	maxCutTextBytes = 16 << 20
+	maxRectBytes       = 64 << 20
+	maxCutTextBytes    = 16 << 20
+	maxServerNameBytes = 1 << 20
+	maxSecurityTypes   = 1024
 )
 
 func NewRFBConn(s net.Conn, passwd string) *RFBConn {

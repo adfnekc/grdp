@@ -225,6 +225,17 @@ func readSecurityHeader(r io.Reader) *SecurityHeader {
 	return s
 }
 
+// sessionKeyUpdateCount is how many packets one key encrypts or decrypts before
+// the session keys are re-derived (MS-RDPBCGR 5.3.7.1).
+const sessionKeyUpdateCount = 4096
+
+// The padding constants of the session key update (MS-RDPBCGR 5.3.7.1): Pad1
+// is 0x36 repeated 40 times and Pad2 is 0x5C repeated 48 times.
+var (
+	keyUpdatePad1 = bytes.Repeat([]byte{0x36}, 40)
+	keyUpdatePad2 = bytes.Repeat([]byte{0x5C}, 48)
+)
+
 type SEC struct {
 	emission.Emitter
 	transport   core.Transport
@@ -236,6 +247,10 @@ type SEC struct {
 	enableEncryption bool
 	//Enable Secure Mac generation
 	enableSecureCheckSum bool
+	//The negotiated encryption method. A 40 bit and a 56 bit key are both
+	//eight bytes long and are salted differently when a key is updated, so the
+	//key length alone does not say which one is in use.
+	encryptionMethod uint32
 	//counter before update
 	nbEncryptedPacket int
 	nbDecryptedPacket int
@@ -243,30 +258,30 @@ type SEC struct {
 	currentDecrytKey  []byte
 	currentEncryptKey []byte
 
+	//The keys the session was established with. Every key update re-derives
+	//from these and the current key, never from the current key alone.
+	initialDecrytKey  []byte
+	initialEncryptKey []byte
+
 	//current rc4 tab
 	decryptRc4 *rc4.Cipher
 	encryptRc4 *rc4.Cipher
 
 	macKey []byte
+
+	//Licensing keys, derived from the licensing premaster secret rather than
+	//from the client and server randoms. They are kept apart from the session
+	//keys: the MAC over a licensing blob uses the licensing salt key, while the
+	//MAC of an encrypted PDU uses the session MAC key.
+	licenseMacKey []byte
+	licenseKey    []byte
 }
 
 func NewSEC(t core.Transport) *SEC {
 	sec := &SEC{
-		*emission.NewEmitter(),
-		t,
-		NewRDPInfo(),
-		"",
-		nil,
-		nil,
-		false,
-		false,
-		0,
-		0,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
+		Emitter:   *emission.NewEmitter(),
+		transport: t,
+		info:      NewRDPInfo(),
 	}
 
 	t.On("close", func() {
@@ -331,13 +346,122 @@ func macData(macSaltKey, data []byte) []byte {
 
 	return md5Digest.Sum(nil)
 }
+
+// updateSessionKey derives the next session key from the key the session was
+// established with and the one in use now (MS-RDPBCGR 5.3.7.1, "Non-FIPS"):
+//
+//	SHAComponent = SHA1(InitialKey + Pad1 + CurrentKey)
+//	TempKey128   = MD5(InitialKey + Pad2 + SHAComponent)
+//	NewKey128    = RC4(TempKey128, InitRC4(TempKey128))
+//
+// The 40 and 56 bit forms take the first eight bytes of the temporary key and
+// salt them, exactly as the initial keys are salted. FreeRDP's
+// security_key_update (libfreerdp/core/security.c) derives the same values.
+func updateSessionKey(initialKey, currentKey []byte, method uint32) []byte {
+	if len(initialKey) == 0 || len(initialKey) != len(currentKey) {
+		return nil
+	}
+
+	// A 40 bit and a 56 bit key are both eight bytes, taken from the first
+	// eight bytes of the temporary key.
+	rc4KeyLen := 16
+	if method == gcc.ENCRYPTION_FLAG_40BIT || method == gcc.ENCRYPTION_FLAG_56BIT {
+		rc4KeyLen = 8
+	}
+	keyLen := len(initialKey)
+	if keyLen != 8 && keyLen != 16 {
+		return nil
+	}
+	if rc4KeyLen != keyLen {
+		return nil
+	}
+
+	sha1Digest := sha1.New()
+	sha1Digest.Write(initialKey)
+	sha1Digest.Write(keyUpdatePad1)
+	sha1Digest.Write(currentKey)
+	shaComponent := sha1Digest.Sum(nil)
+
+	md5Digest := md5.New()
+	md5Digest.Write(initialKey)
+	md5Digest.Write(keyUpdatePad2)
+	md5Digest.Write(shaComponent)
+	tempKey := md5Digest.Sum(nil)
+
+	cipher, err := rc4.NewCipher(tempKey[:rc4KeyLen])
+	if err != nil {
+		glog.Error("sec: session key update: ", err)
+		return nil
+	}
+	newKey := make([]byte, rc4KeyLen)
+	cipher.XORKeyStream(newKey, tempKey[:rc4KeyLen])
+
+	switch method {
+	case gcc.ENCRYPTION_FLAG_40BIT:
+		copy(newKey, []byte{0xd1, 0x26, 0x9e})
+	case gcc.ENCRYPTION_FLAG_56BIT:
+		newKey[0] = 0xd1
+	}
+	return newKey
+}
+
+// updateEncryptKey re-derives the encryption key and restarts the RC4 stream
+// with it, which is what makes a long connection survive past 4096 packets.
+func (s *SEC) updateEncryptKey() error {
+	key := updateSessionKey(s.initialEncryptKey, s.currentEncryptKey, s.encryptionMethod)
+	if key == nil {
+		return errors.New("sec: cannot update the encryption key without the session keys")
+	}
+	cipher, err := rc4.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("sec: update the encryption key: %w", err)
+	}
+	glog.Debug("sec: encryption key updated after ", sessionKeyUpdateCount, " packets")
+	s.currentEncryptKey = key
+	s.encryptRc4 = cipher
+	s.nbEncryptedPacket = 0
+	return nil
+}
+
+// updateDecryptKey is updateEncryptKey for the other direction.
+func (s *SEC) updateDecryptKey() error {
+	key := updateSessionKey(s.initialDecrytKey, s.currentDecrytKey, s.encryptionMethod)
+	if key == nil {
+		return errors.New("sec: cannot update the decryption key without the session keys")
+	}
+	cipher, err := rc4.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("sec: update the decryption key: %w", err)
+	}
+	glog.Debug("sec: decryption key updated after ", sessionKeyUpdateCount, " packets")
+	s.currentDecrytKey = key
+	s.decryptRc4 = cipher
+	s.nbDecryptedPacket = 0
+	return nil
+}
+
 func (s *SEC) readEncryptedPayload(data []byte, checkSum bool) []byte {
 	r := bytes.NewReader(data)
 	sign, _ := core.ReadBytes(8, r)
 	glog.Debug("read sign:", sign)
 	encryptedPayload, _ := core.ReadBytes(r.Len(), r)
+
+	// MS-RDPBCGR 5.3.7.1: the keys are updated after 4096 packets have been
+	// received, so this is the first packet protected with the new key.
+	if s.nbDecryptedPacket >= sessionKeyUpdateCount {
+		if err := s.updateDecryptKey(); err != nil {
+			glog.Error("sec: ", err)
+			return nil
+		}
+	}
+
 	if s.decryptRc4 == nil {
-		s.decryptRc4, _ = rc4.NewCipher(s.currentDecrytKey)
+		cipher, err := rc4.NewCipher(s.currentDecrytKey)
+		if err != nil {
+			glog.Error("sec: cannot decrypt without session keys: ", err)
+			return nil
+		}
+		s.decryptRc4 = cipher
 	}
 	s.nbDecryptedPacket++
 	glog.Debug("nbDecryptedPacket:", s.nbDecryptedPacket)
@@ -348,8 +472,13 @@ func (s *SEC) readEncryptedPayload(data []byte, checkSum bool) []byte {
 
 }
 func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
-	if s.nbEncryptedPacket == 4096 {
-
+	// MS-RDPBCGR 5.3.7.1: after 4096 packets have been encrypted the keys are
+	// re-derived, so this packet uses the new key.
+	if s.nbEncryptedPacket >= sessionKeyUpdateCount {
+		if err := s.updateEncryptKey(); err != nil {
+			glog.Error("sec: ", err)
+			return nil
+		}
 	}
 
 	if checkSum {
@@ -363,7 +492,12 @@ func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
 
 	sign := macData(s.macKey, data)[:8]
 	if s.encryptRc4 == nil {
-		s.encryptRc4, _ = rc4.NewCipher(s.currentEncryptKey)
+		cipher, err := rc4.NewCipher(s.currentEncryptKey)
+		if err != nil {
+			glog.Error("sec: cannot encrypt without session keys: ", err)
+			return nil
+		}
+		s.encryptRc4 = cipher
 	}
 
 	plaintext := make([]byte, len(data))
@@ -417,9 +551,6 @@ type Client struct {
 	*SEC
 	userId    uint16
 	channelId uint16
-	//initialise decrypt and encrypt keys
-	initialDecrytKey  []byte
-	initialEncryptKey []byte
 
 	fastPathListener core.FastPathListener
 	channelSender    core.ChannelSender
@@ -701,6 +832,7 @@ func (c *Client) sendClientRandom() error {
 		return fmt.Errorf("sec: server random is %d bytes, want 32", len(serverRandom))
 	}
 
+	c.encryptionMethod = ssd.EncryptionMethod
 	c.macKey, c.initialDecrytKey, c.initialEncryptKey = generateKeys(clientRandom,
 		serverRandom, ssd.EncryptionMethod)
 	if c.macKey == nil || c.initialDecrytKey == nil || c.initialEncryptKey == nil {
@@ -744,7 +876,11 @@ func (c *Client) sendClientRandom() error {
 
 	glog.Debug("message:", message)
 
-	c.sendFlagged(EXCHANGE_PKT, message.serialize())
+	// SEC_LICENSE_ENCRYPT_SC tells the server that this client can process
+	// encrypted licensing packets, which is what makes it encrypt them
+	// (MS-RDPBCGR 3.2.5.3.10). FreeRDP's client sends the same flag on this PDU
+	// (rdp_client_establish_keys in libfreerdp/core/connection.c).
+	c.sendFlagged(EXCHANGE_PKT|LICENSE_ENCRYPT_SC, message.serialize())
 	return nil
 }
 func (c *Client) sendInfoPkt() {
@@ -764,6 +900,16 @@ func (c *Client) recvLicenceInfo(channel string, s []byte) {
 	if (h.securityFlag & LICENSE_PKT) == 0 {
 		c.Emit("error", errors.New("NODE_RDP_PROTOCOL_PDU_SEC_BAD_LICENSE_HEADER"))
 		return
+	}
+
+	// A server that was told this client can process encrypted licensing
+	// packets encrypts them with the session keys, exactly like any other PDU,
+	// and announces that with SEC_ENCRYPT (MS-RDPBCGR 2.2.1.12,
+	// rdp_client_connect_license in FreeRDP). xrdp ignores the flag and answers
+	// in the clear, which is handled by the other branch.
+	if c.enableEncryption && h.securityFlag&ENCRYPT != 0 {
+		payload, _ := core.ReadBytes(r.Len(), r)
+		r = bytes.NewReader(c.readEncryptedPayload(payload, h.securityFlag&SECURE_CHECKSUM != 0))
 	}
 
 	p := lic.ReadLicensePacket(r)
@@ -831,8 +977,13 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 	preMasterSecret := core.Random(48)
 	masSecret := masterSecret(preMasterSecret, clientRandom, serverRandom)
 	sessionKeyBlob := masterSecret(masSecret, serverRandom, clientRandom)
-	c.macKey = sessionKeyBlob[:16]
-	c.initialDecrytKey = finalHash(sessionKeyBlob[16:32], clientRandom, serverRandom)
+	// The licensing keys are not the session keys. They sign and encrypt the
+	// blobs inside the licensing PDUs (FreeRDP: license_encrypt_and_MAC uses
+	// MacSaltKey), while the MAC of an encrypted PDU uses the session MAC key,
+	// which overwriting macKey here used to replace for the rest of the
+	// session.
+	c.licenseMacKey = sessionKeyBlob[:16]
+	c.licenseKey = finalHash(sessionKeyBlob[16:32], clientRandom, serverRandom)
 
 	//format message
 	message := &lic.ClientNewLicenseRequest{}
@@ -886,7 +1037,20 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 		glog.Error("err:", err)
 	}
 
-	c.sendFlagged(LICENSE_PKT, buff.Bytes())
+	c.sendLicensePkt(buff.Bytes())
+}
+
+// sendLicensePkt sends a licensing PDU. FreeRDP marks licensing PDUs with
+// SEC_LICENSE_PKT and SEC_LICENSE_ENCRYPT_CS and, while Standard RDP Security
+// is in use, encrypts them with the session keys like any other PDU
+// (license_send_stream_init in libfreerdp/core/license.c). Under TLS or NLA
+// there are no session keys, so the PDU goes out in the clear as before.
+func (c *Client) sendLicensePkt(data []byte) {
+	var flag uint16 = LICENSE_PKT
+	if c.enableEncryption {
+		flag |= LICENSE_ENCRYPT_CS | ENCRYPT
+	}
+	c.sendFlagged(flag, data)
 }
 
 func (c *Client) sendClientChallengeResponse(data []byte) {
@@ -896,9 +1060,23 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 	serverEncryptedChallenge := pc.EncryptedPlatformChallenge.BlobData
 	//decrypt server challenge
 	//it should be TEST word in unicode format
-	rc, _ := rc4.NewCipher(c.initialDecrytKey)
-	serverChallenge := make([]byte, 20)
-	rc.XORKeyStream(serverChallenge, serverEncryptedChallenge)
+	rc, err := rc4.NewCipher(c.licenseKey)
+	if err != nil {
+		glog.Error("sec: no licensing key for the platform challenge: ", err)
+		c.Emit("error", errors.New("NODE_RDP_PROTOCOL_PDU_SEC_NO_LICENSING_KEY"))
+		return
+	}
+	if len(serverEncryptedChallenge) < 20 {
+		glog.Error("sec: encrypted platform challenge is ", len(serverEncryptedChallenge), " bytes, want 20")
+		c.Emit("error", errors.New("NODE_RDP_PROTOCOL_PDU_SEC_BAD_PLATFORM_CHALLENGE"))
+		return
+	}
+	// Decrypt what arrived and use the first 20 bytes: the challenge is 20
+	// bytes, and decrypting into a fixed 20 byte buffer would run past it for a
+	// longer one, which a server can send.
+	decrypted := make([]byte, len(serverEncryptedChallenge))
+	rc.XORKeyStream(decrypted, serverEncryptedChallenge)
+	serverChallenge := decrypted[:20]
 	//if serverChallenge != "T\x00E\x00S\x00T\x00\x00\x00":
 	//raise InvalidExpectedDataException("bad license server challenge")
 
@@ -921,11 +1099,11 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 	message := &lic.ClientPLatformChallengeResponse{}
 	message.EncryptedPlatformChallengeResponse.BlobData = serverEncryptedChallenge
 	message.EncryptedHWID.BlobData = encryptedHWID
-	message.MACData = macData(c.macKey, b.Bytes())[:16]
+	message.MACData = macData(c.licenseMacKey, b.Bytes())[:16]
 
 	b.Reset()
 	struc.Pack(b, message)
-	c.sendFlagged(LICENSE_PKT, b.Bytes())
+	c.sendLicensePkt(b.Bytes())
 }
 
 func (c *Client) recvData(channel string, s []byte) {

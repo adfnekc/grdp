@@ -900,12 +900,24 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 // Only the interleaved form reports an error for a stream that ends early, since
 // it carries an explicit size. The other three are terminated by the buffer
 // ending, so ending early is not distinguishable from ending on purpose.
+// maxDecodedBytes bounds what a compressed bitmap may decode to. Width, height
+// and the pixel format all come off the wire, and they are used to size the
+// output before a byte of input is read, so without this a thirty byte bitmap
+// update can ask for seventeen gigabytes: 65535 by 65535 at four bytes per pixel.
+// The same bound was applied to the cache path and not to this one, which is the
+// default drawing path.
+const maxDecodedBytes = 64 << 20
+
 func Decompress(input []uint8, width, height int, Bpp int) ([]uint8, error) {
 	if width <= 0 || height <= 0 {
 		return nil, fmt.Errorf("rle: bad bitmap size %dx%d", width, height)
 	}
 	if Bpp < 1 || Bpp > 4 {
 		return nil, fmt.Errorf("rle: %d bytes per pixel is not supported", Bpp)
+	}
+
+	if width > 1<<16 || height > 1<<16 || width*height*Bpp > maxDecodedBytes {
+		return nil, fmt.Errorf("rle: %dx%d at %d bytes per pixel is too large to decode", width, height, Bpp)
 	}
 
 	size := width * height * Bpp
