@@ -447,19 +447,24 @@ func blitScreen(fb *image.RGBA, s *orders.Screen) {
 // server mapped it. The surface is BGRA, top down, and is clipped to the
 // framebuffer.
 func blitSurface(fb *image.RGBA, s *rdpgfx.Surface) {
-	px := s.Pixels()
+	// CompositePixels returns the surface at the size the server asked for, which
+	// is not its native size when it was mapped with a scale factor. Drawing the
+	// native pixels instead would put a scaled surface on screen at the wrong
+	// size, so the size comes back with the pixels rather than being read off the
+	// surface.
+	px, w, h := s.CompositePixels()
 	ox, oy := s.Origin()
-	for y := 0; y < s.Height; y++ {
+	for y := 0; y < h; y++ {
 		dy := oy + y
 		if dy < 0 || dy >= fb.Rect.Dy() {
 			continue
 		}
-		for x := 0; x < s.Width; x++ {
+		for x := 0; x < w; x++ {
 			dx := ox + x
 			if dx < 0 || dx >= fb.Rect.Dx() {
 				continue
 			}
-			i := (y*s.Width + x) * 4
+			i := (y*w + x) * 4
 			if i+4 > len(px) {
 				return
 			}

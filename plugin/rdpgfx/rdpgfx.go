@@ -97,6 +97,13 @@ const (
 	queueDepthUnavailable = 0x00000000
 )
 
+// maxScaledDimension bounds the target width and height a scaled placement may
+// carry. They are uint32 on the wire, unlike a surface's own uint16 size, so
+// without a bound a server could name a target that resampling turns into a
+// multi-gigabyte allocation. 8192 already exceeds an 8K display (7680x4320) and
+// keeps the resample buffer under 256 MiB.
+const maxScaledDimension = 8192
+
 // headerBuf is the common RDPGFX PDU header.
 type headerBuf struct {
 	cmdID     uint16
@@ -117,11 +124,34 @@ type Reset struct {
 	Width, Height int
 }
 
-// SurfacePlacement reports that the server mapped a surface somewhere on the
-// desktop.
+// SurfacePlacement reports where the server mapped a surface. The four mapping
+// orders carry different geometry and only some of it can be applied:
+//
+//   - MapSurfaceToOutput and MapSurfaceToScaledOutput place the surface on the
+//     desktop at X,Y. The scaled form additionally asks for it to be resampled
+//     to TargetWidth x TargetHeight, which CompositePixels applies.
+//   - MapSurfaceToWindow and MapSurfaceToScaledWindow place the surface inside a
+//     window. This client has no window model, so the window id and the mapped
+//     and target sizes are recorded and left for a consumer that has one;
+//     CompositePixels deliberately does not resample them.
 type SurfacePlacement struct {
-	ID   uint16
+	ID uint16
+
+	// X, Y is the desktop origin, from the two output mappings. A window
+	// mapping carries no desktop origin, so it keeps the last one.
 	X, Y int
+
+	// Windowed is set for MapSurfaceToWindow and MapSurfaceToScaledWindow.
+	Windowed bool
+	// WindowID identifies the window a Windowed placement belongs to.
+	WindowID uint64
+	// MappedWidth, MappedHeight is the surface's size within that window.
+	MappedWidth, MappedHeight int
+
+	// TargetWidth, TargetHeight is the size the server asked the surface to be
+	// resampled to, from the two scaled mappings. Zero when the mapping does
+	// not scale.
+	TargetWidth, TargetHeight int
 }
 
 // Surface is a decoded surface: a set of pixels that the server composites
@@ -132,10 +162,10 @@ type Surface struct {
 	Height      int
 	PixelFormat uint8
 
-	// Where the server maps this surface onto the desktop. It stays at the
-	// origin until a mapping command says otherwise, which is where the main
-	// desktop surface belongs anyway.
-	originX, originY int
+	// placement is where the server last mapped this surface. It stays zero
+	// (desktop origin, native size) until a mapping command says otherwise,
+	// which is where the main desktop surface belongs anyway.
+	placement SurfacePlacement
 
 	pixels []byte
 	mu     sync.Mutex
@@ -143,20 +173,59 @@ type Surface struct {
 
 // Origin returns where the surface is mapped on the desktop. A client that
 // composites surfaces itself has to offset them by this, or everything ends up
-// in the top left corner.
+// in the top left corner. A window mapping carries no desktop origin, so the
+// last output origin is kept and this never moves a surface to the corner.
 func (s *Surface) Origin() (int, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.originX, s.originY
+	return s.placement.X, s.placement.Y
 }
 
-// Pixels returns a copy of the surface contents as BGRA, top down.
+// Placement returns the mapping the server most recently applied to this
+// surface: the output origin from an output mapping, or the window id and the
+// mapped and target sizes from a window mapping. A surface that was never
+// mapped reports the zero placement.
+func (s *Surface) Placement() SurfacePlacement {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.placement
+	p.ID = s.ID
+	return p
+}
+
+// Pixels returns a copy of the surface contents as BGRA, top down, at the
+// surface's native size.
 func (s *Surface) Pixels() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]byte, len(s.pixels))
 	copy(out, s.pixels)
 	return out
+}
+
+// CompositePixels returns the pixels to composite for this surface and the size
+// to composite them at. When the server mapped the surface to the output with a
+// target size (MapSurfaceToScaledOutput), the pixels are resampled to that size
+// so the surface is drawn at the size the server asked for. In every other case
+// the native pixels and size are returned, so a compositor can always draw the
+// result at the size this returns.
+//
+// The two window mappings carry a target size as well, but they are not
+// resampled: the surface belongs at a position inside a window this client has
+// no model for, and scaling it without a destination would not be faithful.
+// Placement reports what was recorded for them.
+func (s *Surface) CompositePixels() ([]byte, int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.placement
+	if p.Windowed || p.TargetWidth <= 0 || p.TargetHeight <= 0 ||
+		(p.TargetWidth == s.Width && p.TargetHeight == s.Height) {
+		out := make([]byte, len(s.pixels))
+		copy(out, s.pixels)
+		return out, s.Width, s.Height
+	}
+	return resample(s.pixels, s.Width, s.Height, p.TargetWidth, p.TargetHeight),
+		p.TargetWidth, p.TargetHeight
 }
 
 // GfxClient is the RDPGFX channel handler.
@@ -298,10 +367,12 @@ func (c *GfxClient) handle(h headerBuf, body []byte) error {
 		return c.sendCacheImportReply()
 	case cmdMapSurfaceToOutput:
 		return c.processMapSurfaceToOutput(body)
-	case cmdMapSurfaceToScaledOutput, cmdMapSurfaceToWindow, cmdMapSurfaceToScaledWindow:
-		// Scaled and windowed placement are not modelled: a scaled surface would
-		// need resampling, and there is no window to place it in.
-		return nil
+	case cmdMapSurfaceToScaledOutput:
+		return c.processMapSurfaceToScaledOutput(body)
+	case cmdMapSurfaceToWindow:
+		return c.processMapSurfaceToWindow(body)
+	case cmdMapSurfaceToScaledWindow:
+		return c.processMapSurfaceToScaledWindow(body)
 	default:
 		// Unknown commands are skipped: the length field lets us stay in
 		// sync, and a newer server may send things we do not model.
@@ -342,24 +413,105 @@ func (c *GfxClient) processResetGraphics(body []byte) error {
 // processMapSurfaceToOutput records where a surface sits on the desktop.
 func (c *GfxClient) processMapSurfaceToOutput(body []byte) error {
 	// surfaceId(2) reserved(2) outputOriginX(4, signed) outputOriginY(4, signed).
+	// This is RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU, twelve bytes.
 	if len(body) < 12 {
 		return fmt.Errorf("map surface to output: %w", errShort)
 	}
 	id := binary.LittleEndian.Uint16(body)
 	x := int(int32(binary.LittleEndian.Uint32(body[4:])))
 	y := int(int32(binary.LittleEndian.Uint32(body[8:])))
+	return c.recordPlacement("map surface to output", id, SurfacePlacement{ID: id, X: x, Y: y})
+}
 
+// processMapSurfaceToScaledOutput records where a surface sits on the desktop
+// and the size it has to be resampled to. The scale is applied by
+// CompositePixels.
+func (c *GfxClient) processMapSurfaceToScaledOutput(body []byte) error {
+	// surfaceId(2) reserved(2) outputOriginX(4, signed) outputOriginY(4, signed)
+	// targetWidth(4) targetHeight(4). This is
+	// RDPGFX_MAP_SURFACE_TO_SCALED_OUTPUT_PDU, twenty bytes.
+	if len(body) < 20 {
+		return fmt.Errorf("map surface to scaled output: %w", errShort)
+	}
+	id := binary.LittleEndian.Uint16(body)
+	x := int(int32(binary.LittleEndian.Uint32(body[4:])))
+	y := int(int32(binary.LittleEndian.Uint32(body[8:])))
+	tw := binary.LittleEndian.Uint32(body[12:])
+	th := binary.LittleEndian.Uint32(body[16:])
+	if err := checkScaledTarget(tw, th); err != nil {
+		return fmt.Errorf("map surface to scaled output: %w", err)
+	}
+	return c.recordPlacement("map surface to scaled output", id, SurfacePlacement{
+		ID: id, X: x, Y: y,
+		TargetWidth: int(tw), TargetHeight: int(th),
+	})
+}
+
+// processMapSurfaceToWindow records the window a surface belongs to and the
+// size it is mapped at there. The client has no window model to composite into,
+// so nothing is applied; Placement reports what was recorded.
+func (c *GfxClient) processMapSurfaceToWindow(body []byte) error {
+	// surfaceId(2) windowId(8) mappedWidth(4) mappedHeight(4). This is
+	// RDPGFX_MAP_SURFACE_TO_WINDOW_PDU, eighteen bytes.
+	if len(body) < 18 {
+		return fmt.Errorf("map surface to window: %w", errShort)
+	}
+	id := binary.LittleEndian.Uint16(body)
+	return c.recordPlacement("map surface to window", id, SurfacePlacement{
+		ID:           id,
+		Windowed:     true,
+		WindowID:     binary.LittleEndian.Uint64(body[2:]),
+		MappedWidth:  int(binary.LittleEndian.Uint32(body[10:])),
+		MappedHeight: int(binary.LittleEndian.Uint32(body[14:])),
+	})
+}
+
+// processMapSurfaceToScaledWindow records the window, the mapped size and the
+// target size of a scaled window placement. None of it is applied, for the same
+// reason as a plain window mapping.
+func (c *GfxClient) processMapSurfaceToScaledWindow(body []byte) error {
+	// surfaceId(2) windowId(8) mappedWidth(4) mappedHeight(4) targetWidth(4)
+	// targetHeight(4). This is RDPGFX_MAP_SURFACE_TO_SCALED_WINDOW_PDU,
+	// twenty-six bytes.
+	if len(body) < 26 {
+		return fmt.Errorf("map surface to scaled window: %w", errShort)
+	}
+	id := binary.LittleEndian.Uint16(body)
+	tw := binary.LittleEndian.Uint32(body[18:])
+	th := binary.LittleEndian.Uint32(body[22:])
+	if err := checkScaledTarget(tw, th); err != nil {
+		return fmt.Errorf("map surface to scaled window: %w", err)
+	}
+	return c.recordPlacement("map surface to scaled window", id, SurfacePlacement{
+		ID:           id,
+		Windowed:     true,
+		WindowID:     binary.LittleEndian.Uint64(body[2:]),
+		MappedWidth:  int(binary.LittleEndian.Uint32(body[10:])),
+		MappedHeight: int(binary.LittleEndian.Uint32(body[14:])),
+		TargetWidth:  int(tw),
+		TargetHeight: int(th),
+	})
+}
+
+// recordPlacement stores a mapping on the named surface and reports it. A
+// window mapping has no desktop origin, so it keeps the last one rather than
+// resetting the surface to the top left corner.
+func (c *GfxClient) recordPlacement(name string, id uint16, p SurfacePlacement) error {
 	c.mu.Lock()
 	s := c.surfaces[id]
 	c.mu.Unlock()
 	if s == nil {
-		return fmt.Errorf("map surface to output: unknown surface %d", id)
+		return fmt.Errorf("%s: unknown surface %d", name, id)
 	}
 
 	s.mu.Lock()
-	s.originX, s.originY = x, y
+	if p.Windowed {
+		p.X, p.Y = s.placement.X, s.placement.Y
+	}
+	s.placement = p
 	s.mu.Unlock()
-	c.Emit("gfx-surface-mapped", SurfacePlacement{ID: id, X: x, Y: y})
+
+	c.Emit("gfx-surface-mapped", p)
 	return nil
 }
 
@@ -618,6 +770,39 @@ func (c *GfxClient) processSurfaceToSurface(body []byte) error {
 	}
 
 	return nil
+}
+
+// checkScaledTarget rejects a target size that cannot be honoured. The parser
+// runs this before the value reaches CompositePixels, which allocates for it.
+func checkScaledTarget(w, h uint32) error {
+	if w == 0 || h == 0 {
+		return fmt.Errorf("zero target size %dx%d", w, h)
+	}
+	if w > maxScaledDimension || h > maxScaledDimension {
+		return fmt.Errorf("target size %dx%d exceeds %d", w, h, maxScaledDimension)
+	}
+	return nil
+}
+
+// resample scales a srcW x srcH BGRA image to dstW x dstH by nearest
+// neighbour, which is exact for whole number scale factors and never reads
+// outside the source. dstW and dstH are bounded by checkScaledTarget before
+// this is reached, so the destination allocation is bounded before it is made.
+func resample(src []byte, srcW, srcH, dstW, dstH int) []byte {
+	dst := make([]byte, dstW*dstH*4)
+	for y := 0; y < dstH; y++ {
+		sy := y * srcH / dstH
+		for x := 0; x < dstW; x++ {
+			sx := x * srcW / dstW
+			si := (sy*srcW + sx) * 4
+			di := (y*dstW + x) * 4
+			if si+4 > len(src) {
+				return dst
+			}
+			copy(dst[di:di+4], src[si:si+4])
+		}
+	}
+	return dst
 }
 
 // blit copies a width x height BGRA image into dst at (x, y), clipped.
