@@ -176,13 +176,16 @@ func (c *Client) SetOrderSupport(enabled bool) {
 		return
 	}
 
+	// MEMBLT only, and that is a measurement rather than an oversight. A Windows
+	// 10 host was watched with every order below advertised as well: it sent 1473
+	// MEMBLTs and not one shape, glyph or multi order. So advertising them buys
+	// nothing here, and on an older server that does draw with them it would ask
+	// for orders this client parses and draws but has never seen, where declining
+	// to advertise them leaves that server on bitmap updates, which are verified.
+	// They are implemented and unit tested anyway, as a safety net for a server
+	// that sends them regardless.
 	drawn := []Order{
-		TS_NEG_MEMBLT_INDEX, TS_NEG_MEM3BLT_INDEX,
-		TS_NEG_POLYGON_SC_INDEX, TS_NEG_POLYGON_CB_INDEX, TS_NEG_POLYLINE_INDEX,
-		TS_NEG_ELLIPSE_SC_INDEX, TS_NEG_ELLIPSE_CB_INDEX,
-		TS_NEG_GLYPH_INDEX_INDEX,
-		TS_NEG_MULTIDSTBLT_INDEX, TS_NEG_MULTIPATBLT_INDEX,
-		TS_NEG_MULTISCRBLT_INDEX, TS_NEG_MULTIOPAQUERECT_INDEX,
+		TS_NEG_MEMBLT_INDEX,
 	}
 	var bit uint8
 	if enabled {
@@ -192,15 +195,6 @@ func (c *Client) SetOrderSupport(enabled bool) {
 		capa.OrderSupport[idx] = bit
 	}
 
-	// The glyph cache the TEXT2 order draws from is only filled if the server is
-	// told the client has one.
-	if glyphCapa, ok := c.clientCapabilities[CAPSTYPE_GLYPHCACHE].(*GlyphCapability); ok && glyphCapa != nil {
-		if enabled {
-			glyphCapa.SupportLevel = GLYPH_SUPPORT_FULL
-		} else {
-			glyphCapa.SupportLevel = GLYPH_SUPPORT_NONE
-		}
-	}
 }
 
 func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint16) {
