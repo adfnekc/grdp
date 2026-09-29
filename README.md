@@ -144,6 +144,13 @@ decoder still supplies the expected output.
 over different drawing paths, and reports whether they differ like a lossy codec
 or like a region that never got drawn.
 
+`scripts/vnc-dev.sh` fetches TigerVNC without root, starts it on a private
+display, and runs the live VNC tests against it.
+
+`go run ./cmd/docaudit ./...` lists exported identifiers that godoc will render
+without a doc comment, which is the one thing that makes an API unpleasant to
+read from `go doc` alone.
+
 ## Take ideas from
 
 * [rdpy](https://github.com/citronneur/rdpy)

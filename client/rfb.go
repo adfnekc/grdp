@@ -17,6 +17,14 @@ import (
 	"github.com/adfnekc/grdp/protocol/rfb"
 )
 
+// VncClient is the RFB (VNC) client. It is exercised against a real server by
+// scripts/vnc-dev.sh, which starts TigerVNC and runs the live tests: a frame is
+// received and parsed, and the clipboard works in both directions. Raw and
+// CopyRect encodings only, and RequestClipboardText is not implemented.
+//
+// Login blocks until the handshake completes, fails, or the configured timeout
+// expires, so it is safe to register handlers and drive input afterwards; before
+// it returns those calls do nothing rather than panic.
 type VncClient struct {
 	vnc     *rfb.RFB
 	timeout time.Duration
@@ -128,6 +136,8 @@ func (c *VncClient) On(event string, f interface{}) {
 	c.vnc.On(event, f)
 }
 
+// KeyUp implements the Control interface. It does nothing until Login has
+// completed.
 func (c *VncClient) KeyUp(sc int, name string) {
 	if c.vnc == nil {
 		return
@@ -136,6 +146,9 @@ func (c *VncClient) KeyUp(sc int, name string) {
 	k.Key = uint32(sc)
 	c.vnc.SendKeyEvent(k)
 }
+
+// KeyDown implements the Control interface. It does nothing until Login has
+// completed.
 func (c *VncClient) KeyDown(sc int, name string) {
 	if c.vnc == nil {
 		return
@@ -146,6 +159,8 @@ func (c *VncClient) KeyDown(sc int, name string) {
 	c.vnc.SendKeyEvent(k)
 }
 
+// MouseMove implements the Control interface. It does nothing until Login has
+// completed.
 func (c *VncClient) MouseMove(x, y int) {
 	if c.vnc == nil {
 		return
@@ -157,9 +172,13 @@ func (c *VncClient) MouseMove(x, y int) {
 	c.vnc.SendPointEvent(p)
 }
 
+// MouseWheel implements the Control interface. It does nothing until Login has
+// completed.
 func (c *VncClient) MouseWheel(scroll, x, y int) {
 }
 
+// MouseUp implements the Control interface. It does nothing until Login has
+// completed.
 func (c *VncClient) MouseUp(button int, x, y int) {
 	if c.vnc == nil {
 		return
@@ -180,6 +199,9 @@ func (c *VncClient) MouseUp(button int, x, y int) {
 	p.YPos = uint16(y)
 	c.vnc.SendPointEvent(p)
 }
+
+// MouseDown implements the Control interface. It does nothing until Login has
+// completed.
 func (c *VncClient) MouseDown(button int, x, y int) {
 	if c.vnc == nil {
 		return
@@ -203,6 +225,8 @@ func (c *VncClient) MouseDown(button int, x, y int) {
 	c.vnc.SendPointEvent(p)
 }
 
+// Close implements the Control interface. It does nothing until Login has
+// completed.
 func (c *VncClient) Close() {
 	if c.vnc != nil {
 		c.vnc.Close()

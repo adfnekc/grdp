@@ -5,6 +5,9 @@ import (
 	"unsafe"
 )
 
+// CVAL reads one byte from a cursor and advances it. An exhausted cursor yields
+// zero rather than a panic, so a decoder that reads past the end has to notice
+// that it is making no progress: a zero byte decodes as a run of nothing.
 func CVAL(p *[]uint8) int {
 	if len(*p) == 0 {
 		// Truncated/malformed input: never panic on network-supplied data.
@@ -15,6 +18,7 @@ func CVAL(p *[]uint8) int {
 	return a
 }
 
+// CVAL2 reads a little endian 16 bit value from a cursor.
 func CVAL2(p *[]uint8, v *uint16) {
 	if len(*p) < 2 {
 		*v = 0
@@ -24,6 +28,7 @@ func CVAL2(p *[]uint8, v *uint16) {
 	*p = (*p)[2:]
 }
 
+// CVAL3 reads three bytes from a cursor.
 func CVAL3(p *[]uint8, v *[3]uint8) {
 	if len(*p) < 3 {
 		*v = [3]uint8{}
@@ -35,6 +40,8 @@ func CVAL3(p *[]uint8, v *[3]uint8) {
 	*p = (*p)[3:]
 }
 
+// REPEAT calls f once per pixel of a run, eight at a time while the run is long
+// enough, stopping at width.
 func REPEAT(f func(), count *int, x *int, width int) {
 	for (*count & ^0x7) != 0 && ((*x + 8) < width) {
 		for i := 0; i < 8; i++ {
@@ -888,6 +895,14 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 
 /* main decompress function */
 
+// maxDecodedBytes bounds what a compressed bitmap may decode to. Width, height
+// and the pixel format all come off the wire, and they are used to size the
+// output before a byte of input is read, so without this a thirty byte bitmap
+// update can ask for seventeen gigabytes: 65535 by 65535 at four bytes per pixel.
+// The same bound was applied to the cache path and not to this one, which is the
+// default drawing path.
+const maxDecodedBytes = 64 << 20
+
 // Decompress decodes one RDP 6.0 compressed bitmap. Bpp is bytes per pixel:
 // 1, 2, 3 or 4 for 8, 16, 24 and 32 bits.
 //
@@ -900,14 +915,6 @@ func decompress4(output *[]uint8, width, height int, input []uint8, size int) bo
 // Only the interleaved form reports an error for a stream that ends early, since
 // it carries an explicit size. The other three are terminated by the buffer
 // ending, so ending early is not distinguishable from ending on purpose.
-// maxDecodedBytes bounds what a compressed bitmap may decode to. Width, height
-// and the pixel format all come off the wire, and they are used to size the
-// output before a byte of input is read, so without this a thirty byte bitmap
-// update can ask for seventeen gigabytes: 65535 by 65535 at four bytes per pixel.
-// The same bound was applied to the cache path and not to this one, which is the
-// default drawing path.
-const maxDecodedBytes = 64 << 20
-
 func Decompress(input []uint8, width, height int, Bpp int) ([]uint8, error) {
 	if width <= 0 || height <= 0 {
 		return nil, fmt.Errorf("rle: bad bitmap size %dx%d", width, height)

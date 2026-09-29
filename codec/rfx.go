@@ -30,6 +30,8 @@ const rfxCoefficients = rfxTileSize * rfxTileSize
 // RLGRMode selects the entropy coder used inside a tileset.
 type RLGRMode int
 
+// The two entropy coder modes, MS-RDPRFX 3.1.8. RemoteFX data does not say which
+// one produced it, so the session's choice has to be passed to the decoder.
 const (
 	// RLGR1 is the simpler, Golomb-Rice-only mode.
 	RLGR1 RLGRMode = iota

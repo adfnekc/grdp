@@ -40,6 +40,8 @@ const (
 // is implemented by RdpClient and VncClient; their protocols differ but the
 // input, clipboard and event methods here do not.
 
+// Control is the small surface both clients implement, so that Client can hold
+// either one. Callers normally use Client rather than this.
 type Control interface {
 	Login(host, user, passwd string, width, height int) error
 	KeyUp(sc int, name string)
