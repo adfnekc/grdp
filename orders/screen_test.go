@@ -256,6 +256,66 @@ func TestScrbltCopiesWithinTheScreen(t *testing.T) {
 	}
 }
 
+// A blit whose source runs off the buffer must report only the pixels it
+// actually copied. This is reachable from the wire: SCRBLT copies from the
+// screen itself at an origin the server picks, and nothing bounds that origin to
+// the screen.
+func TestScrbltSourceRunningOutReportsOnlyWrittenPixels(t *testing.T) {
+	s := NewScreen(4, 2)
+	// Two distinguishable pixels on the last row, for the blit to read.
+	s.Draw([]pdu.OrderPdu{order(&pdu.OpaqueRect{
+		X: 2, Y: 1, Cx: 1, Cy: 1, Colour: [4]uint8{0x11, 0x22, 0x33, 0},
+	})})
+	s.Draw([]pdu.OrderPdu{order(&pdu.OpaqueRect{
+		X: 3, Y: 1, Cx: 1, Cy: 1, Colour: [4]uint8{0x44, 0x55, 0x66, 0},
+	})})
+
+	// The screen holds eight pixels and the source starts at pixel six, so a
+	// four wide copy can read only the first two of them.
+	dirty, err := s.Draw([]pdu.OrderPdu{order(&pdu.Scrblt{
+		Srcx: 2, Srcy: 1, X: 0, Y: 0, Cx: 4, Cy: 1, Opcode: ropSrcCopy,
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := image.Rect(0, 0, 2, 1); dirty != want {
+		t.Errorf("dirty area is %v, want %v: the source ran out after two pixels", dirty, want)
+	}
+	if got := pixelAt(t, s, 0, 0); !bytes.Equal(got, bgra(0x11, 0x22, 0x33)) {
+		t.Errorf("(0,0) is %v, want the first copied pixel", got)
+	}
+	if got := pixelAt(t, s, 1, 0); !bytes.Equal(got, bgra(0x44, 0x55, 0x66)) {
+		t.Errorf("(1,0) is %v, want the second copied pixel", got)
+	}
+	// The pixels past the end of the source were never written and must not be
+	// claimed as dirty.
+	for _, x := range []int{2, 3} {
+		got := pixelAt(t, s, x, 0)
+		if bytes.Equal(got, bgra(0x11, 0x22, 0x33)) || bytes.Equal(got, bgra(0x44, 0x55, 0x66)) {
+			t.Errorf("(%d,0) is past the source but was drawn: %v", x, got)
+		}
+	}
+}
+
+// A source origin entirely off the screen copies nothing, so it must not claim
+// any area as changed.
+func TestScrbltFromPastTheScreenChangesNothing(t *testing.T) {
+	s := NewScreen(4, 2)
+	before := s.Pixels()
+	dirty, err := s.Draw([]pdu.OrderPdu{order(&pdu.Scrblt{
+		Srcx: 0, Srcy: 7, X: 0, Y: 0, Cx: 4, Cy: 1, Opcode: ropSrcCopy,
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty.Empty() {
+		t.Errorf("dirty area is %v, want empty", dirty)
+	}
+	if !bytes.Equal(before, s.Pixels()) {
+		t.Error("the screen changed")
+	}
+}
+
 func TestOpaqueRectIsClippedToTheScreen(t *testing.T) {
 	s := NewScreen(4, 4)
 	// Ask for a rectangle that runs off every edge.

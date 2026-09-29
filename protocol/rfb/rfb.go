@@ -1,4 +1,8 @@
-// rfb.go
+// Package rfb is the RFB (VNC) client protocol this fork inherited from
+// upstream.
+//
+// It builds and is kept, but it has never been run against a VNC server in this
+// project and has no tests, so it is not a supported path.
 package rfb
 
 import (
@@ -41,6 +45,22 @@ type RFBConn struct {
 	BitRect  *BitRect
 	Password string
 }
+
+// The RFB client in this package is inherited from the upstream fork and is not
+// tested here: nothing in this project has run it against a VNC server, and its
+// clipboard is not implemented. It builds, and it is deliberately kept, but it
+// should be read as unsupported until someone exercises it. The bounds below were
+// added because a length from the server was used to size an allocation before
+// any of the data arrived; the rest of what it gets wrong is noted rather than
+// quietly changed, since there is no test that could tell a fix from a
+// regression.
+
+// maxRectBytes bounds a framebuffer rectangle, and maxCutTextBytes bounds a
+// server cut text. Both lengths come off the wire.
+const (
+	maxRectBytes    = 64 << 20
+	maxCutTextBytes = 16 << 20
+)
 
 func NewRFBConn(s net.Conn, passwd string) *RFBConn {
 	fc := &RFBConn{
@@ -259,7 +279,9 @@ func (fc *RFBConn) recvServerOrder(s []byte, err error) {
 	case 0:
 		core.StartReadBytes(3, fc, fc.recvFrameBufferUpdateHeader)
 	case 2:
-		//TODO
+		// Bell carries no body. Handling it would mean reading the next message
+		// type; as written the read chain is not re-armed here, so a Bell ends
+		// parsing for the rest of the session instead of being skipped.
 	case 3:
 		core.StartReadBytes(7, fc, fc.recvServerCutTextHeader)
 	default:
@@ -311,8 +333,15 @@ func (fc *RFBConn) recvRectHeader(s []byte, err error) {
 	rect := &Rectangle{x, y, w, h, e}
 
 	fc.BitRect.Rects[fc.NbRect-1].Rect = rect
-	glog.Infof("rect:%+v, len=%d", rect, int(rect.Width)*int(rect.Height)*4)
-	core.StartReadBytes(int(rect.Width)*int(rect.Height)*4, fc, fc.recvRectBody)
+
+	size := int(rect.Width) * int(rect.Height) * 4
+	if size < 0 || size > maxRectBytes {
+		glog.Errorf("rfb: rectangle %dx%d is out of range", rect.Width, rect.Height)
+		fc.Emit("error", fmt.Errorf("rfb: rectangle %dx%d is out of range", rect.Width, rect.Height))
+		return
+	}
+	glog.Infof("rect:%+v, len=%d", rect, size)
+	core.StartReadBytes(size, fc, fc.recvRectBody)
 }
 func (fc *RFBConn) recvRectBody(s []byte, err error) {
 	glog.Debug("RFBConn recvRectBody", hex.EncodeToString(s), err)
@@ -343,6 +372,11 @@ func (fc *RFBConn) recvServerCutTextHeader(s []byte, err error) {
 		return
 	}
 
+	if header.Size > maxCutTextBytes {
+		glog.Errorf("rfb: cut text of %d bytes is out of range", header.Size)
+		fc.Emit("error", fmt.Errorf("rfb: cut text of %d bytes is out of range", header.Size))
+		return
+	}
 	core.StartReadBytes(int(header.Size), fc, fc.recvServerCutTextBody)
 }
 func (fc *RFBConn) recvServerCutTextBody(s []byte, err error) {

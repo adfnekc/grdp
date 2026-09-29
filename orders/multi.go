@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"fmt"
 	"image"
 
 	"github.com/adfnekc/grdp/protocol/pdu"
@@ -21,7 +22,8 @@ import (
 // each rectangle on its own is the reading their fields support, and the bounds
 // the order carries still clip the whole lot.
 //
-// MEM3BLT is a MEMBLT against a third colour table, so its drawing is MEMBLT's.
+// MEM3BLT is a MEMBLT against a third colour table that also carries a raster
+// operation, so it copies only when the operation is SRCCOPY.
 //
 // The batch dispatch calls this once per order from Screen.drawOne, where the
 // screen lock is already held and the clip rectangle is known, so it must not be
@@ -46,10 +48,17 @@ func (s *Screen) DrawMulti(o *pdu.OrderPdu, clip image.Rectangle) image.Rectangl
 	}
 }
 
-// mem3blt draws a MEMBLT whose bitmap comes with a third colour table. The
-// colour table only matters for a palettised bitmap, which is not decoded here,
-// so the pixels are copied out of the cache exactly as MEMBLT's are.
+// mem3blt draws a MEMBLT whose bitmap comes with a third colour table and a
+// raster operation. The colour table only matters for a palettised bitmap,
+// which is not decoded here, and the bitmap itself is copied out of the cache
+// as MEMBLT's is. Unlike MEMBLT, MEM3BLT's bRop is a real raster operation, so
+// drawing it as an unconditional copy is wrong for anything but SRCCOPY; the
+// rest are counted instead of drawn as the wrong thing.
 func (s *Screen) mem3blt(d *pdu.Mem3blt, clip image.Rectangle) image.Rectangle {
+	if d.Opcode != ropSrcCopy {
+		s.note(fmt.Sprintf("mem3blt rop 0x%02x", d.Opcode))
+		return image.Rectangle{}
+	}
 	return s.memblt(&pdu.Memblt{
 		CacheId:     d.CacheId,
 		ColourTable: d.ColourTable,
@@ -104,18 +113,27 @@ func (s *Screen) multiPatBlt(d *pdu.MultiPatBlt, clip image.Rectangle) image.Rec
 	return dirty
 }
 
-// multiScrBlt copies each of the order's rectangles from the source origin the
-// order carries. The single-rectangle SCRBLT takes an independent source origin
-// and a destination rectangle of the same size, so each rectangle here is a
-// destination that copies the source at that rectangle's size.
+// multiScrBlt copies part of the screen to each of the order's rectangles.
+//
+// The order carries one source origin and a list of destination rectangles, and
+// each rectangle reads the source at the same translation the order applies as
+// a whole: a rectangle at (r.Left, r.Top) reads
+// (nXSrc + r.Left - nLeftRect, nYSrc + r.Top - nTopRect). FreeRDP has no
+// renderer to check this against, since its Windows client sets only
+// MultiOpaqueRect and leaves this handler unset, so the reading comes from
+// MS-RDPEGDI's annotated MultiScrBlt dump: there the destination rectangle is
+// exactly the bounds of the delta rectangles and the source origin is that
+// rectangle shifted, which is only consistent with the whole shape moving by
+// one vector. Copying from the source origin at each rectangle's own size would
+// instead read a single source row for a shape that spans many.
 func (s *Screen) multiScrBlt(d *pdu.MultiScrBlt, clip image.Rectangle) image.Rectangle {
 	var dirty image.Rectangle
 	for _, r := range multiRects(d.Rectangles, d.NumRectangles) {
 		dirty = union(dirty, s.scrblt(&pdu.Scrblt{
 			X: r.Left, Y: r.Top, Cx: r.Width, Cy: r.Height,
 			Opcode: d.Opcode,
-			Srcx:   d.Srcx,
-			Srcy:   d.Srcy,
+			Srcx:   d.Srcx + r.Left - d.X,
+			Srcy:   d.Srcy + r.Top - d.Y,
 		}, clip))
 	}
 	return dirty

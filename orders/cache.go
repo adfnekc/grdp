@@ -15,7 +15,17 @@ package orders
 import (
 	"sync"
 
+	"github.com/adfnekc/grdp/codec"
 	"github.com/adfnekc/grdp/protocol/pdu"
+)
+
+// maxEntryDimension and maxEntryBytes bound a cache cell before anything is
+// allocated for it. Width and height come off the wire and the codec decoders
+// allocate from them, so a limit applied after the decode would already have
+// cost the memory it is meant to save.
+const (
+	maxEntryDimension = 1 << 14
+	maxEntryBytes     = 16 << 20
 )
 
 // cacheKey identifies a cache slot. The server names a cache with two bits and
@@ -33,6 +43,13 @@ type Entry struct {
 	Pixels []byte
 }
 
+// maxCacheBytes bounds everything the cache holds together. A per-entry bound
+// does not bound the sum, and the server chooses both how many entries to send
+// and how large each one is: with a few hundred bytes per order it can decode a
+// cell of many megabytes, and it can choose the slot to put it in, so the total
+// has to be capped as well.
+const maxCacheBytes = 64 << 20
+
 // Cache holds the bitmaps the server stores with secondary orders and reads
 // back with MEMBLT.
 //
@@ -43,11 +60,21 @@ type Entry struct {
 type Cache struct {
 	mu      sync.Mutex
 	entries map[cacheKey]*Entry
+	bytes   int
+
+	// RFXMode is the entropy coder for RemoteFX cache entries. RemoteFX data
+	// does not say which coder produced it, so this has to match what the
+	// session negotiated. A cache keeps its own copy rather than reading
+	// codec.RFXMode, since that global belongs to whichever session set it and
+	// decoding garbage is worse than failing. Set it before the cache is used;
+	// the default, RLGR1, is what codec.RFXMode defaults to and what every
+	// server supports.
+	RFXMode codec.RLGRMode
 }
 
 // NewCache returns an empty cache.
 func NewCache() *Cache {
-	return &Cache{entries: make(map[cacheKey]*Entry)}
+	return &Cache{entries: make(map[cacheKey]*Entry), RFXMode: codec.RLGR1}
 }
 
 // Put stores a bitmap from a cache order. Entries the server says not to keep
@@ -57,7 +84,7 @@ func NewCache() *Cache {
 // The order's own pixels are in the bitmap's pixel format and are converted to
 // BGRA here, so that blitting is a copy.
 func (c *Cache) Put(cb *pdu.CacheBitmap) {
-	if cb == nil || cb.Width <= 0 || cb.Height <= 0 {
+	if cb == nil || cb.Width <= 0 || cb.Height <= 0 || entryTooLarge(cb.Width, cb.Height) {
 		return
 	}
 
@@ -66,9 +93,17 @@ func (c *Cache) Put(cb *pdu.CacheBitmap) {
 	case len(cb.Pixels) > 0:
 		pixels = toBGRA(cb.Pixels, cb.Width, cb.Height, cb.Bpp)
 	case cb.CodecID != 0 && len(cb.Data) > 0:
-		// A revision 3 entry carries a codec id and encoded data. Those are not
-		// decoded here.
-		return
+		// A revision 3 entry carries a codec id and data the codec encoded,
+		// rather than plain pixels. Both codecs a cache can hold decode to BGRA
+		// at 32bpp, which is what the rest of the cache holds, so nothing is
+		// converted after this.
+		decoded, err := c.decode(cb)
+		if err != nil {
+			// A payload that will not decode would only put rubbish in the cache
+			// and then on screen, so leave the slot empty.
+			return
+		}
+		pixels = decoded
 	default:
 		return
 	}
@@ -76,13 +111,44 @@ func (c *Cache) Put(cb *pdu.CacheBitmap) {
 		return
 	}
 
+	key := cacheKey{cb.CacheID, cb.CacheIndex}
+
 	c.mu.Lock()
-	c.entries[cacheKey{cb.CacheID, cb.CacheIndex}] = &Entry{
-		Width:  cb.Width,
-		Height: cb.Height,
-		Pixels: pixels,
+	defer c.mu.Unlock()
+
+	if old, ok := c.entries[key]; ok {
+		c.bytes -= len(old.Pixels)
 	}
-	c.mu.Unlock()
+	// Dropping everything is a blunt way to stay under the cap, and it is the
+	// right one here: the entries a server sends next will refill whatever it
+	// still needs, and a client that evicted selectively would have to guess
+	// which slots matter.
+	if c.bytes+len(pixels) > maxCacheBytes {
+		c.entries = make(map[cacheKey]*Entry)
+		c.bytes = 0
+	}
+	c.entries[key] = &Entry{Width: cb.Width, Height: cb.Height, Pixels: pixels}
+	c.bytes += len(pixels)
+}
+
+// decode expands a revision 3 entry's payload with the codec its id names.
+func (c *Cache) decode(cb *pdu.CacheBitmap) ([]byte, error) {
+	if cb.CodecID == codec.CodecIDRemoteFX {
+		// codec.Decompress would reach for the codec.RFXMode global; use the
+		// cache's own coder instead.
+		return codec.DecodeRFX(cb.Data, cb.Width, cb.Height, c.RFXMode)
+	}
+	return codec.Decompress(cb.CodecID, cb.Data, cb.Width, cb.Height, cb.Bpp)
+}
+
+// entryTooLarge reports whether a cell's geometry is too big to decode. The
+// dimension check comes first so that the product cannot overflow on a 32 bit
+// build.
+func entryTooLarge(width, height int) bool {
+	if width > maxEntryDimension || height > maxEntryDimension {
+		return true
+	}
+	return width*height > maxEntryBytes/4
 }
 
 // Get returns a cache entry, or nil if the slot is empty. The caller must not
@@ -98,6 +164,7 @@ func (c *Cache) Get(cacheID uint32, index uint32) *Entry {
 func (c *Cache) Reset() {
 	c.mu.Lock()
 	c.entries = make(map[cacheKey]*Entry)
+	c.bytes = 0
 	c.mu.Unlock()
 }
 

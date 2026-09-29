@@ -119,6 +119,9 @@ func (s *Screen) drawOne(o *pdu.OrderPdu) image.Rectangle {
 		if cb := o.Secondary.CacheBitmap; cb != nil {
 			s.Cache.Put(cb)
 		}
+		if cg := o.Secondary.CacheGlyphs; cg != nil {
+			s.Glyphs.Put(cg)
+		}
 		// Filling a cache changes nothing on screen.
 		return image.Rectangle{}
 	}
@@ -342,6 +345,13 @@ func (s *Screen) fill(x, y, cx, cy int, colour [4]uint8, clip image.Rectangle) i
 
 // blitBGRA copies a rectangle out of a BGRA buffer onto the screen, clipped to
 // both the order's bounds and the screen edge.
+//
+// The source is checked pixel by pixel, because the caller treats the returned
+// rectangle as the area that changed and a source rectangle can run past its
+// buffer: MEMBLT clamps its source to the cached bitmap, but SCRBLT copies from
+// the screen at an origin the server picks. When the source runs out, only the
+// pixels copied so far have changed, so that is what comes back; the whole
+// destination rectangle would mark never written pixels dirty.
 func (s *Screen) blitBGRA(src []byte, srcStride int, srcX, srcY, cx, cy, dstX, dstY int,
 	clip image.Rectangle) image.Rectangle {
 
@@ -353,20 +363,29 @@ func (s *Screen) blitBGRA(src []byte, srcStride int, srcX, srcY, cx, cy, dstX, d
 	sx := srcX + r.Min.X - dstX
 	sy := srcY + r.Min.Y - dstY
 
+	// The copied pixels, as a bounding box. A row that stops part way through
+	// leaves a notch a rectangle cannot describe, so it is bounded rather than
+	// reported exactly.
+	var written image.Rectangle
 	for row := r.Min.Y; row < r.Max.Y; row++ {
 		so := (sy*srcStride + sx) * 4
 		do := (row*s.width + r.Min.X) * 4
-		for col := r.Min.X; col < r.Max.X; col++ {
-			if so+4 > len(src) || so < 0 {
-				return r
+		col := r.Min.X
+		for ; col < r.Max.X; col++ {
+			if so < 0 || so+4 > len(src) {
+				if col > r.Min.X {
+					written = union(written, image.Rect(r.Min.X, row, col, row+1))
+				}
+				return written
 			}
 			copy(s.pixels[do:do+4], src[so:so+4])
 			so += 4
 			do += 4
 		}
+		written = union(written, image.Rect(r.Min.X, row, r.Max.X, row+1))
 		sy++
 	}
-	return r
+	return written
 }
 
 // polygon fills the shape the points describe, by scanline. The last point of

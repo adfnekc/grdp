@@ -1,4 +1,9 @@
-// rfb.go
+// Package client implements the RDP client, and carries the RFB (VNC) client
+// this fork inherited from upstream alongside it.
+//
+// The VNC client (VncClient) builds and is kept, but it has never been run
+// against a VNC server in this project and has no tests, so it is not a
+// supported path; its clipboard methods are stubs that do nothing.
 package client
 
 import (

@@ -39,7 +39,9 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       through the cache, gradients and text included. It matches the bitmap path to the taskbar
       clock, which is where two runs of the same path differ too. Off by default,
       see below.
-* [x] VNC. The RFB client this fork inherited is kept and still builds.
+* [ ] VNC. The RFB client inherited from upstream is kept and still builds, but
+      it is untested: it has never been run against a VNC server in this project,
+      it has no tests, and its clipboard is not implemented.
 
 Not done, or not finished:
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own

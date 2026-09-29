@@ -157,23 +157,49 @@ func NewClient(t core.Transport) *Client {
 	return c
 }
 
-// SetOrderSupport declares whether the client can draw MEMBLT, the primary order
-// that blits a bitmap out of the cache and onto the screen.
+// SetOrderSupport declares which drawing orders the client can draw.
 //
 // It is off by default, and that is deliberate. MEMBLT is the only way a cached
 // bitmap reaches the screen, so a server that sees it advertised moves to orders
 // entirely, cache fills included, instead of mixing the two paths. A client that
 // advertises it without being able to draw it gets a blank screen rather than a
 // slower one, so this is a switch rather than a default.
-func (c *Client) SetOrderSupport(memblt bool) {
+//
+// Only the orders that are actually drawn are declared. Advertising one this
+// client cannot draw would be worse than not advertising it at all, because the
+// server would then send it and the screen would lose that part. That leaves out
+// LINETO and SAVEBITMAP, which parse and are not drawn, FAST_INDEX, which needs
+// the glyph path, and the nine grid and FAST_GLYPH orders, which are not parsed.
+func (c *Client) SetOrderSupport(enabled bool) {
 	capa, ok := c.clientCapabilities[CAPSTYPE_ORDER].(*OrderCapability)
 	if !ok || capa == nil {
 		return
 	}
-	if memblt {
-		capa.OrderSupport[TS_NEG_MEMBLT_INDEX] = 1
-	} else {
-		capa.OrderSupport[TS_NEG_MEMBLT_INDEX] = 0
+
+	drawn := []Order{
+		TS_NEG_MEMBLT_INDEX, TS_NEG_MEM3BLT_INDEX,
+		TS_NEG_POLYGON_SC_INDEX, TS_NEG_POLYGON_CB_INDEX, TS_NEG_POLYLINE_INDEX,
+		TS_NEG_ELLIPSE_SC_INDEX, TS_NEG_ELLIPSE_CB_INDEX,
+		TS_NEG_GLYPH_INDEX_INDEX,
+		TS_NEG_MULTIDSTBLT_INDEX, TS_NEG_MULTIPATBLT_INDEX,
+		TS_NEG_MULTISCRBLT_INDEX, TS_NEG_MULTIOPAQUERECT_INDEX,
+	}
+	var bit uint8
+	if enabled {
+		bit = 1
+	}
+	for _, idx := range drawn {
+		capa.OrderSupport[idx] = bit
+	}
+
+	// The glyph cache the TEXT2 order draws from is only filled if the server is
+	// told the client has one.
+	if glyphCapa, ok := c.clientCapabilities[CAPSTYPE_GLYPHCACHE].(*GlyphCapability); ok && glyphCapa != nil {
+		if enabled {
+			glyphCapa.SupportLevel = GLYPH_SUPPORT_FULL
+		} else {
+			glyphCapa.SupportLevel = GLYPH_SUPPORT_NONE
+		}
 	}
 }
 
@@ -403,6 +429,10 @@ func (c *Client) recvPDU(s []byte) {
 			return
 		}
 		if p.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {
+			// A deactivate-all is the server starting a new session, so the
+			// orders after it no longer repeat fields from the session before
+			// it. Drop the per connection carry over with it.
+			c.orders.Reset()
 			c.transport.Once("data", c.recvDemandActivePDU)
 		} else if p.ShareCtrlHeader.PDUType == PDUTYPE_DATAPDU {
 			d := p.Message.(*DataPDU)

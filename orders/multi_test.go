@@ -87,8 +87,12 @@ func TestDrawMultiScrBltCopiesPixels(t *testing.T) {
 		X: 1, Y: 0, Cx: 1, Cy: 1, Colour: [4]uint8{0x44, 0x55, 0x66, 0},
 	})})
 
+	// The destination rectangle sits at the order's own origin, so the copy
+	// starts at the source origin the order carries.
 	o := order(&pdu.MultiScrBlt{
 		Opcode:        ropSrcCopy,
+		X:             2,
+		Y:             0,
 		Srcx:          0,
 		Srcy:          0,
 		NumRectangles: 1,
@@ -104,14 +108,52 @@ func TestDrawMultiScrBltCopiesPixels(t *testing.T) {
 	}
 }
 
-// MEM3BLT is a MEMBLT against a third colour table, so it copies from the cache
-// the same way.
+// Each rectangle reads the source at the same translation the order applies as
+// a whole, so a rectangle away from the order's origin does not read the source
+// origin's first pixels. A single source origin per rectangle would copy one
+// source row into every rectangle and smear the shape.
+func TestDrawMultiScrBltMapsEachRectangleToTheSourceRegion(t *testing.T) {
+	s := NewScreen(4, 2)
+	// A source row for the blit to read, one row below the destination.
+	s.Draw([]pdu.OrderPdu{order(&pdu.OpaqueRect{
+		X: 0, Y: 1, Cx: 1, Cy: 1, Colour: [4]uint8{0x11, 0x22, 0x33, 0},
+	})})
+	s.Draw([]pdu.OrderPdu{order(&pdu.OpaqueRect{
+		X: 1, Y: 1, Cx: 1, Cy: 1, Colour: [4]uint8{0x44, 0x55, 0x66, 0},
+	})})
+
+	// The order's destination is the origin and its source is one row down, so
+	// each destination rectangle reads the source directly below it.
+	o := order(&pdu.MultiScrBlt{
+		Opcode:        ropSrcCopy,
+		X:             0,
+		Y:             0,
+		Srcx:          0,
+		Srcy:          1,
+		NumRectangles: 2,
+		Rectangles: []pdu.DeltaRect{
+			{Left: 0, Top: 0, Width: 1, Height: 1},
+			{Left: 1, Top: 0, Width: 1, Height: 1},
+		},
+	})
+	s.DrawMulti(&o, image.Rect(0, 0, 4, 2))
+
+	if got := pixelAt(t, s, 0, 0); !bytes.Equal(got, bgra(0x11, 0x22, 0x33)) {
+		t.Errorf("(0,0) is %v, want the pixel below it", got)
+	}
+	if got := pixelAt(t, s, 1, 0); !bytes.Equal(got, bgra(0x44, 0x55, 0x66)) {
+		t.Errorf("(1,0) is %v, want the pixel below it, not the first source pixel", got)
+	}
+}
+
+// MEM3BLT is a MEMBLT against a third colour table that copies, so SRCCOPY
+// draws from the cache the same way.
 func TestDrawMem3bltDrawsFromCache(t *testing.T) {
 	s := NewScreen(8, 4)
 	src := solid(2, 2, 0x10, 0x20, 0x30)
 	s.Draw([]pdu.OrderPdu{cacheOrder(1, 3, 2, 2, 32, src)})
 
-	o := order(&pdu.Mem3blt{CacheId: 1, CacheIdx: 3, X: 2, Y: 1, Cx: 2, Cy: 2})
+	o := order(&pdu.Mem3blt{CacheId: 1, CacheIdx: 3, X: 2, Y: 1, Cx: 2, Cy: 2, Opcode: ropSrcCopy})
 	dirty := s.DrawMulti(&o, image.Rect(0, 0, 8, 4))
 	if want := image.Rect(2, 1, 4, 3); dirty != want {
 		t.Errorf("dirty area is %v, want %v", dirty, want)
@@ -131,12 +173,34 @@ func TestDrawMem3bltDrawsFromCache(t *testing.T) {
 func TestDrawMem3bltOfEmptySlotDrawsNothing(t *testing.T) {
 	s := NewScreen(4, 4)
 	before := s.Pixels()
-	o := order(&pdu.Mem3blt{X: 0, Y: 0, Cx: 4, Cy: 4})
+	o := order(&pdu.Mem3blt{X: 0, Y: 0, Cx: 4, Cy: 4, Opcode: ropSrcCopy})
 	if dirty := s.DrawMulti(&o, image.Rect(0, 0, 4, 4)); !dirty.Empty() {
 		t.Errorf("dirty area is %v, want empty", dirty)
 	}
 	if !bytes.Equal(before, s.Pixels()) {
 		t.Error("the screen changed")
+	}
+}
+
+// MEM3BLT's bRop is a real raster operation, unlike MEMBLT's colour index. An
+// operation that is not SRCCOPY must be counted rather than drawn as a copy.
+func TestDrawMem3bltUnhandledRopIsCounted(t *testing.T) {
+	s := NewScreen(8, 4)
+	src := solid(2, 2, 0x10, 0x20, 0x30)
+	s.Draw([]pdu.OrderPdu{cacheOrder(1, 3, 2, 2, 32, src)})
+	before := s.Pixels()
+
+	// PATCOPY against a cached bitmap is not a plain copy; drawing it as one
+	// would paint the cached colour where the pattern belongs.
+	o := order(&pdu.Mem3blt{CacheId: 1, CacheIdx: 3, X: 2, Y: 1, Cx: 2, Cy: 2, Opcode: ropPatCopy})
+	if dirty := s.DrawMulti(&o, image.Rect(0, 0, 8, 4)); !dirty.Empty() {
+		t.Errorf("dirty area is %v, want empty", dirty)
+	}
+	if !bytes.Equal(before, s.Pixels()) {
+		t.Error("a MEM3BLT with a ROP other than SRCCOPY was drawn as a copy")
+	}
+	if s.Unsupported()["mem3blt rop 0xf0"] == 0 {
+		t.Errorf("the unhandled ROP was not counted: %v", s.Unsupported())
 	}
 }
 

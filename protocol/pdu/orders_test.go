@@ -382,3 +382,112 @@ func TestAbsurdCacheBitmapLengthIsRefused(t *testing.T) {
 	var pdu FastPathOrdersPDU
 	_ = pdu.Unpack(bytes.NewReader(batch))
 }
+
+// An order whose parser reads the wrong number of bytes does not fail. It shifts
+// the stream, so the next order in the batch is read from the wrong offset and
+// gets nonsense. That is how a missing cbData byte, a missing brush and a colour
+// read one byte too long all presented, and none of them was visible to a test
+// that built the order's struct directly.
+//
+// So this puts a MEMBLT with known values after an order of another type and
+// requires the MEMBLT to arrive intact. Anything the order before it leaves
+// unread, or reads past, shows up as a MEMBLT with the wrong cache or size.
+func TestOrderLengthsDoNotShiftTheNextOrder(t *testing.T) {
+	// The sentinel: cache 3, index 77, 32x16 at (5,6) from (0,0).
+	sentinel := func() []byte {
+		var b bytes.Buffer
+		writeU16 := func(v uint16) { b.Write([]byte{byte(v), byte(v >> 8)}) }
+		b.WriteByte(TS_STANDARD | TS_TYPE_CHANGE)
+		b.WriteByte(ORDER_TYPE_MEMBLT)
+		writeU16(0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0100)
+		b.WriteByte(3) // cacheId
+		b.WriteByte(0) // colour table
+		writeU16(5)    // x
+		writeU16(6)    // y
+		writeU16(32)   // width
+		writeU16(16)   // height
+		writeU16(77)   // cacheIndex
+		return b.Bytes()
+	}
+
+	cases := []struct {
+		name      string
+		orderType uint8
+		body      []byte
+	}{
+		{
+			// fields 1,2,6 and 7: x, y, numPoints, cbData and the point list.
+			name: "polygon sc", orderType: ORDER_TYPE_POLYGON_SC,
+			body: []byte{
+				0x63, // field flags: x, y, numPoints, points. One byte, because
+				// POLYGON_SC carries a single flag byte.
+				0x40, 0x00, // x = 64
+				0x40, 0x00, // y = 64
+				0x01,       // numPoints
+				0x00,       // cbData, which the parser used to skip
+				0x00,       // one point: its zero bit bitmap
+				0x01, 0x01, // the point's deltas
+			},
+		},
+		{
+			// fields 1,2,6,7 again, on the polyline.
+			name: "polyline", orderType: ORDER_TYPE_POLYLINE,
+			body: []byte{
+				0x63, // one flag byte, as above
+				0x40, 0x00,
+				0x40, 0x00,
+				0x01,
+				0x00,       // cbData
+				0x00,       // zero bit bitmap
+				0x01, 0x01, // the point's deltas
+			},
+		},
+		{
+			// fields 1,2,5 then 12 and 13: a polygon in a colour brush, with no
+			// brush of its own, which is the case the parser skipped a field on.
+			name: "polygon cb", orderType: ORDER_TYPE_POLYGON_CB,
+			body: []byte{
+				0x13, 0x18, // field flags: x, y, fore colour, numPoints, points
+				0x40, 0x00,
+				0x40, 0x00,
+				0x00, 0x00, 0x00, // the fore colour, three bytes
+				0x01,       // numPoints
+				0x00,       // cbData
+				0x00,       // zero bit bitmap
+				0x01, 0x01, // the point's deltas
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var b bytes.Buffer
+			b.Write([]byte{0x02, 0x00}) // two orders
+			b.WriteByte(TS_STANDARD | TS_TYPE_CHANGE)
+			b.WriteByte(c.orderType)
+			b.Write(c.body)
+			b.Write(sentinel())
+
+			var pdu FastPathOrdersPDU
+			if err := pdu.Unpack(bytes.NewReader(b.Bytes())); err != nil {
+				t.Fatalf("unpack: %v", err)
+			}
+			if len(pdu.OrderPdus) != 2 {
+				t.Fatalf("parsed %d orders, want 2", len(pdu.OrderPdus))
+			}
+			if pdu.OrderPdus[1].Primary == nil {
+				t.Fatalf("the second order came out as type %d with no primary payload, so the %s order before it consumed the wrong number of bytes",
+					pdu.OrderPdus[1].Type, c.name)
+			}
+			m, ok := pdu.OrderPdus[1].Primary.Data.(*Memblt)
+			if !ok {
+				t.Fatalf("the second order is %T, want a MEMBLT: the %s order before it consumed the wrong number of bytes",
+					pdu.OrderPdus[1].Primary.Data, c.name)
+			}
+			if m.CacheId != 3 || m.CacheIdx != 77 || m.Cx != 32 || m.Cy != 16 || m.X != 5 || m.Y != 6 {
+				t.Errorf("the MEMBLT after the %s order is %+v, so that order consumed the wrong number of bytes",
+					c.name, m)
+			}
+		})
+	}
+}

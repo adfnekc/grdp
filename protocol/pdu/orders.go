@@ -331,7 +331,9 @@ func (o *OrderPdu) processSecondaryOrder(r io.Reader) error {
 		fallthrough
 	case ORDER_TYPE_CACHE_BITMAP_COMPRESSED:
 		compressed := (orderType == ORDER_TYPE_CACHE_BITMAP_COMPRESSED)
-		sec.updateCacheBitmapOrder(r0, compressed, flags)
+		if err := sec.updateCacheBitmapOrder(r0, compressed, flags); err != nil {
+			return fmt.Errorf("cache bitmap order: %w", err)
+		}
 	case ORDER_TYPE_BITMAP_UNCOMPRESSED_V2:
 		fallthrough
 	case ORDER_TYPE_BITMAP_COMPRESSED_V2:
@@ -1046,6 +1048,10 @@ func (d *PolygonSc) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0040 != 0 {
 		// The points that follow are deltas from the order's own position, and
 		// the ones that are zero are flagged in a bitmap rather than written out.
+		// One byte the order calls cbData comes first.
+		if _, err := core.ReadUInt8(r); err != nil {
+			return fmt.Errorf("polygon sc: %w", err)
+		}
 		d.Points = readDeltaPoints(r, int(d.Npoints), Point{d.X, d.Y})
 	}
 
@@ -1109,6 +1115,7 @@ type PolygonCb struct {
 	Fillmode uint8
 	BgColour [4]uint8
 	FgColour [4]uint8
+	Brush    Brush
 	Npoints  uint8
 	Points   []Point
 }
@@ -1141,6 +1148,10 @@ func (d *PolygonCb) Unpack(r io.Reader, present uint32, delta bool) error {
 		b, g, rr, a := updateReadColorRef(r)
 		d.FgColour[0], d.FgColour[1], d.FgColour[2], d.FgColour[3] = b, g, rr, a
 	}
+	// The brush travels in the middle of the field flags, as it does for PATBLT.
+	// Not reading it left the point count and the list shifted by up to five
+	// bytes for any order that carried one.
+	d.Brush.updateBrush(r, present>>6)
 	if present&0x0800 != 0 {
 		d.Npoints, _ = core.ReadUInt8(r)
 	}
@@ -1286,7 +1297,7 @@ func (d *EllipeCb) Unpack(r io.Reader, present uint32, delta bool) error {
 }
 
 /*Secondary*/
-func (s *Secondary) updateCacheBitmapOrder(r io.Reader, compressed bool, flags uint16) {
+func (s *Secondary) updateCacheBitmapOrder(r io.Reader, compressed bool, flags uint16) error {
 	var cb CacheBitmapOrder
 	cb.cacheId, _ = core.ReadUInt8(r)
 	core.ReadUInt8(r)
@@ -1298,12 +1309,23 @@ func (s *Secondary) updateCacheBitmapOrder(r io.Reader, compressed bool, flags u
 	var bitmapComprHdr []byte
 	if compressed {
 		if (flags & NO_BITMAP_COMPRESSION_HDR) == 0 {
+			// The eight header bytes are part of the length the order
+			// declares, so a smaller length describes no bitmap at all.
+			// Subtracting from a uint16 used to wrap it around and ask for
+			// nearly 64 KiB, so refuse the order instead of reading on.
+			if bitmapLength < 8 {
+				return fmt.Errorf("declared length %d is smaller than the 8 byte compression header", bitmapLength)
+			}
 			bitmapComprHdr, _ = core.ReadBytes(8, r)
 			bitmapLength -= 8
 		}
 	}
 	cb.bitmapComprHdr = bitmapComprHdr
-	cb.bitmapDataStream, _ = core.ReadBytes(int(bitmapLength), r)
+	data, err := readChecked(r, int(bitmapLength), maxCacheBitmapBytes)
+	if err != nil {
+		return err
+	}
+	cb.bitmapDataStream = data
 	cb.bitmapLength = bitmapLength
 
 	s.CacheBitmap = &CacheBitmap{
@@ -1315,6 +1337,7 @@ func (s *Secondary) updateCacheBitmapOrder(r io.Reader, compressed bool, flags u
 		Pixels: cachePixels(cb.bitmapDataStream, int(cb.bitmapWidth), int(cb.bitmapHeight),
 			int(cb.bitmapBpp), compressed),
 	}
+	return nil
 }
 
 type CacheBitmapOrder struct {
@@ -1534,7 +1557,12 @@ func (s *Secondary) updateCacheColorTableOrder(r io.Reader, flags uint16) {
 	// One colour per iteration: stepping four at a time and writing four bytes
 	// from each offset ran past the end of the table on the last one.
 	for i := 0; i < int(cb.numberColors) && i < 256; i++ {
-		cb.colorTable[i*4], cb.colorTable[i*4+1], cb.colorTable[i*4+2], cb.colorTable[i*4+3] = updateReadColorRef(r)
+		// A colour table entry is a four byte quad, not one of the three byte
+		// colours an order carries, so it does not go through
+		// updateReadColorRef. Sharing that reader misaligned every entry after
+		// the first once it was corrected to three bytes.
+		b, g, rr, a := updateReadColorRef(r)
+		cb.colorTable[i*4], cb.colorTable[i*4+1], cb.colorTable[i*4+2], cb.colorTable[i*4+3] = b, g, rr, a
 	}
 }
 
@@ -1594,28 +1622,6 @@ type CacheGlyph struct {
 	data      []uint8
 }
 
-func (s *Secondary) updateCacheGlyphOrder(r io.Reader, flags uint16) {
-	var cb CacheGlyphOrder
-
-	cb.cacheId, _ = core.ReadUInt8(r)
-	cb.nglyphs, _ = core.ReadUInt8(r)
-	cb.glyphs = make([]CacheGlyph, 0, cb.nglyphs)
-
-	for i := 0; i < int(cb.nglyphs); i++ {
-		var c CacheGlyph
-		c.character, _ = core.ReadUint16LE(r)
-		c.offset, _ = core.ReadUint16LE(r)
-		c.baseline, _ = core.ReadUint16LE(r)
-		c.width, _ = core.ReadUint16LE(r)
-		c.height, _ = core.ReadUint16LE(r)
-
-		c.datasize = int(c.height*((c.width+7)/8)+3) & ^3
-		c.data, _ = core.ReadBytes(c.datasize, r)
-
-		cb.glyphs = append(cb.glyphs, c)
-	}
-}
-
 type CacheBrushOrder struct {
 	index  uint8
 	bpp    uint8
@@ -1665,10 +1671,8 @@ func (s *Secondary) updateCacheBrushOrder(r io.Reader, flags uint16) {
 				cb.data = data
 			}
 		}
-		if s.CacheBrush != nil {
-			s.CacheBrush.Data = cb.data
-			s.CacheBrush.Hatch = cb.index
-		}
+		s.CacheBrush = &CacheBrush{Index: cb.index, Bpp: cb.bpp, Width: int(cb.cx),
+			Height: int(cb.cy), Style: cb.style, Hatch: cb.index, Data: cb.data}
 	}
 }
 func update_decompress_brush(in []uint8, bpp int) []uint8 {
