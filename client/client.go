@@ -23,16 +23,22 @@ import (
 // become ready after the transport handshake succeeds.
 const DefaultLoginTimeout = 30 * time.Second
 
+// Clipboard directions accepted by the (currently inert) Setting.SetClipboard.
 const (
 	CLIP_OFF = 0
 	CLIP_IN  = 0x1
 	CLIP_OUT = 0x2
 )
 
+// Transport kinds accepted by NewClient: TC_RDP for RDP, TC_VNC for VNC (RFB).
 const (
 	TC_RDP = 0
 	TC_VNC = 1
 )
+
+// Control is the protocol-independent session surface Client delegates to. It
+// is implemented by RdpClient and VncClient; their protocols differ but the
+// input, clipboard and event methods here do not.
 
 type Control interface {
 	Login(host, user, passwd string, width, height int) error
@@ -54,6 +60,12 @@ func init() {
 	glog.SetLogger(logger)
 }
 
+// Client is one session with an RDP or VNC server. It picks a protocol-specific
+// implementation from the type given to NewClient (RdpClient or VncClient) and
+// exposes one API for input, events, the clipboard and the framebuffer.
+//
+// A Client is safe for concurrent use. Build one with NewClient; the zero value
+// is not usable. Nothing is sent until Login is called.
 type Client struct {
 	host    string
 	user    string
@@ -68,6 +80,13 @@ func init() {
 	glog.SetLogger(logger)
 	glog.SetLevel(glog.NONE)
 }
+
+// NewClient returns an unconnected session for host, which must be
+// "address:port". t selects the transport: TC_RDP for RDP, TC_VNC for VNC. A nil
+// s is replaced by NewSetting, so the common call is
+// NewClient(host, user, pass, TC_RDP, nil).
+//
+// No connection is made here. Call Login to connect, and Close when done.
 func NewClient(host, user, passwd string, t int, s *Setting) *Client {
 	if s == nil {
 		s = NewSetting()
@@ -151,32 +170,63 @@ func (c *Client) LoginContext(ctx context.Context) error {
 	}
 }
 
+// KeyUp releases the key whose PC set 1 scancode is sc. A value in
+// 0xE000..0xE0FF is sent as an extended key: the low byte is the scancode and
+// the 0xE0 prefix becomes the extended flag. name is accepted for source
+// compatibility and ignored; the scancode is what reaches the server.
 func (c *Client) KeyUp(sc int, name string) {
 	c.ctl.KeyUp(sc, name)
 }
+
+// KeyDown presses the key whose PC set 1 scancode is sc, with the same extended
+// key handling as KeyUp. name is ignored.
 func (c *Client) KeyDown(sc int, name string) {
 	c.ctl.KeyDown(sc, name)
 }
+
+// MouseMove moves the pointer to (x, y) in screen pixels from the top left.
 func (c *Client) MouseMove(x, y int) {
 	c.ctl.MouseMove(x, y)
 }
+
+// MouseWheel turns the wheel by scroll notches at (x, y); positive is up (away
+// from the user) and the magnitude is clamped to the protocol's 9 bit field.
 func (c *Client) MouseWheel(scroll, x, y int) {
 	c.ctl.MouseWheel(scroll, x, y)
 }
+
+// MouseUp releases button 0 (left), 1 (middle) or 2 (right) at (x, y). Any
+// other value only moves the pointer. The numbering is the sender's, not the
+// protocol's.
 func (c *Client) MouseUp(button, x, y int) {
 	c.ctl.MouseUp(button, x, y)
 }
+
+// MouseDown presses button 0 (left), 1 (middle) or 2 (right) at (x, y), with
+// the same numbering as MouseUp.
 func (c *Client) MouseDown(button, x, y int) {
 	c.ctl.MouseDown(button, x, y)
 }
+
+// Close ends the session and closes the underlying connection. It is safe to
+// call more than once and on a client that never connected, and it is safe to
+// call concurrently with input methods, which become no-ops once the connection
+// is gone.
 func (c *Client) Close() {
 	if c != nil && c.ctl != nil {
 		c.ctl.Close()
 	}
 }
+
+// OnError registers f to be called with a handshake or transport error. Handlers
+// may be registered before Login; they are kept and delivered once the session
+// layers exist.
 func (c *Client) OnError(f func(e error)) {
 	c.ctl.On("error", f)
 }
+
+// OnClose registers f to be called when the connection to the server is gone.
+// Like the other handlers it may be registered before Login.
 func (c *Client) OnClose(f func()) {
 	c.ctl.On("close", f)
 }
@@ -258,12 +308,24 @@ func (c *Client) SetClipboardText(text string) error {
 func (c *Client) RequestClipboardText() error {
 	return c.ctl.RequestClipboardText()
 }
+
+// OnSuccess registers f to be called when the server accepts the credentials,
+// before the session is ready to draw.
 func (c *Client) OnSuccess(f func()) {
 	c.ctl.On("success", f)
 }
+
+// OnReady registers f to be called once the session is negotiated and the
+// server is about to send its first update. It fires before any bitmap or
+// order callback.
 func (c *Client) OnReady(f func()) {
 	c.ctl.On("ready", f)
 }
+
+// OnBitmap registers f to be called with each bitmap update, already expanded
+// and converted to BGRA at 32 bpp where the source was compressed. f may see
+// the same underlying data reused by the next update, so copy anything it keeps.
+// For VNC the Bitmap rectangles carry the VNC pixel format instead.
 func (c *Client) OnBitmap(f func([]Bitmap)) {
 	f1 := func(data interface{}) {
 		bs := make([]Bitmap, 0, 50)
@@ -327,6 +389,12 @@ func (c *Client) OnBitmap(f func([]Bitmap)) {
 	})
 }
 
+// Bitmap is one decoded rectangle of the remote screen.
+//
+// The rectangle is [DestLeft, DestRight) x [DestTop, DestBottom) on the desktop;
+// Width and Height are the size of the source data and are usually equal to the
+// destination size. Data is top-down BGRA (B first) at BitsPerPixel/8 bytes per
+// pixel when IsCompress is false, which is how OnBitmap delivers RDP updates.
 type Bitmap struct {
 	DestLeft     int    `json:"destLeft"`
 	DestTop      int    `json:"destTop"`
@@ -339,16 +407,36 @@ type Bitmap struct {
 	Data         []byte `json:"data"`
 }
 
+// Bpp converts a bit depth to a byte count by dividing by eight: 16 to 2, 32 to
+// 4. It truncates, so 15 bpp gives 1 rather than 2.
 func Bpp(bp uint16) int {
 	return int(bp / 8)
 }
 
+// Setting configures a session. NewSetting returns one with usable defaults;
+// the fields below are only read when Login is called, so they may be changed
+// until then.
 type Setting struct {
-	Width    int
-	Height   int
+	// Width and Height are the desktop size requested from the server, in
+	// pixels. They are sent in the MCS connect sequence and must be positive;
+	// NewSetting uses 1024x768.
+	Width  int
+	Height int
+
+	// Protocol selects the security path: "tls" (the default) or "ssl" for
+	// TLS, "nla", "hybrid" or "credssp" for CredSSP, and "rdp" or "standard"
+	// for Standard RDP Security with no TLS. The empty string means TLS, and an
+	// unrecognised value falls back to TLS with a warning rather than failing.
 	Protocol string
-	Timeout  time.Duration
+
+	// Timeout bounds the whole of Login, from dial to ready. Zero or negative
+	// means DefaultLoginTimeout (30s).
+	Timeout time.Duration
+
+	// LogLevel is applied to the package-global glog logger by NewClient. The
+	// default is glog.INFO; glog.NONE silences the library.
 	LogLevel glog.LEVEL
+
 	// NoFastPathInput forces keyboard/mouse input over the slow path even
 	// when the server advertised fast-path input. Useful for debugging.
 	NoFastPathInput bool
@@ -378,6 +466,8 @@ type Setting struct {
 	EnableOrders bool
 }
 
+// NewSetting returns a Setting with the default desktop size (1024x768), the
+// default login timeout and INFO logging.
 func NewSetting() *Setting {
 	return &Setting{
 		Width:    1024,
@@ -386,9 +476,18 @@ func NewSetting() *Setting {
 		LogLevel: glog.INFO,
 	}
 }
+
+// SetLogLevel pushes LogLevel into the package-global glog logger. NewClient
+// already does this, so it only needs calling if the level is changed after the
+// client is built.
 func (s *Setting) SetLogLevel() {
 	glog.SetLevel(s.LogLevel)
 }
 
+// SetRequestedProtocol is inert: it does nothing. Set Setting.Protocol instead,
+// which is read when Login negotiates the security path.
 func (s *Setting) SetRequestedProtocol(p uint32) {}
-func (s *Setting) SetClipboard(c int)            {}
+
+// SetClipboard is inert: it does nothing. Use Setting.EnableClipboard to open
+// the clipboard channel.
+func (s *Setting) SetClipboard(c int) {}

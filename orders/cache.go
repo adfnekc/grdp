@@ -37,6 +37,7 @@ type cacheKey struct {
 
 // Entry is one bitmap in the cache, already decoded to BGRA.
 type Entry struct {
+	// Width and Height are the entry's size in pixels.
 	Width  int
 	Height int
 	// Pixels are BGRA, top down.

@@ -1,10 +1,11 @@
 // Package client implements the RDP client, and carries the RFB (VNC) client
 // this fork inherited from upstream alongside it.
 //
-// The VNC client (VncClient) builds and is kept, but it has never been run
-// against a VNC server in this project, so it is not a supported path; its
-// clipboard methods are stubs that do nothing. The RFB parse steps it uses are
-// unit tested in protocol/rfb.
+// The VNC client (VncClient) is exercised against a real server by
+// scripts/vnc-dev.sh, which starts TigerVNC's Xtigervnc and runs the live tests
+// in protocol/rfb. Its clipboard is implemented in both directions: text the
+// server cuts arrives as the "clipboard-text" event, and SetClipboardText
+// publishes with ClientCutText.
 package client
 
 import (
@@ -19,6 +20,11 @@ import (
 type VncClient struct {
 	vnc     *rfb.RFB
 	timeout time.Duration
+	// pending holds listeners registered before Login created the connection.
+	// VncClient.On attaches to the rfb.RFB, which does not exist until then, so
+	// a listener registered earlier is held here and attached once it does - the
+	// same thing RdpClient does for the RDP path.
+	pending []pendingEvent
 }
 
 func newVncClient(s *Setting) *VncClient {
@@ -32,8 +38,7 @@ func newVncClient(s *Setting) *VncClient {
 // Login dials the server and returns only once the RFB handshake has completed,
 // the handshake has failed, or the timeout expires. The handshake is event
 // driven, so it is driven to a result the caller can see instead of returning
-// while it is still running. There is no VNC server in this project to exercise
-// it against.
+// while it is still running. scripts/vnc-dev.sh runs this against a real server.
 func (c *VncClient) Login(host, user, pwd string, width, height int) error {
 	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
 	if err != nil {
@@ -41,6 +46,20 @@ func (c *VncClient) Login(host, user, pwd string, width, height int) error {
 	}
 
 	c.vnc = rfb.NewRFB(rfb.NewRFBConn(conn, pwd))
+
+	// The protocol layer emits ServerCutText as "CutText" with its raw bytes;
+	// translate it to the string event the rest of the client already uses for
+	// the clipboard, so Client.OnClipboardText works the same way it does for
+	// RDP.
+	c.vnc.On("CutText", func(data []byte) {
+		c.vnc.Emit("clipboard-text", string(data))
+	})
+
+	// Attach any listeners that were registered before the connection existed.
+	for _, p := range c.pending {
+		c.vnc.On(p.event, p.f)
+	}
+	c.pending = nil
 
 	// Register the listeners before Connect, which starts the handshake, so no
 	// handshake event can arrive before there is a listener for it.
@@ -78,16 +97,32 @@ func (c *VncClient) Login(host, user, pwd string, width, height int) error {
 	}
 }
 
-// SetClipboardText is not implemented for RFB.
-func (c *VncClient) SetClipboardText(string) error { return nil }
+// SetClipboardText publishes text on the server's clipboard. RFB carries it as
+// one ClientCutText message. There is no acknowledgement, so a nil error only
+// means the bytes were written to the socket.
+func (c *VncClient) SetClipboardText(text string) error {
+	if c.vnc == nil {
+		return fmt.Errorf("client: not connected")
+	}
+	c.vnc.SendClientCutText(&rfb.ClientCutText{Message: text})
+	return nil
+}
 
-// RequestClipboardText is not implemented for RFB.
-func (c *VncClient) RequestClipboardText() error { return nil }
+// RequestClipboardText is not supported by RFB and says so. Unlike the RDP
+// clipboard channel, RFB has no client message that asks for the server's cut
+// text: the server sends ServerCutText whenever its clipboard changes, and the
+// only client-to-server message, ClientCutText, publishes rather than requests.
+// Text therefore arrives through OnClipboardText with no request behind it.
+func (c *VncClient) RequestClipboardText() error {
+	return fmt.Errorf("rfb: the protocol has no clipboard request; the server sends cut text when it changes")
+}
 
-// On registers a listener. It is a no-op before Login succeeds, so a caller
-// that lost the connection cannot panic here.
+// On registers a listener. A listener registered before Login is held until
+// there is a connection to attach it to, so a caller that registers before
+// connecting still receives events.
 func (c *VncClient) On(event string, f interface{}) {
 	if c.vnc == nil {
+		c.pending = append(c.pending, pendingEvent{event, f})
 		return
 	}
 	c.vnc.On(event, f)

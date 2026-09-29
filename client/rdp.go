@@ -21,6 +21,9 @@ import (
 	"github.com/adfnekc/grdp/protocol/x224"
 )
 
+// RdpClient is the RDP implementation of Control. NewClient builds one (stored
+// unexported) for TC_RDP; callers interact with it through Client, which forwards
+// input, events and the clipboard to it.
 type RdpClient struct {
 	tpkt     *tpkt.TPKT
 	x224     *x224.X224
@@ -96,6 +99,16 @@ func split(user string) (domain string, uname string) {
 	}
 	return
 }
+
+// Login dials host, builds the protocol stack (TPKT/X.224/MCS/security/PDU) and
+// starts the connection. user may be "user", "DOMAIN\user" or "domain/user":
+// the domain is split off and sent separately.
+//
+// Login returns once the connection has been established, which is before the
+// session is usable. The session becomes ready asynchronously and is reported on
+// the "ready" event; errors and closure arrive on "error" and "close". Use
+// Client.Login or Client.LoginContext to connect and wait for readiness in one
+// call.
 func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
 	if err != nil {
@@ -210,6 +223,17 @@ func (c *RdpClient) RequestClipboardText() error {
 	return c.clip.RequestClipboardText()
 }
 
+// On registers a handler for an event. It may be called before Login, in which
+// case handlers are buffered and replayed once the layer that produces them
+// exists; this ordering is what lets a caller register handlers and then call
+// Login without losing the "ready" event.
+//
+// Event names: "ready", "success", "error" (error), "close", "bitmap"
+// ([]pdu.BitmapData), "surface-bits" (*pdu.SurfaceBitsCommand), "orders"
+// ([]pdu.OrderPdu), "orders-frame" (image.Rectangle), "pointer"
+// (*pdu.PointerDataPDU), "pointer-position" (*pdu.FastPathPointerPositionPDU),
+// "clipboard-text" (string), and "gfx-frame"/"gfx-reset" from the graphics
+// channel. f must have the type the event carries or the receive will panic.
 func (c *RdpClient) On(event string, f interface{}) {
 	if c == nil {
 		return
@@ -243,6 +267,8 @@ func scancodeFlags(sc int) (uint16, uint16) {
 	return uint16(sc), 0
 }
 
+// KeyUp releases sc. See Client.KeyUp for the scancode and extended key
+// conventions. name is ignored.
 func (c *RdpClient) KeyUp(sc int, name string) {
 	if c == nil || c.pdu == nil {
 		return
@@ -253,6 +279,9 @@ func (c *RdpClient) KeyUp(sc int, name string) {
 	p.KeyboardFlags = flags | pdu.KBDFLAGS_RELEASE
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
+
+// KeyDown presses sc. See Client.KeyUp for the scancode and extended key
+// conventions. name is ignored.
 func (c *RdpClient) KeyDown(sc int, name string) {
 	if c == nil || c.pdu == nil {
 		return
@@ -264,6 +293,7 @@ func (c *RdpClient) KeyDown(sc int, name string) {
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 
+// MouseMove moves the pointer to (x, y) in screen pixels from the top left.
 func (c *RdpClient) MouseMove(x, y int) {
 	if c == nil || c.pdu == nil {
 		return
@@ -275,6 +305,7 @@ func (c *RdpClient) MouseMove(x, y int) {
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
+// MouseWheel turns the wheel by scroll notches at (x, y); positive is up.
 func (c *RdpClient) MouseWheel(scroll, x, y int) {
 	if c == nil || c.pdu == nil {
 		return
@@ -292,6 +323,7 @@ func (c *RdpClient) MouseWheel(scroll, x, y int) {
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
+// MouseUp releases button 0 (left), 1 (middle) or 2 (right) at (x, y).
 func (c *RdpClient) MouseUp(button int, x, y int) {
 	if c == nil || c.pdu == nil {
 		return
@@ -314,6 +346,8 @@ func (c *RdpClient) MouseUp(button int, x, y int) {
 	p.YPos = uint16(y)
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
+
+// MouseDown presses button 0 (left), 1 (middle) or 2 (right) at (x, y).
 func (c *RdpClient) MouseDown(button int, x, y int) {
 	if c == nil || c.pdu == nil {
 		return
@@ -337,6 +371,9 @@ func (c *RdpClient) MouseDown(button int, x, y int) {
 	p.YPos = uint16(y)
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
+
+// Close closes the underlying transport. It is safe on a partially built client
+// and more than once; input methods become no-ops afterwards.
 func (c *RdpClient) Close() {
 	if c != nil && c.tpkt != nil {
 		c.tpkt.Close()

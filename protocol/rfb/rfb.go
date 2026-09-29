@@ -1,9 +1,9 @@
 // Package rfb is the RFB (VNC) client protocol this fork inherited from
 // upstream.
 //
-// It builds and is kept. Its parse steps have unit tests that drive them over a
-// scripted net.Pipe server, but nothing in this project has run the client
-// against a real VNC server, so it is not a supported path.
+// Its parse steps have unit tests that drive them over a scripted net.Pipe
+// server, and scripts/vnc-dev.sh runs the client against a real server
+// (TigerVNC's Xtigervnc) through the live tests in this package.
 package rfb
 
 import (
@@ -14,8 +14,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-
-	"github.com/lunixbochs/struc"
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
@@ -44,12 +42,22 @@ type RFBConn struct {
 	NbRect   uint16
 	BitRect  *BitRect
 	Password string
+
+	// version is the protocol version this connection runs. It is decided from
+	// the server's banner when the banner is replied to, and the security
+	// handshake branches on it: 3.3 has no security type list, and 3.7 sends no
+	// SecurityResult when the chosen type is None.
+	version string
+	// rectIndex is where the next rectangle of the current FramebufferUpdate is
+	// stored. NbRect counts how many are still to arrive, so it cannot also be
+	// the write position without storing the rectangles in reverse order.
+	rectIndex int
 }
 
-// The RFB client in this package is inherited from the upstream fork. Nothing
-// in this project has run it against a VNC server. The tests here drive the
-// parse steps over a scripted net.Pipe server, which covers the wire formats
-// but not a live session; the clipboard is not implemented.
+// The RFB client in this package is inherited from the upstream fork. Its
+// parse steps are driven over a scripted net.Pipe server by the tests here, and
+// the live tests at the end of this file run it against a TigerVNC server that
+// scripts/vnc-dev.sh starts. The clipboard is implemented in both directions.
 
 // maxRectBytes bounds a framebuffer rectangle, and maxCutTextBytes bounds a
 // server cut text. Both lengths come off the wire and are checked before they
@@ -59,6 +67,9 @@ const (
 	maxCutTextBytes    = 16 << 20
 	maxServerNameBytes = 1 << 20
 	maxSecurityTypes   = 1024
+	// maxSecurityReasonBytes bounds the text a server sends when it refuses to
+	// offer any security type. Its length is on the wire before the text is.
+	maxSecurityReasonBytes = 1 << 20
 )
 
 func NewRFBConn(s net.Conn, passwd string) *RFBConn {
@@ -99,26 +110,83 @@ func (fc *RFBConn) recvProtocolVersion(s []byte, err error) {
 		fc.Emit("error", err)
 		return
 	}
-	fc.Emit("data", version)
 
-	if version == RFB003003 {
-		fc.Emit("error", fmt.Errorf("%s", "Not Support RFB003003"))
+	// The version this connection runs is the one the server announced when it
+	// is one this client knows, and 3.8 otherwise. RFB.recvProtocolVersion
+	// writes the same value back, so server and client agree on the flow below.
+	fc.version = negotiateVersion(version)
+	fc.Emit("data", fc.version)
+
+	if fc.version == RFB003003 {
+		// 3.3 has no security type list: the server sends one 32 bit type.
+		core.StartReadBytes(4, fc, fc.recvSecurity3_3)
 		return
-		//core.StartReadBytes(4, fc, fc.recvSecurityServer)
-	} else {
-		core.StartReadBytes(1, fc, fc.checkSecurityList)
+	}
+	core.StartReadBytes(1, fc, fc.checkSecurityList)
+}
+
+// negotiateVersion maps the server's banner to the version this client runs. A
+// banner it does not recognise is answered with 3.8, the newest version it
+// implements.
+func negotiateVersion(banner string) string {
+	switch banner {
+	case RFB003003, RFB003007, RFB003008:
+		return banner
+	default:
+		return RFB003008
 	}
 }
 func (fc *RFBConn) checkSecurityList(s []byte, err error) {
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
 	result, _ := core.ReadUInt8(r)
-	glog.Debug("RFBConn recvSecurityList", result, err)
+	glog.Debug("RFBConn checkSecurityList", result, err)
 
+	if result == 0 {
+		// The server cannot offer a security type. It follows the zero count
+		// with a reason: a 32 bit length and that many bytes of text. Read the
+		// length under a bound before it sizes a read.
+		core.StartReadBytes(4, fc, fc.recvSecurityFailure)
+		return
+	}
 	core.StartReadBytes(int(result), fc, fc.recvSecurityList)
 }
-func (fc *RFBConn) recvSecurityList(s []byte, err error) {
+
+// recvSecurityFailure reads the length of the reason a server sends when it
+// offers no security type, then reads that many bytes and reports them.
+func (fc *RFBConn) recvSecurityFailure(s []byte, err error) {
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
-	secLevel := SEC_VNC
+	size, err := core.ReadUInt32BE(r)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	if size > maxSecurityReasonBytes {
+		fc.Emit("error", fmt.Errorf("rfb: security failure reason of %d bytes is out of range", size))
+		return
+	}
+	core.StartReadBytes(int(size), fc, func(b []byte, err error) {
+		if err != nil {
+			fc.Emit("error", err)
+			return
+		}
+		fc.Emit("error", fmt.Errorf("rfb: server refused the connection: %s", bytes.TrimSpace(b)))
+	})
+}
+func (fc *RFBConn) recvSecurityList(s []byte, err error) {
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	r := bytes.NewReader(s)
+	secLevel := SEC_INVALID
 	for r.Len() > 0 {
 		result, _ := core.ReadUInt8(r)
 		if result == SEC_NONE || result == SEC_VNC {
@@ -128,15 +196,55 @@ func (fc *RFBConn) recvSecurityList(s []byte, err error) {
 	}
 
 	glog.Debug("RFBConn recvSecurityList", secLevel, err)
+	if secLevel == SEC_INVALID {
+		// Choosing a type the server did not offer would be read as a different
+		// type on its side; report that none of the offered ones is supported.
+		fc.Emit("error", errors.New("rfb: server offered no supported security type"))
+		return
+	}
 	buff := &bytes.Buffer{}
 	core.WriteUInt8(secLevel, buff)
 	fc.Write(buff.Bytes())
 	if secLevel == SEC_VNC {
 		core.StartReadBytes(16, fc, fc.recvVNCChallenge)
-	} else {
-		core.StartReadBytes(4, fc, fc.recvSecurityResult)
+		return
 	}
+	// Security type None. 3.7 does not send a SecurityResult for it, only 3.8
+	// and later do, so 3.7 goes straight to the shared flag and ServerInit.
+	// Confirmed against TigerVNC 1.13.1: a 3.7 client that waits for a
+	// SecurityResult after None times out.
+	if fc.version == RFB003007 {
+		fc.startServerInit()
+		return
+	}
+	core.StartReadBytes(4, fc, fc.recvSecurityResult)
+}
 
+// recvSecurity3_3 reads the single 32 bit security type a 3.3 server sends, in
+// place of the list later versions use. A 3.3 server sends no SecurityResult
+// when the type is None; the client is expected to send the shared flag and
+// read ServerInit directly. Confirmed against TigerVNC 1.13.1, which answers a
+// 3.3 client with security type 1 (None) and then ServerInit.
+func (fc *RFBConn) recvSecurity3_3(s []byte, err error) {
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	r := bytes.NewReader(s)
+	secType, err := core.ReadUInt32BE(r)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	glog.Debug("RFBConn recvSecurity3_3", secType)
+	switch uint8(secType) {
+	case SEC_NONE:
+		fc.startServerInit()
+	case SEC_VNC:
+		core.StartReadBytes(16, fc, fc.recvVNCChallenge)
+	default:
+		fc.Emit("error", fmt.Errorf("rfb: server offered unsupported 3.3 security type %d", secType))
+	}
 }
 
 func fixDesKeyByte(val byte) byte {
@@ -189,15 +297,29 @@ func (fc *RFBConn) recvVNCChallenge(s []byte, err error) {
 	core.StartReadBytes(4, fc, fc.recvSecurityResult)
 }
 func (fc *RFBConn) recvSecurityResult(s []byte, err error) {
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
 	result, _ := core.ReadUInt32BE(r)
 	glog.Debug("RFBConn recvSecurityResult", result, err)
-	if result == 1 {
-		fc.Emit("error", fmt.Errorf("%s", "Authentification failed"))
+	if result != 0 {
+		// Any non-zero result is a failure. 3.8 follows it with a reason
+		// string; the read chain stops here either way, so there is no need to
+		// consume it.
+		fc.Emit("error", fmt.Errorf("rfb: authentication failed (security result %d)", result))
 		return
 	}
+	fc.startServerInit()
+}
+
+// startServerInit sends the shared-desktop flag and reads ServerInit. It is the
+// join point of every path that accepts the connection: the security step has
+// ended and the protocol is waiting for the flag.
+func (fc *RFBConn) startServerInit() {
 	buff := &bytes.Buffer{}
-	core.WriteUInt8(0, buff) //share
+	core.WriteUInt8(0, buff) // share the desktop
 	fc.Write(buff.Bytes())
 	core.StartReadBytes(20, fc, fc.recvServerInit)
 }
@@ -210,10 +332,22 @@ type ServerInit struct {
 
 func (fc *RFBConn) recvServerInit(s []byte, err error) {
 	glog.Debug("RFBConn recvServerInit", len(s), err)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
 	si := &ServerInit{}
 	si.Width, err = core.ReadUint16BE(r)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	si.Height, err = core.ReadUint16BE(r)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	si.PixelFormat = ReadPixelFormat(r)
 	glog.Infof("serverInit:%+v, %+v", si, si.PixelFormat)
 	fc.s = si
@@ -221,15 +355,29 @@ func (fc *RFBConn) recvServerInit(s []byte, err error) {
 	core.StartReadBytes(4, fc, fc.checkServerName)
 }
 func (fc *RFBConn) checkServerName(s []byte, err error) {
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
 	result, _ := core.ReadUInt32BE(r)
-	glog.Debug("RFBConn recvSecurityList", result, err)
+	glog.Debug("RFBConn recvServerName", result, err)
 
 	core.StartReadBytes(int(result), fc, fc.recvServerName)
 }
 func (fc *RFBConn) recvServerName(s []byte, err error) {
 	glog.Debug("RFBConn recvServerName", string(s), err)
-	//fc.sendPixelFormat()
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	// Ask for the pixel format this client reads before anything is drawn. A
+	// rectangle's byte count is width*height*bytes-per-pixel of the active
+	// format, so a server whose default is 16 bpp would otherwise be decoded as
+	// though it were 32. The server accepts SetPixelFormat unconditionally, so
+	// the requested format becomes the active one and is what BitRect reports.
+	fc.sendPixelFormat()
+	fc.BitRect.Pf = NewPixelFormat()
 	fc.sendSetEncoding()
 	fc.sendFramebufferUpdateRequest(0, 0, 0, fc.s.Width, fc.s.Height)
 
@@ -240,15 +388,33 @@ func (fc *RFBConn) recvServerName(s []byte, err error) {
 func (fc *RFBConn) sendPixelFormat() {
 	glog.Debug("sendPixelFormat")
 	buff := &bytes.Buffer{}
-	core.WriteUInt8(0, buff)
-	core.WriteUInt16BE(0, buff)
-	core.WriteUInt8(0, buff)
-	err := struc.Pack(buff, NewPixelFormat())
-	if err != nil {
-		fc.Emit("error", err)
-		return
-	}
+	core.WriteUInt8(0, buff)    // SetPixelFormat
+	core.WriteUInt8(0, buff)    // padding
+	core.WriteUInt16BE(0, buff) // padding
+	writePixelFormat(buff, NewPixelFormat())
 	fc.Write(buff.Bytes())
+}
+
+// writePixelFormat writes a PIXEL_FORMAT structure in the same order
+// ReadPixelFormat reads it: the three colour maxima are big-endian, which is how
+// the bytes of a ServerInit from TigerVNC 1.13.1 carry red-max (00 ff). The struc
+// tags on PixelFormat say little-endian, and the value they used to be paired
+// with was 0xff00; those two mistakes cancel because 0xff00 little-endian is the
+// same two bytes as 0x00ff big-endian. Writing the fields directly means the
+// bytes no longer depend on that coincidence holding.
+func writePixelFormat(w io.Writer, pf *PixelFormat) {
+	core.WriteUInt8(pf.BitsPerPixel, w)
+	core.WriteUInt8(pf.Depth, w)
+	core.WriteUInt8(pf.BigEndianFlag, w)
+	core.WriteUInt8(pf.TrueColorFlag, w)
+	core.WriteUInt16BE(pf.RedMax, w)
+	core.WriteUInt16BE(pf.GreenMax, w)
+	core.WriteUInt16BE(pf.BlueMax, w)
+	core.WriteUInt8(pf.RedShift, w)
+	core.WriteUInt8(pf.GreenShift, w)
+	core.WriteUInt8(pf.BlueShift, w)
+	core.WriteUInt16BE(pf.Padding, w)
+	core.WriteUInt8(pf.Padding1, w)
 }
 func (fc *RFBConn) sendSetEncoding() {
 	glog.Debug("sendSetEncoding")
@@ -330,6 +496,7 @@ func (fc *RFBConn) recvFrameBufferUpdateHeader(s []byte, err error) {
 	core.ReadUInt8(r)
 	NbRect, _ := core.ReadUint16BE(r)
 	fc.NbRect = NbRect
+	fc.rectIndex = 0
 	fc.BitRect.Rects = make([]Rectangles, fc.NbRect)
 	if NbRect == 0 {
 		// No rectangles follow, so the update is complete. Re-arm so the next
@@ -351,17 +518,35 @@ type Rectangle struct {
 
 func (fc *RFBConn) recvRectHeader(s []byte, err error) {
 	glog.Debug("RFBConn recvRectHeader", hex.EncodeToString(s), err)
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
 	r := bytes.NewReader(s)
-	x, err := core.ReadUint16BE(r)
-	y, err := core.ReadUint16BE(r)
-	w, err := core.ReadUint16BE(r)
-	h, err := core.ReadUint16BE(r)
-	e, err := core.ReadUInt32BE(r)
+	x, _ := core.ReadUint16BE(r)
+	y, _ := core.ReadUint16BE(r)
+	w, _ := core.ReadUint16BE(r)
+	h, _ := core.ReadUint16BE(r)
+	e, _ := core.ReadUInt32BE(r)
 	rect := &Rectangle{x, y, w, h, e}
 
-	fc.BitRect.Rects[fc.NbRect-1].Rect = rect
+	fc.BitRect.Rects[fc.rectIndex].Rect = rect
 
-	size := int(rect.Width) * int(rect.Height) * 4
+	// The body length depends on the encoding, and this client advertises Raw
+	// only. A length guessed for a different encoding would misread the rest of
+	// the update, so anything but Raw is reported rather than read.
+	if rect.Encoding != 0 {
+		glog.Errorf("rfb: unsupported rectangle encoding %d", rect.Encoding)
+		fc.Emit("error", fmt.Errorf("rfb: unsupported rectangle encoding %d", rect.Encoding))
+		return
+	}
+	bytesPerPixel := 4
+	if fc.BitRect.Pf != nil {
+		if n := int(fc.BitRect.Pf.BitsPerPixel) / 8; n > 0 {
+			bytesPerPixel = n
+		}
+	}
+	size := int(rect.Width) * int(rect.Height) * bytesPerPixel
 	if size < 0 || size > maxRectBytes {
 		glog.Errorf("rfb: rectangle %dx%d is out of range", rect.Width, rect.Height)
 		fc.Emit("error", fmt.Errorf("rfb: rectangle %dx%d is out of range", rect.Width, rect.Height))
@@ -372,7 +557,12 @@ func (fc *RFBConn) recvRectHeader(s []byte, err error) {
 }
 func (fc *RFBConn) recvRectBody(s []byte, err error) {
 	glog.Debug("RFBConn recvRectBody", hex.EncodeToString(s), err)
-	fc.BitRect.Rects[fc.NbRect-1].Data = s
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	fc.BitRect.Rects[fc.rectIndex].Data = s
+	fc.rectIndex++
 	fc.NbRect--
 	glog.Info("fc.NbRect:", fc.NbRect)
 	if fc.NbRect == 0 {
@@ -453,9 +643,15 @@ func ReadPixelFormat(r io.Reader) *PixelFormat {
 
 	return p
 }
+
+// NewPixelFormat is the format the client asks for with SetPixelFormat: 32 bits
+// per pixel, 8 bits per colour. A colour maximum is the largest value the field
+// holds, so with an 8 bit channel it is 0xff. The previous value, 0xff00, packed
+// with the little-endian struc tag to the same two bytes on the wire, so it
+// worked; it is written as 0xff here because that is what the field means.
 func NewPixelFormat() *PixelFormat {
 	return &PixelFormat{
-		32, 24, 0, 1, 65280, 65280, 65280, 16, 8, 0, 0, 0,
+		32, 24, 0, 1, 255, 255, 255, 16, 8, 0, 0, 0,
 	}
 }
 
@@ -490,9 +686,10 @@ func (fb *RFB) Connect() error {
 }
 
 func (fb *RFB) recvProtocolVersion(version string) {
-	if version != RFB003003 && version != RFB003007 && version != RFB003008 {
-		version = RFB003008
-	}
+	// The event carries the version RFBConn negotiated from the server's
+	// banner, so writing it back agrees with the flow RFBConn now runs. Record
+	// it on the RFB too, so a caller can see what was agreed.
+	fb.Version = version
 	glog.Infof("version:%s", version)
 	b := &bytes.Buffer{}
 	b.WriteString(version)

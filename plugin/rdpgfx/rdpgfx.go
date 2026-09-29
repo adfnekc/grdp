@@ -69,19 +69,24 @@ const (
 )
 
 // Capability versions. 8.0 and 8.1 are the ones a decoder of RemoteFX and raw
-// bitmaps can honestly claim; the 10.x versions advertise AVC support.
+// bitmaps can honestly claim; a 10.0 set is added only when a caller installs a
+// decoder that can decode AVC444.
 //
 // 0x00080105 rather than 0x00080100: the low byte is part of the version, not
 // padding. See MS-RDPEGFX 2.2.3.2.
 const (
 	CapsVersion8  = 0x00080004
 	CapsVersion81 = 0x00080105
+	// CapsVersion10 is the first capability version whose flags control AVC444:
+	// a server offers it only when the client advertises a 10.0 or later set
+	// and does not set RDPGFX_CAPS_FLAG_AVC_DISABLED in it (MS-RDPEGFX 2.2.3.3).
+	CapsVersion10 = 0x000A0002
 )
 
 // Capability flags (MS-RDPEGFX 2.2.3.1).
 //
-// Only THINCLIENT is set. It asks for the RemoteFX codec rather than the
-// RemoteFX Progressive codec, which this client cannot decode, and caps the
+// Only THINCLIENT is set by default. It asks for the RemoteFX codec rather than
+// the RemoteFX Progressive codec, which this client cannot decode, and caps the
 // bitmap cache at 16 MB, which costs nothing here because cache import offers
 // are declined anyway.
 //
@@ -89,13 +94,40 @@ const (
 // RDPGFX_CAPS_FLAG_AVC_DISABLED only exists from version 10 onwards, and the
 // way to keep H.264 out of a version 8.1 negotiation is to not set
 // RDPGFX_CAPS_FLAG_AVC420_ENABLED (0x00000010).
-const capsFlagThinClient = 0x00000001
+const (
+	capsFlagThinClient    = 0x00000001
+	capsFlagAVC420Enabled = 0x00000010
+)
 
 const (
 	headerSize            = 8
 	capsetBase            = 8
 	queueDepthUnavailable = 0x00000000
 )
+
+// AVCDecoder is an H.264 decoder for the EGFX AVC surface codecs. Servers send
+// AVC420 (RDPGFX_CODECID_AVC420) and AVC444 (AVC444 or AVC444v2) surface data
+// when the client advertises them; a client that has a decoder implements this
+// and installs it with SetDecoder, and one that has none leaves it unset and
+// keeps declining those codecs. This package deliberately ships no H.264
+// decoder of its own: parsing the AVC messages is pure framing (codec.ParseAVC420
+// and codec.ParseAVC444), while turning the bitstream into pixels is the
+// caller's job.
+type AVCDecoder interface {
+	// SupportsAVCCodec reports whether the decoder can decode codecID, one of
+	// codecAVC420, codecAVC444 or codecAVC444v2. The client advertises exactly
+	// the codecs this reports true for, so a decoder that handles only one
+	// variant does not offer the other.
+	SupportsAVCCodec(codecID uint16) bool
+
+	// DecodeAVC turns one parsed access unit into BGRA pixels for a width x
+	// height surface. codecID is the RDPGFX codec id the unit came from, which
+	// tells AVC444 (0x0E) from AVC444v2 (0x0F). The returned slice must hold at
+	// least width*height*4 bytes, top down, 4 bytes per pixel; the client copies
+	// only the access unit's region rectangles out of it, matching the regions
+	// the server marked as changed.
+	DecodeAVC(codecID uint16, au *codec.AVCAccessUnit, width, height int) ([]byte, error)
+}
 
 // maxScaledDimension bounds the target width and height a scaled placement may
 // carry. They are uint32 on the wire, unlike a surface's own uint16 size, so
@@ -248,6 +280,11 @@ type GfxClient struct {
 	// is shared between messages, so this has to live for the whole channel and
 	// be fed every message in order.
 	zgfx *codec.ZGFX
+
+	// avc is the caller supplied H.264 decoder, or nil when there is none. A
+	// nil decoder means the AVC420 and AVC444 codecs are neither advertised nor
+	// decoded, which is the default.
+	avc AVCDecoder
 }
 
 // NewGfxClient creates an RDPGFX handler.
@@ -262,6 +299,20 @@ func NewGfxClient() *GfxClient {
 // SetSender installs the callback used to write to the dynamic virtual
 // channel. It must be called before the channel is opened.
 func (c *GfxClient) SetSender(f func(channelID uint32, data []byte) error) { c.send = f }
+
+// SetDecoder installs the H.264 decoder used for the AVC420 and AVC444 surface
+// codecs. It has to be called before the channel is opened, because the codecs
+// the decoder supports are advertised in the capability PDU. Never calling it,
+// or passing nil, leaves the AVC codecs unadvertised and refused, exactly as a
+// client with no H.264 decoder should behave.
+func (c *GfxClient) SetDecoder(d AVCDecoder) { c.avc = d }
+
+// avcSupported reports whether the installed decoder claims codecID. It is
+// false when no decoder is installed, so without one every AVC codec stays
+// unadvertised and unsupported.
+func (c *GfxClient) avcSupported(codecID uint16) bool {
+	return c.avc != nil && c.avc.SupportsAVCCodec(codecID)
+}
 
 // dumpZGFX records every payload received on the graphics channel, in arrival
 // order, when GRDP_DUMP_ZGFX names a file. It exists because the decompressor is
@@ -591,6 +642,13 @@ func (c *GfxClient) processWireToSurface1(body []byte) error {
 		return fmt.Errorf("wire to surface 1: empty destination %dx%d", width, height)
 	}
 
+	// The AVC codecs are H.264 and need a decoder the caller supplies. With no
+	// decoder installed they are refused with the same error as any other codec
+	// this client cannot decode.
+	if codecID == codecAVC420 || codecID == codecAVC444 || codecID == codecAVC444v2 {
+		return c.wireAVCToSurface(s, codecID, payload)
+	}
+
 	pixels, err := decodeGfx(codecID, payload, width, height, pixelFormat)
 	if err != nil {
 		return err
@@ -603,6 +661,74 @@ func (c *GfxClient) processWireToSurface1(body []byte) error {
 	// The surface contents changed; a frame event will follow.
 	_ = image.Rect(left, top, right, bottom)
 	return nil
+}
+
+// wireAVCToSurface parses an AVC420 or AVC444 access unit, hands it to the
+// caller's decoder and copies the regions it names into the surface. The
+// decoder returns a whole surface image, but only the access unit's region
+// rectangles are copied: those are the areas the server marked as changed, and
+// FreeRDP's decoder writes the same rectangles straight into the surface
+// buffer.
+func (c *GfxClient) wireAVCToSurface(s *Surface, codecID uint16, data []byte) error {
+	if c.avc == nil {
+		return fmt.Errorf("unsupported RDPGFX codec 0x%04x", codecID)
+	}
+
+	var (
+		au  *codec.AVCAccessUnit
+		err error
+	)
+	switch codecID {
+	case codecAVC420:
+		au, err = codec.ParseAVC420(data)
+	case codecAVC444, codecAVC444v2:
+		au, err = codec.ParseAVC444(data)
+	}
+	if err != nil {
+		return fmt.Errorf("wire to surface 1: codec 0x%04x: %w", codecID, err)
+	}
+
+	pixels, err := c.avc.DecodeAVC(codecID, au, s.Width, s.Height)
+	if err != nil {
+		return fmt.Errorf("wire to surface 1: codec 0x%04x: %w", codecID, err)
+	}
+	if len(pixels) < s.Width*s.Height*4 {
+		return fmt.Errorf("wire to surface 1: codec 0x%04x: decoder returned %d bytes, need %d",
+			codecID, len(pixels), s.Width*s.Height*4)
+	}
+
+	s.mu.Lock()
+	for _, stream := range au.Streams {
+		blitRegions(s.pixels, s.Width, s.Height, pixels, s.Width, stream.Regions)
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// blitRegions copies rectangles of a full-surface BGRA image into a surface,
+// clipping to its bounds. Unlike blit the source is the whole surface image,
+// so its row stride is srcW pixels rather than the rectangle's width.
+func blitRegions(dst []byte, dstW, dstH int, src []byte, srcW int, regions []codec.RegionRect) {
+	for _, r := range regions {
+		left, top := int(r.Left), int(r.Top)
+		right, bottom := int(r.Right), int(r.Bottom)
+		if right > dstW {
+			right = dstW
+		}
+		if bottom > dstH {
+			bottom = dstH
+		}
+		for y := top; y < bottom; y++ {
+			for x := left; x < right; x++ {
+				si := (y*srcW + x) * 4
+				if si+4 > len(src) {
+					return
+				}
+				di := (y*dstW + x) * 4
+				copy(dst[di:di+4], src[si:si+4])
+			}
+		}
+	}
 }
 
 // decodeGfx maps an RDPGFX codec id onto the bitmap codec package.
@@ -827,23 +953,45 @@ func blit(dst []byte, dstW, dstH, x, y, width, height int, src []byte) {
 	}
 }
 
-// sendCapsAdvertise tells the server which capability versions we support.
-// Only the non AVC versions are offered, because the AVC codecs need an H.264
-// decoder that this library does not have.
+// sendCapsAdvertise tells the server which capability versions and codecs we
+// support. The 8.0 and 8.1 sets are always offered; AVC420 is added to the 8.1
+// set and a 10.0 set is added when a decoder that can decode the corresponding
+// codec is installed. With no decoder set, nothing advertises H.264, which is
+// how a client without an H.264 decoder keeps the server from sending it.
 func (c *GfxClient) sendCapsAdvertise() error {
-	versions := []uint32{CapsVersion8, CapsVersion81}
+	type capset struct {
+		version uint32
+		flags   uint32
+	}
+
+	flags81 := uint32(capsFlagThinClient)
+	if c.avcSupported(codecAVC420) {
+		flags81 |= capsFlagAVC420Enabled
+	}
+	sets := []capset{
+		{CapsVersion8, capsFlagThinClient},
+		{CapsVersion81, flags81},
+	}
+	// AVC444 has no flag of its own: a server sends it only once the client
+	// advertises a 10.0 or later set without AVC_DISABLED. THINCLIENT is kept
+	// on that set too, so the server still prefers RemoteFX over the
+	// Progressive variant this client cannot decode.
+	if c.avcSupported(codecAVC444) || c.avcSupported(codecAVC444v2) {
+		sets = append(sets, capset{CapsVersion10, capsFlagThinClient})
+	}
+
 	length := headerSize + 2
-	for range versions {
+	for range sets {
 		length += capsetBase + 4
 	}
 
 	out := make([]byte, 0, length)
 	out = appendHeader(out, cmdCapsAdvertise, 0, uint32(length))
-	out = append(out, byte(len(versions)), byte(len(versions)>>8))
-	for _, v := range versions {
-		out = appendU32(out, v)                  // version
-		out = appendU32(out, 4)                  // length of the flags that follow
-		out = appendU32(out, capsFlagThinClient) // flags
+	out = append(out, byte(len(sets)), byte(len(sets)>>8))
+	for _, s := range sets {
+		out = appendU32(out, s.version) // version
+		out = appendU32(out, 4)         // length of the flags that follow
+		out = appendU32(out, s.flags)   // flags
 	}
 	return c.write(out)
 }
