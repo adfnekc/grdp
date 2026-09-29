@@ -353,3 +353,34 @@ reading of the wire, and this project has now been caught by that three times.
 The order fuzzer covers the parse path now. It runs 1.4 million executions in
 ninety seconds without stalling; before these fixes it panicked after thirty-five
 thousand.
+
+## A fix that looks done is not the same as done
+
+The second review was asked one question, on the grounds that a fix which is wrong
+is worse than the bug: did the previous round's fixes actually fix anything. Two
+of them had not.
+
+The polygon point list still lacked its one byte cbData field. The fix had been
+written once and applied to the polyline and to the colour brush polygon, and
+missed the third parser, because the three read similarly and the edit matched two
+of them. The glyph cache was never filled: the parser set it, nothing consumed it,
+DrawText2 drew from an empty cache, and every TEXT2 order was a silent no-op. That
+wiring had been written and then lost when another agent rewrote the file it lived
+in.
+
+Neither was visible to the tests, and both had passed a build, a vet, a race run
+and 263 tests. The tests build their orders as structs and call the drawing
+functions, so a parser that reads the wrong number of bytes never enters the
+picture. That is the same shape as the three earlier traps in this document, and
+it is worth stating plainly: an order that misreads the stream does not fail, it
+makes the next order in the batch nonsense, and nothing that skips the parser can
+see it.
+
+There is now a test per order type that puts a MEMBLT with known values after it
+and requires the MEMBLT to arrive intact. It found the field flag width of
+POLYGON_SC while it was being written, which is the behaviour wanted from it.
+
+The other half of the lesson is about editing. Two of the fixes here were lost by
+a later edit to the same file by a different writer, with no conflict and no test
+failure to notice it. Where several people or agents touch one file, the result
+has to be re-read afterwards rather than assumed.
