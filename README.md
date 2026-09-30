@@ -24,7 +24,13 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       is a stronger check than "it connects".
 * [x] Licensing exchange
 * [x] Bitmap updates, RLE, 24 and 32 bpp
-* [x] Pointer position and pointer shape updates
+* [x] Pointer position, and pointer shapes decoded into a cursor: the AND and
+      XOR masks are applied, the 20 slot cache the capability set advertises is
+      implemented so a cached shape resolves instead of vanishing, system
+      cursors are reported as such, and a gateway gets RGBA with alpha from
+      OnCursor. Verified against xrdp, which sends two colour cursors and whose
+      shapes come back with the hotspots a real cursor has (arrow at 0,0, I beam
+      at 4,8) rather than garbage.
 * [x] Keyboard and mouse input, including modifier keys
 * [x] Clipboard, text, both directions
 * [x] NSCodec and RemoteFX (RFX) bitmap codecs, checked byte for byte against

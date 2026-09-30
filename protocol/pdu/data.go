@@ -1095,6 +1095,24 @@ type PointerDataPDU struct {
 	Height      uint16
 	Data        []byte // XOR mask, bottom-up BGRA
 	Mask        []byte // AND mask, 1bpp
+
+	// SystemType is the systemPointerType of a TS_PTRMSGTYPE_SYSTEM update: a
+	// built in cursor such as the arrow or the hourglass. It is zero for the
+	// other message types, and SYSPTR_NULL is itself a meaningful zero, so the
+	// message type is what says whether it applies.
+	SystemType uint32
+
+	// XorBpp is the bytes per pixel of Data, which is how a caller knows
+	// whether this is a 24bpp or a 32bpp colour pointer. It is one for a
+	// monochrome pointer, whose Data is then one bit per pixel rather than one
+	// byte.
+	XorBpp int
+
+	// LengthAndMask and LengthXorMask are the sizes the server declared for the
+	// two masks. They are checked against the sizes the width and height imply
+	// rather than used to read, since they come after the data they describe.
+	LengthAndMask uint16
+	LengthXorMask uint16
 }
 
 func (*PointerDataPDU) Type2() uint8 { return PDUTYPE2_POINTER }
@@ -1112,7 +1130,12 @@ func (d *PointerDataPDU) Unpack(r io.Reader) error {
 		d.YPos, err = core.ReadUint16LE(r)
 		return err
 	case TS_PTRMSGTYPE_SYSTEM:
-		_, err = core.ReadUint16LE(r) // pad2octets
+		// systemPointerType is four bytes. Reading two here, as a pad, is
+		// how this was written before: it took the low half of the value as
+		// padding and never saw the type, so no caller could tell an arrow
+		// from an hourglass, and the two bytes that were left belonged to
+		// whoever read the stream next.
+		d.SystemType, err = core.ReadUInt32LE(r)
 		return err
 	case TS_PTRMSGTYPE_CACHED:
 		d.CacheIndex, err = core.ReadUint16LE(r)
@@ -1120,8 +1143,64 @@ func (d *PointerDataPDU) Unpack(r io.Reader) error {
 	case TS_PTRMSGTYPE_COLOR:
 		return d.unpackShape(r, 3)
 	case TS_PTRMSGTYPE_POINTER:
-		return d.unpackShape(r, 4)
+		// TS_POINTERATTRIBUTE is the two colour shape: a bit depth and then a
+		// bitmap with a header of its own. Reading it as a colour shape,
+		// which is what this did before, took the bitmap header for pixels
+		// and left the reader in the middle of the next field.
+		return d.unpackMonochromePointer(r)
 	}
+	return nil
+}
+
+// unpackMonochromePointer reads a TS_POINTERATTRIBUTE, the classic two colour
+// shape: a bit depth, a one bit per pixel bitmap of the colour, and an AND mask.
+//
+// The bitmap is stepped over using its own declared length, which is what keeps
+// the stream framed, but the rows are indexed at the size a pointer's mask uses
+// rather than at the bitmap's, because those are not always the same: a DIB is
+// aligned to four bytes and a pointer mask to two. The declared length is what
+// decides how far to advance either way.
+func (d *PointerDataPDU) unpackMonochromePointer(r io.Reader) error {
+	// xorBpp is on the wire but is always one for this shape, and the masks
+	// are sized from the width instead, so it is read and discarded only to
+	// stay in step.
+	if _, err := core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	var head [18]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil {
+		return err
+	}
+	bitmapLength := int(head[16]) | int(head[17])<<8
+	if bitmapLength < 0 || bitmapLength > maxPointerMaskBytes {
+		return fmt.Errorf("pdu: monochrome pointer bitmap of %d bytes is out of range", bitmapLength)
+	}
+	xor, err := core.ReadBytes(bitmapLength, r)
+	if err != nil {
+		return err
+	}
+	w, h := int(d.Width), int(d.Height)
+	andRow := AndMaskRowBytes(w)
+	if andRow <= 0 || andRow*h > maxPointerMaskBytes {
+		return fmt.Errorf("pdu: monochrome pointer %dx%d is out of range", w, h)
+	}
+	if d.Mask, err = core.ReadBytes(andRow*h, r); err != nil {
+		return err
+	}
+	if d.LengthAndMask, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if d.LengthXorMask, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	// The colour mask is one bit per pixel here, so its rows are the same size
+	// as the AND mask's, which is not what a bytes-per-pixel row size would be.
+	xorRow := PointerXorRowBytes(w, 1)
+	if xorRow <= 0 || xorRow*h > len(xor) {
+		return fmt.Errorf("pdu: monochrome pointer %dx%d holds %d colour bytes, needs %d", w, h, len(xor), xorRow*h)
+	}
+	d.XorBpp = 1
+	d.Data = xor[:xorRow*h]
 	return nil
 }
 
@@ -1147,12 +1226,36 @@ func (d *PointerDataPDU) unpackShape(r io.Reader, bpp int) error {
 	if d.Width == 0 || d.Height == 0 {
 		return nil
 	}
-	n := int(d.Width) * int(d.Height)
-	if d.Data, err = core.ReadBytes(n*bpp, r); err != nil {
+	w, h := int(d.Width), int(d.Height)
+	// The scan lines are padded, so the mask is not width*height*bpp. See
+	// XorMaskRowBytes for why that matters.
+	xorRow, andRow := XorMaskRowBytes(w, bpp), AndMaskRowBytes(w)
+	if xorRow <= 0 || andRow <= 0 || xorRow*h > maxPointerMaskBytes || andRow*h > maxPointerMaskBytes {
+		return fmt.Errorf("pdu: pointer %dx%d at %d bytes per pixel is too large to keep", w, h, bpp)
+	}
+	d.XorBpp = bpp
+	if d.Data, err = core.ReadBytes(xorRow*h, r); err != nil {
 		return err
 	}
-	d.Mask, err = core.ReadBytes((n+7)/8, r)
-	return err
+	if d.Mask, err = core.ReadBytes(andRow*h, r); err != nil {
+		return err
+	}
+	// The two lengths follow the masks, and the masks are sized from the
+	// width and height rather than from them, so they can only be used as a
+	// check. They are checked anyway, because a disagreement means one of the
+	// two is wrong and reading on regardless would carry the mistake into
+	// whatever follows.
+	if d.LengthAndMask, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if d.LengthXorMask, err = core.ReadUint16LE(r); err != nil {
+		return err
+	}
+	if int(d.LengthAndMask) != andRow*h || int(d.LengthXorMask) != xorRow*h {
+		return fmt.Errorf("pdu: pointer %dx%d at %d bytes per pixel declares %d/%d mask bytes, expected %d/%d",
+			w, h, bpp, d.LengthAndMask, d.LengthXorMask, andRow*h, xorRow*h)
+	}
+	return nil
 }
 
 // FastPathPointerPositionPDU is FASTPATH_UPDATETYPE_PTR_POSITION
@@ -1232,11 +1335,21 @@ func (f *FastPathPointerPDU) unpackShape(r io.Reader, bpp int) error {
 	if f.Width == 0 || f.Height == 0 || bpp <= 0 {
 		return nil
 	}
-	n := int(f.Width) * int(f.Height)
-	if f.Data, err = core.ReadBytes(n*bpp, r); err != nil {
+	w, h := int(f.Width), int(f.Height)
+	// The scan lines are padded, the same as on the slow path. This sized the
+	// mask as width*height*bpp, which reads every row after the first from one
+	// byte too early whenever the width is odd.
+	xorRow, andRow := XorMaskRowBytes(w, bpp), AndMaskRowBytes(w)
+	if xorRow <= 0 || andRow <= 0 || xorRow*h > maxPointerMaskBytes || andRow*h > maxPointerMaskBytes {
+		return fmt.Errorf("pdu: fast-path pointer %dx%d at %d bytes per pixel is too large to keep", w, h, bpp)
+	}
+	// Bpp is the bit depth, and a colour update never states it, so it is
+	// filled in here for the caller to read either way.
+	f.Bpp = uint16(bpp * 8)
+	if f.Data, err = core.ReadBytes(xorRow*h, r); err != nil {
 		return err
 	}
-	f.Mask, err = core.ReadBytes((n+7)/8, r)
+	f.Mask, err = core.ReadBytes(andRow*h, r)
 	return err
 }
 

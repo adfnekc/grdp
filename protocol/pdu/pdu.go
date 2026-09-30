@@ -522,6 +522,17 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 					c.Emit("frame-marker", cmd.Marker)
 				}
 			}
+		} else if updateCode == FASTPATH_UPDATETYPE_PTR_NULL || updateCode == FASTPATH_UPDATETYPE_PTR_DEFAULT {
+			// These carry no payload at all: the update code is the whole
+			// message. They are the two system pointers the specification
+			// names, and nothing used to be emitted for either, so a client
+			// was never told that the server had asked for no pointer or for
+			// the default arrow.
+			if updateCode == FASTPATH_UPDATETYPE_PTR_NULL {
+				c.Emit("pointer-system", uint32(SYSPTR_NULL))
+			} else {
+				c.Emit("pointer-system", uint32(SYSPTR_DEFAULT))
+			}
 		} else if updateCode == FASTPATH_UPDATETYPE_COLOR || updateCode == FASTPATH_UPDATETYPE_CACHED ||
 			updateCode == FASTPATH_UPDATETYPE_POINTER || updateCode == FASTPATH_UPDATETYPE_LARGE_POINTER {
 			c.Emit("pointer-shape", p.Data.(*FastPathPointerPDU))

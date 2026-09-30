@@ -205,6 +205,7 @@ func main() {
 	unicodeHold := flag.Duration("unicode-hold", 0, "how long to hold each Unicode key down (0 sends the release immediately)")
 	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
 	pointerLog := flag.Bool("pointer", false, "log server-side pointer updates (position and shape)")
+	cursorLog := flag.Bool("cursor", false, "log decoded pointer shapes and system cursors")
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
 	ordersFlag := flag.Bool("orders", false, "advertise and render drawing orders (bitmap cache and MEMBLT)")
 	clip := flag.Bool("clipboard", false, "enable the clipboard channel and log text received")
@@ -379,6 +380,31 @@ func main() {
 	c.OnClipboardText(func(text string) {
 		fmt.Printf("clipboard text (%d bytes): %q\n", len(text), text)
 	})
+
+	if *cursorLog {
+		c.OnCursor(func(cur *client.Cursor) {
+			if cur.System {
+				fmt.Printf("cursor: system type %#08x hidden=%v\n", cur.SystemType, cur.Hidden())
+				return
+			}
+			// Count the pixels that will actually be drawn, which is what
+			// says whether the masks were applied rather than a shape that
+			// decoded into nothing.
+			opaque := 0
+			for y := 0; y < cur.Height; y++ {
+				for x := 0; x < cur.Width; x++ {
+					if cur.Image.Pix[y*cur.Image.Stride+x*4+3] != 0 {
+						opaque++
+					}
+				}
+			}
+			fmt.Printf("cursor: %dx%d hotspot=(%d,%d) opaque=%d/%d\n",
+				cur.Width, cur.Height, cur.Hotspot.X, cur.Hotspot.Y, opaque, cur.Width*cur.Height)
+		})
+		cursorPositions := 0
+		c.OnCursorPos(func(x, y int) { cursorPositions++ })
+		defer func() { fmt.Printf("cursor: %d position updates\n", cursorPositions) }()
+	}
 
 	c.OnBitmap(func(bs []client.Bitmap) {
 		bitmapCount += len(bs)

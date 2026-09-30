@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"net"
@@ -49,6 +50,18 @@ type RdpClient struct {
 	// with orders enabled, because the bitmap path composites into the same
 	// buffer.
 	fb *Framebuffer
+
+	// pointers holds the cursor shapes the server has sent and expects us to
+	// keep, one slot per entry in the capability set's ColorPointerCacheSize.
+	pointers *pdu.PointerCache
+
+	// lastShape and lastSystem remember what the pointer is currently showing,
+	// so that an update that changes nothing does not produce a callback. A
+	// gateway re-encoding a cursor image on every one of these would spend its
+	// time on a cursor that has not moved.
+	lastShape  *pdu.PointerShape
+	lastSystem uint32
+	haveSystem bool
 }
 
 type pendingEvent struct {
@@ -160,8 +173,23 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	// pixels outlive the callback that delivered them.
 	c.screen = orders.NewScreen(width, height)
 	c.fb = &Framebuffer{screen: c.screen}
+	// The slot count has to be the one the capability set advertised, because
+	// that is the contract the server indexes against. Change one and the
+	// other is wrong.
+	c.pointers = pdu.NewPointerCache(int(c.pdu.ColorPointerCacheSize()))
 	// The ready event carries no argument, unlike the ones that follow.
 	c.pdu.Once("ready", func() {
+		c.pdu.On("pointer", c.onPointerPDU)
+		c.pdu.On("pointer-shape", c.onFastPathPointer)
+		c.pdu.On("pointer-system", func(d interface{}) {
+			c.onSystemPointer(d.(uint32))
+		})
+		// The fast-path position update and the slow-path one mean the same
+		// thing, so a caller registers once and hears about either.
+		c.pdu.On("pointer-position", func(d interface{}) {
+			p := d.(*pdu.FastPathPointerPositionPDU)
+			c.pdu.Emit("cursor-pos", image.Point{X: int(p.XPos), Y: int(p.YPos)})
+		})
 		c.pdu.On("bitmap", func(d interface{}) {
 			c.composite(bitmapsFromEvent(d, TC_RDP))
 		})
@@ -419,6 +447,152 @@ func (c *RdpClient) framebuffer() *Framebuffer {
 		return nil
 	}
 	return c.fb
+}
+
+// onPointerPDU handles a slow-path pointer update: the pointer moved, its shape
+// changed, the server named a system cursor, or the server referred back to a
+// shape it already sent.
+//
+// The last of those is the reason a cache exists. The client advertises how many
+// shapes it will keep, and after that the server stops resending them, so a
+// client with nowhere to put them loses the pointer rather than drawing it
+// wrongly: nothing arrives to draw.
+func (c *RdpClient) onPointerPDU(d interface{}) {
+	p, ok := d.(*pdu.PointerDataPDU)
+	if !ok || p == nil {
+		return
+	}
+	switch p.MessageType {
+	case pdu.TS_PTRMSGTYPE_POSITION:
+		c.pdu.Emit("cursor-pos", image.Point{X: int(p.XPos), Y: int(p.YPos)})
+	case pdu.TS_PTRMSGTYPE_SYSTEM:
+		c.onSystemPointer(p.SystemType)
+	case pdu.TS_PTRMSGTYPE_COLOR:
+		c.onPointerShape(&pdu.PointerShape{
+			Width:    int(p.Width),
+			Height:   int(p.Height),
+			HotspotX: int(p.HotSpotX),
+			HotspotY: int(p.HotSpotY),
+			XorBpp:   p.XorBpp,
+			Xor:      p.Data,
+			And:      p.Mask,
+		}, p.CacheIndex)
+	case pdu.TS_PTRMSGTYPE_CACHED:
+		c.onCachedPointer(p.CacheIndex)
+	case pdu.TS_PTRMSGTYPE_POINTER:
+		c.onPointerShape(&pdu.PointerShape{
+			Width:    int(p.Width),
+			Height:   int(p.Height),
+			HotspotX: int(p.HotSpotX),
+			HotspotY: int(p.HotSpotY),
+			XorBpp:   p.XorBpp,
+			Xor:      p.Data,
+			And:      p.Mask,
+		}, p.CacheIndex)
+	}
+}
+
+// onFastPathPointer handles the fast-path pointer shape updates. They are the
+// same four cases as the slow path, and modern Windows sends its cursors here
+// rather than there: a 32bpp cursor arrives as FASTPATH_UPDATETYPE_LARGE_POINTER,
+// which is the only one of them that states its bit depth.
+func (c *RdpClient) onFastPathPointer(d interface{}) {
+	f, ok := d.(*pdu.FastPathPointerPDU)
+	if !ok || f == nil {
+		return
+	}
+	switch f.UpdateType {
+	case pdu.FASTPATH_UPDATETYPE_CACHED:
+		c.onCachedPointer(f.CacheIndex)
+	case pdu.FASTPATH_UPDATETYPE_POINTER:
+		c.onPointerShape(&pdu.PointerShape{
+			Width:    int(f.Width),
+			Height:   int(f.Height),
+			HotspotX: int(f.HotSpotX),
+			HotspotY: int(f.HotSpotY),
+			XorBpp:   int(f.Bpp) / 8,
+			Xor:      f.Data,
+			And:      f.Mask,
+		}, f.CacheIndex)
+	default:
+		c.onPointerShape(&pdu.PointerShape{
+			Width:    int(f.Width),
+			Height:   int(f.Height),
+			HotspotX: int(f.HotSpotX),
+			HotspotY: int(f.HotSpotY),
+			XorBpp:   int(f.Bpp) / 8,
+			Xor:      f.Data,
+			And:      f.Mask,
+		}, f.CacheIndex)
+	}
+}
+
+// onPointerShape records a shape and reports it, unless it is the shape already
+// on screen.
+func (c *RdpClient) onPointerShape(s *pdu.PointerShape, cacheIndex uint16) {
+	if s == nil || s.Width <= 0 || s.Height <= 0 {
+		return
+	}
+	if err := c.pointers.Put(cacheIndex, s); err != nil {
+		glog.Warnf("client: %v", err)
+	}
+	if sameShape(c.lastShape, s) {
+		return
+	}
+	cur := cursorFromShape(s)
+	if cur == nil {
+		glog.Warnf("client: pointer shape %dx%d at %d bytes per pixel could not be decoded",
+			s.Width, s.Height, s.XorBpp)
+		return
+	}
+	c.lastShape, c.haveSystem = s.Fill(), false
+	c.pdu.Emit("cursor", cur)
+}
+
+// onCachedPointer reports a shape the server already sent. A reference to a slot
+// that was never filled is reported rather than passed over: an empty cursor
+// here is the pointer vanishing, and it would vanish silently.
+func (c *RdpClient) onCachedPointer(index uint16) {
+	s, ok := c.pointers.Get(index)
+	if !ok {
+		glog.Warnf("client: cached pointer %d was never sent by the server", index)
+		return
+	}
+	if sameShape(c.lastShape, s) {
+		return
+	}
+	cur := cursorFromShape(s)
+	if cur == nil {
+		glog.Warnf("client: cached pointer %d could not be decoded", index)
+		return
+	}
+	c.lastShape, c.haveSystem = s.Fill(), false
+	c.pdu.Emit("cursor", cur)
+}
+
+// onSystemPointer reports one of the server's built in cursors. It is reported
+// rather than skipped so that a caller can substitute its own artwork; a caller
+// that is never told keeps drawing the last shape it had, which is how a pointer
+// ends up looking like an hourglass forever.
+func (c *RdpClient) onSystemPointer(t uint32) {
+	if c.haveSystem && c.lastSystem == t {
+		return
+	}
+	c.haveSystem, c.lastSystem = true, t
+	c.lastShape = nil
+	c.pdu.Emit("cursor", &Cursor{System: true, SystemType: t})
+}
+
+// sameShape compares two pointer shapes by what they draw, so that a shape the
+// server sends twice is only reported once.
+func sameShape(a, b *pdu.PointerShape) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Width == b.Width && a.Height == b.Height &&
+		a.HotspotX == b.HotspotX && a.HotspotY == b.HotspotY &&
+		a.XorBpp == b.XorBpp &&
+		bytes.Equal(a.Xor, b.Xor) && bytes.Equal(a.And, b.And)
 }
 
 // composite copies decoded bitmaps into the framebuffer and reports the merged
