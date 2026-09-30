@@ -14,6 +14,7 @@ import (
 
 	"github.com/adfnekc/grdp/codec"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/plugin/cliprdr"
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
 	"github.com/adfnekc/grdp/protocol/rfb"
@@ -46,6 +47,8 @@ type Control interface {
 	Login(host, user, passwd string, width, height int) error
 	KeyUp(sc int, name string)
 	KeyDown(sc int, name string)
+	UnicodeKeyDown(r rune)
+	UnicodeKeyUp(r rune)
 	MouseMove(x, y int)
 	MouseWheel(scroll, x, y int)
 	MouseUp(button int, x, y int)
@@ -251,9 +254,49 @@ func (c *Client) OnPointer(f func(p *pdu.PointerDataPDU)) {
 	})
 }
 
-// Screen returns the framebuffer that drawing orders are rendered into, or nil
-// when Setting.EnableOrders was not set. It holds BGRA pixels, top down, and is
-// safe to read while the connection is running.
+// Framebuffer returns the buffer every decoded frame lands in, or nil before
+// Login has been called.
+//
+// It is the one place to read pixels from, whichever way the server is drawing:
+// bitmap updates, drawing orders and graphics channel surface bits all composite
+// into it. Use OnFrame to learn what changed rather than assuming the whole
+// buffer did.
+//
+// This is the RDP path. The VNC client does not composite into a framebuffer,
+// because an RFB server chooses the pixel format per connection and the buffer
+// here is defined as BGRA; a VNC session therefore returns nil and has to be
+// driven from OnBitmap instead.
+func (c *Client) Framebuffer() *Framebuffer {
+	if r, ok := c.ctl.(*RdpClient); ok {
+		return r.framebuffer()
+	}
+	return nil
+}
+
+// OnFrame registers f to be called once per batch of updates, after every
+// rectangle in the batch has been composited, with the areas that changed.
+//
+// The rectangles have already been merged and clipped to Framebuffer().Bounds(),
+// so f can encode exactly those regions without checking them. Neighbouring and
+// overlapping rectangles arrive as one, and when the merged area covers most of
+// the frame it arrives as the whole frame. The slice is only valid for the
+// duration of the call.
+//
+// f runs on the goroutine that decodes the session's data, so anything that can
+// block belongs on another one. The pixels it reads from Framebuffer().Pix()
+// stay as they are until the next call.
+func (c *Client) OnFrame(f func(dirty []image.Rectangle)) {
+	c.ctl.On("frame", func(data interface{}) {
+		f(data.([]image.Rectangle))
+	})
+}
+
+// Screen returns the raw framebuffer that drawing orders are rendered into, or
+// nil when Setting.EnableOrders was not set.
+//
+// Deprecated: use Framebuffer, which exists whether or not orders are enabled
+// and is the only supported way to read pixels. This remains for callers that
+// need the orders-specific machinery (the caches and Unsupported counts).
 func (c *Client) Screen() *orders.Screen {
 	if r, ok := c.ctl.(*RdpClient); ok {
 		return r.screen
@@ -262,7 +305,10 @@ func (c *Client) Screen() *orders.Screen {
 }
 
 // OnOrdersFrame reports that a batch of drawing orders changed the screen,
-// giving the area that changed. The pixels are in Client.Screen.
+// giving the area that changed, merged into a single rectangle.
+//
+// Deprecated: use OnFrame, which reports every drawing path and does not have to
+// merge a batch into one rectangle to fit the signature.
 func (c *Client) OnOrdersFrame(f func(dirty image.Rectangle)) {
 	c.ctl.On("orders-frame", func(data interface{}) {
 		f(data.(image.Rectangle))
@@ -286,6 +332,24 @@ func (c *Client) OnSurfaceReset(f func(width, height int)) {
 		v := data.(rdpgfx.Reset)
 		f(v.Width, v.Height)
 	})
+}
+
+// Files returns the clipboard's file transfer surface, or nil when the
+// clipboard channel is not enabled or the session is not RDP.
+//
+// It is how the application supplies the files it shares (SetFileProvider) and
+// receives the files the server offers (OnRemoteFiles, ReadRemoteFile,
+// ClearRemoteFiles). A file transfer is not text: the protocol hands the
+// application a manifest and then asks it for ranges of bytes, so the
+// application decides where the bytes come from and go, and the library never
+// touches a path the remote end named. Nothing file shaped is advertised on the
+// clipboard until a provider is set, because a format the client cannot produce
+// data for leaves the pasting side waiting.
+func (c *Client) Files() *cliprdr.CliprdrClient {
+	if r, ok := c.ctl.(*RdpClient); ok {
+		return r.clip
+	}
+	return nil
 }
 
 // OnClipboardText reports text the server has put on the clipboard. It only
@@ -324,70 +388,89 @@ func (c *Client) OnReady(f func()) {
 	c.ctl.On("ready", f)
 }
 
+// bitmapsFromEvent converts a bitmap update event into the public Bitmap shape,
+// decompressing each RDP rectangle's stream on the way. It is shared by OnBitmap
+// and by the framebuffer composite, so that the two cannot disagree about what a
+// bitmap update contains.
+func bitmapsFromEvent(data interface{}, tc int) []Bitmap {
+	bs := make([]Bitmap, 0, 50)
+	if tc == TC_VNC {
+		br := data.(*rfb.BitRect)
+		for _, v := range br.Rects {
+			b := Bitmap{int(v.Rect.X), int(v.Rect.Y), int(v.Rect.X + v.Rect.Width), int(v.Rect.Y + v.Rect.Height),
+				int(v.Rect.Width), int(v.Rect.Height),
+				Bpp(uint16(br.Pf.BitsPerPixel)), false, v.Data}
+			bs = append(bs, b)
+		}
+		return bs
+	}
+	for _, v := range data.([]pdu.BitmapData) {
+		IsCompress := v.IsCompress()
+		stream := v.BitmapDataStream
+		if IsCompress {
+			stream = bitmapDecompress(&v)
+			IsCompress = false
+		}
+
+		b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
+			int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), IsCompress, stream}
+		bs = append(bs, b)
+	}
+	return bs
+}
+
+// surfaceBitmaps converts a surface bits command, whose codec may be NSCodec or
+// RemoteFX, into the same Bitmap shape so that consumers only ever see one
+// representation. It returns nil when the command cannot be decoded, having
+// logged why.
+func surfaceBitmaps(cmd *pdu.SurfaceBitsCommand) []Bitmap {
+	b := cmd.Bitmap
+	w, h := int(b.Width), int(b.Height)
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	pixels, err := codec.Decompress(b.CodecID, b.BitmapData, w, h, int(b.Bpp))
+	if err != nil {
+		glog.Error("surface bits: ", err)
+		return nil
+	}
+	bpp := int(b.Bpp) / 8
+	if b.CodecID != codec.CodecIDNone {
+		// Every bitmap codec in use here decodes to 32bpp BGRA.
+		bpp = 4
+	}
+	return []Bitmap{{
+		DestLeft:     int(cmd.DestLeft),
+		DestTop:      int(cmd.DestTop),
+		DestRight:    int(cmd.DestRight),
+		DestBottom:   int(cmd.DestBottom),
+		Width:        w,
+		Height:       h,
+		BitsPerPixel: bpp,
+		Data:         pixels,
+	}}
+}
+
 // OnBitmap registers f to be called with each bitmap update, already expanded
 // and converted to BGRA at 32 bpp where the source was compressed. f may see
 // the same underlying data reused by the next update, so copy anything it keeps.
 // For VNC the Bitmap rectangles carry the VNC pixel format instead.
+//
+// Deprecated: use OnFrame and Framebuffer, whose pixels survive the callback.
+// This remains for callers that want the raw update, and it is still what an RFB
+// session has to use.
 func (c *Client) OnBitmap(f func([]Bitmap)) {
-	f1 := func(data interface{}) {
-		bs := make([]Bitmap, 0, 50)
-		if c.tc == TC_VNC {
-			br := data.(*rfb.BitRect)
-			for _, v := range br.Rects {
-				b := Bitmap{int(v.Rect.X), int(v.Rect.Y), int(v.Rect.X + v.Rect.Width), int(v.Rect.Y + v.Rect.Height),
-					int(v.Rect.Width), int(v.Rect.Height),
-					Bpp(uint16(br.Pf.BitsPerPixel)), false, v.Data}
-				bs = append(bs, b)
-			}
-		} else {
-			for _, v := range data.([]pdu.BitmapData) {
-				IsCompress := v.IsCompress()
-				stream := v.BitmapDataStream
-				if IsCompress {
-					stream = bitmapDecompress(&v)
-					IsCompress = false
-				}
-
-				b := Bitmap{int(v.DestLeft), int(v.DestTop), int(v.DestRight), int(v.DestBottom),
-					int(v.Width), int(v.Height), Bpp(v.BitsPerPixel), IsCompress, stream}
-				bs = append(bs, b)
-			}
-		}
-		f(bs)
-	}
-
-	c.ctl.On("bitmap", f1)
+	c.ctl.On("bitmap", func(data interface{}) {
+		f(bitmapsFromEvent(data, c.tc))
+	})
 
 	// Surface bits commands carry extended bitmap data whose codecID selects
 	// a bitmap codec (NSCodec, RemoteFX). Decode them into the same Bitmap
 	// shape so consumers only deal with one representation.
 	c.ctl.On("surface-bits", func(data interface{}) {
-		cmd := data.(*pdu.SurfaceBitsCommand)
-		b := cmd.Bitmap
-		w, h := int(b.Width), int(b.Height)
-		if w <= 0 || h <= 0 {
-			return
+		if bs := surfaceBitmaps(data.(*pdu.SurfaceBitsCommand)); bs != nil {
+			f(bs)
 		}
-		pixels, err := codec.Decompress(b.CodecID, b.BitmapData, w, h, int(b.Bpp))
-		if err != nil {
-			glog.Error("surface bits: ", err)
-			return
-		}
-		bpp := int(b.Bpp) / 8
-		if b.CodecID != codec.CodecIDNone {
-			// Every bitmap codec in use here decodes to 32bpp BGRA.
-			bpp = 4
-		}
-		f([]Bitmap{{
-			DestLeft:     int(cmd.DestLeft),
-			DestTop:      int(cmd.DestTop),
-			DestRight:    int(cmd.DestRight),
-			DestBottom:   int(cmd.DestBottom),
-			Width:        w,
-			Height:       h,
-			BitsPerPixel: bpp,
-			Data:         pixels,
-		}})
 	})
 }
 

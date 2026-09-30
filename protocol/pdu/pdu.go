@@ -589,7 +589,17 @@ func (c *Client) sendFastPathInput(msgType uint16, events []InputEventsInterface
 			buff.WriteByte(flags | (eventCode << 5))
 			buff.WriteByte(byte(code & 0xFF))
 		case *UnicodeKeyEvent:
-			buff.WriteByte(eventCode << 5)
+			// The fast path has no separate keyboardFlags field: the release
+			// flag is the release bit of the event header, the same bit the
+			// scancode case sets above. Without it every event is a key press
+			// and the server never sees the key come up, so nothing is typed:
+			// the header was being written as eventCode<<5 alone, which drops
+			// the flag on the floor.
+			var flags byte
+			if ev.KeyboardFlags&KBDFLAGS_RELEASE != 0 {
+				flags |= FASTPATH_INPUT_KBDFLAGS_RELEASE
+			}
+			buff.WriteByte(flags | (eventCode << 5))
 			core.WriteUInt16LE(ev.Unicode, buff)
 		case *PointerEvent:
 			buff.WriteByte(eventCode << 5)

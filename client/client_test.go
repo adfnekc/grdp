@@ -42,6 +42,8 @@ func (f *fakeCtl) Login(host, user, passwd string, w, h int) error {
 }
 func (f *fakeCtl) KeyUp(sc int, name string)     {}
 func (f *fakeCtl) KeyDown(sc int, name string)   {}
+func (f *fakeCtl) UnicodeKeyDown(r rune)         {}
+func (f *fakeCtl) UnicodeKeyUp(r rune)           {}
 func (f *fakeCtl) MouseMove(x, y int)            {}
 func (f *fakeCtl) MouseWheel(scroll, x, y int)   {}
 func (f *fakeCtl) MouseUp(button, x, y int)      {}

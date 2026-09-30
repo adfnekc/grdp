@@ -108,7 +108,7 @@ func serveRFBHandshake(conn net.Conn, si *ServerInit, name string, after func(ne
 		return
 	}
 
-	if !readAll(20 + 8 + 10) { // SetPixelFormat + SetEncodings + FramebufferUpdateRequest
+	if !readAll(20 + 16 + 10) { // SetPixelFormat + SetEncodings (3 ids) + FramebufferUpdateRequest
 		return
 	}
 
@@ -273,10 +273,11 @@ func TestServerCutTextEndToEnd(t *testing.T) {
 }
 
 // TestServerInitParsesBanner checks the ServerInit and pixel format arrive with
-// the values the server sent.
+// the values the server sent. The geometry is kept inside the framebuffer bound,
+// which a 0x1234 x 0x5678 desktop would exceed and be rejected for.
 func TestServerInitParsesBanner(t *testing.T) {
 	pf := testPixelFormat()
-	si := &ServerInit{Width: 0x1234, Height: 0x5678, PixelFormat: pf}
+	si := &ServerInit{Width: 0x0123, Height: 0x0456, PixelFormat: pf}
 	tc := newTestClient(t, si, "myhost", nil)
 	tc.connect(t)
 
@@ -291,8 +292,8 @@ func TestServerInitParsesBanner(t *testing.T) {
 	if tc.fc.s == nil {
 		t.Fatal("server init was not stored")
 	}
-	if tc.fc.s.Width != 0x1234 || tc.fc.s.Height != 0x5678 {
-		t.Fatalf("size = %d x %d, want 0x1234 x 0x5678", tc.fc.s.Width, tc.fc.s.Height)
+	if tc.fc.s.Width != 0x0123 || tc.fc.s.Height != 0x0456 {
+		t.Fatalf("size = %d x %d, want 0x0123 x 0x0456", tc.fc.s.Width, tc.fc.s.Height)
 	}
 	got := tc.fc.s.PixelFormat
 	if got == nil {
@@ -543,7 +544,7 @@ func TestHandshake3_3None(t *testing.T) {
 			return
 		}
 		writeServerInit(conn, si, "three-three")
-		discard(conn, 38) // SetPixelFormat + SetEncodings + FramebufferUpdateRequest
+		discard(conn, 46) // SetPixelFormat + SetEncodings (3 ids) + FramebufferUpdateRequest
 	})
 	tc.connect(t)
 
@@ -579,7 +580,7 @@ func TestHandshake3_7NoneSkipsSecurityResult(t *testing.T) {
 			return
 		}
 		writeServerInit(conn, si, "three-seven")
-		discard(conn, 38) // SetPixelFormat + SetEncodings + FramebufferUpdateRequest
+		discard(conn, 46) // SetPixelFormat + SetEncodings (3 ids) + FramebufferUpdateRequest
 	})
 	tc.connect(t)
 
@@ -621,7 +622,7 @@ func TestHandshake3_7VncAuthKeepsSecurityResult(t *testing.T) {
 			return
 		}
 		writeServerInit(conn, si, "three-seven-auth")
-		discard(conn, 38) // SetPixelFormat + SetEncodings + FramebufferUpdateRequest
+		discard(conn, 46) // SetPixelFormat + SetEncodings (3 ids) + FramebufferUpdateRequest
 	})
 	tc.connect(t)
 
@@ -733,8 +734,9 @@ func TestFramebufferRectsKeepOrder(t *testing.T) {
 }
 
 // TestRectHeaderRejectsUnsupportedEncoding checks a rectangle this client did
-// not advertise is reported rather than read with a length guessed for Raw,
-// which would misread the rest of the update.
+// not advertise is reported rather than read with a length guessed for another
+// encoding, which would misread the rest of the update. RRE (2) is the example:
+// CopyRect (1) and Hextile (5) are implemented and are not rejected.
 func TestRectHeaderRejectsUnsupportedEncoding(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
@@ -752,13 +754,13 @@ func TestRectHeaderRejectsUnsupportedEncoding(t *testing.T) {
 		}
 	})
 
-	// CopyRect (encoding 1) has a four byte body, not width*height*4 bytes.
-	header := []byte{0, 0, 0, 0, 0, 10, 0, 10, 0, 0, 0, 1}
+	// RRE (encoding 2) has its own body, not width*height*4 bytes.
+	header := []byte{0, 0, 0, 0, 0, 10, 0, 10, 0, 0, 0, 2}
 	fc.recvRectHeader(header, nil)
 
 	select {
 	case err := <-errCh:
-		if !strings.Contains(err.Error(), "unsupported rectangle encoding 1") {
+		if !strings.Contains(err.Error(), "unsupported rectangle encoding 2") {
 			t.Fatalf("error = %v, want an unsupported-encoding error", err)
 		}
 	case <-time.After(2 * time.Second):
@@ -778,6 +780,9 @@ func TestRectHeaderUsesPixelFormatBpp(t *testing.T) {
 	fc.BitRect.Pf = &PixelFormat{BitsPerPixel: 16, Depth: 16}
 	fc.NbRect = 1
 	fc.BitRect.Rects = make([]Rectangles, 1)
+	if err := fc.initFramebuffer(); err != nil {
+		t.Fatalf("initFramebuffer: %v", err)
+	}
 
 	bitmap := make(chan *BitRect, 1)
 	fc.On("bitmap", func(b *BitRect) {
@@ -802,5 +807,444 @@ func TestRectHeaderUsesPixelFormatBpp(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out: the rectangle body was not read at 16 bpp")
+	}
+}
+
+// TestSendSetEncodingsWireFormat pins SetEncodings to the bytes a server reads:
+// message type 2, padding, a count of three and the three 32 bit encoding ids.
+// The message is one list with a count, so all three encodings have to be in it
+// rather than in a second message.
+func TestSendSetEncodingsWireFormat(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	fc := NewRFBConn(client, "")
+
+	got := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 16)
+		if _, err := io.ReadFull(server, buf); err == nil {
+			got <- buf
+		}
+	}()
+
+	fc.sendSetEncoding()
+
+	want := []byte{
+		0x02, 0x00, 0x00, 0x03, // SetEncodings, padding, three encodings
+		0x00, 0x00, 0x00, 0x00, // Raw
+		0x00, 0x00, 0x00, 0x01, // CopyRect
+		0x00, 0x00, 0x00, 0x05, // Hextile
+	}
+	select {
+	case b := <-got:
+		if !bytes.Equal(b, want) {
+			t.Fatalf("SetEncodings = % x, want % x", b, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the SetEncodings message")
+	}
+}
+
+// lePixel is a four byte little-endian pixel with distinct channel bytes, so a
+// decoder that wrote the wrong channel or at the wrong offset is visible.
+func lePixel(r, g, b byte) []byte { return []byte{r, g, b, 0} }
+
+// repeatPixel returns count copies of one pixel.
+func repeatPixel(p []byte, count int) []byte {
+	out := make([]byte, 0, len(p)*count)
+	for i := 0; i < count; i++ {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// decodeHextileBody decodes a Hextile body at four bytes per pixel and returns
+// the rectangle's pixels, failing the test on a decode error.
+func decodeHextileBody(t *testing.T, body []byte, w, h int) []byte {
+	t.Helper()
+	data := make([]byte, w*h*4)
+	if err := decodeHextile(bytes.NewReader(body), data, w, h, 4); err != nil {
+		t.Fatalf("decodeHextile(%dx%d): %v", w, h, err)
+	}
+	return data
+}
+
+// rectHeader encodes a rectangle header the way a server writes it.
+func rectHeader(r Rectangle) []byte {
+	b := &bytes.Buffer{}
+	core.WriteUInt16BE(r.X, b)
+	core.WriteUInt16BE(r.Y, b)
+	core.WriteUInt16BE(r.Width, b)
+	core.WriteUInt16BE(r.Height, b)
+	core.WriteUInt32BE(r.Encoding, b)
+	return b.Bytes()
+}
+
+// framedTestConn returns an RFBConn over a net.Pipe whose framebuffer is w by h
+// at 32 bpp. A goroutine drains everything the client writes, so the update
+// request that follows a rectangle does not block the test.
+func framedTestConn(t *testing.T, w, h int) (*RFBConn, net.Conn) {
+	t.Helper()
+	client, server := net.Pipe()
+	fc := NewRFBConn(client, "")
+	fc.s = &ServerInit{Width: uint16(w), Height: uint16(h)}
+	fc.BitRect.Pf = NewPixelFormat()
+	if err := fc.initFramebuffer(); err != nil {
+		t.Fatalf("initFramebuffer: %v", err)
+	}
+	go io.Copy(io.Discard, server)
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+	})
+	return fc, server
+}
+
+// TestDecodeHextileBackgroundOnly checks a tile with no subrectangles is filled
+// with the background colour, and that the colour is read as the pixel format's
+// bytes and not a fixed four.
+func TestDecodeHextileBackgroundOnly(t *testing.T) {
+	bg := lePixel(0x11, 0x22, 0x33)
+	body := append([]byte{hextileBgSpecified}, bg...)
+
+	got := decodeHextileBody(t, body, 16, 16)
+	want := repeatPixel(bg, 16*16)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("tile = % x, want the whole 16x16 tile in the background colour % x", got[:16], bg)
+	}
+}
+
+// TestDecodeHextileUncolouredSubrects checks the two-colour fast path: with
+// SubrectsColoured clear, every subrectangle is the one foreground colour and
+// only its position and size follow on the wire.
+func TestDecodeHextileUncolouredSubrects(t *testing.T) {
+	bg := lePixel(0x01, 0x02, 0x03)
+	fg := lePixel(0x04, 0x05, 0x06)
+	// subencoding, bg, fg, one subrectangle at 0,0 that is 2x2.
+	body := []byte{
+		hextileBgSpecified | hextileFgSpecified | hextileAnySubrects,
+		bg[0], bg[1], bg[2], bg[3],
+		fg[0], fg[1], fg[2], fg[3],
+		1,    // one subrectangle
+		0x00, // x=0, y=0
+		0x11, // 2 wide, 2 high
+	}
+
+	got := decodeHextileBody(t, body, 16, 16)
+	want := repeatPixel(bg, 16*16)
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 2; x++ {
+			copy(want[(y*16+x)*4:], fg)
+		}
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("tile = % x, want the 2x2 subrectangle in the foreground colour", got[:16])
+	}
+}
+
+// TestDecodeHextileColouredSubrects checks that with SubrectsColoured set one
+// pixel's worth of colour precedes each subrectangle's position and size.
+func TestDecodeHextileColouredSubrects(t *testing.T) {
+	bg := lePixel(0x01, 0x02, 0x03)
+	sub0 := lePixel(0xaa, 0xbb, 0xcc)
+	sub1 := lePixel(0x0a, 0x0b, 0x0c)
+	body := []byte{
+		hextileBgSpecified | hextileFgSpecified | hextileAnySubrects | hextileSubrectsColoured,
+		bg[0], bg[1], bg[2], bg[3],
+		0x00, 0x00, 0x00, 0x00, // an unused foreground colour
+		2,                                              // two subrectangles
+		sub0[0], sub0[1], sub0[2], sub0[3], 0x00, 0x11, // colour, 0,0 2x2
+		sub1[0], sub1[1], sub1[2], sub1[3], 0x23, 0x00, // colour, 2,3 1x1
+	}
+
+	got := decodeHextileBody(t, body, 16, 16)
+	want := repeatPixel(bg, 16*16)
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 2; x++ {
+			copy(want[(y*16+x)*4:], sub0)
+		}
+	}
+	copy(want[(3*16+2)*4:], sub1)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("tile = % x, want two coloured subrectangles", got[:16])
+	}
+}
+
+// TestDecodeHextileRawTile checks the raw subencoding: the tile's pixels follow
+// with no tile header of their own.
+func TestDecodeHextileRawTile(t *testing.T) {
+	body := []byte{hextileRaw}
+	for i := 0; i < 16*16; i++ {
+		body = append(body, byte(i), byte(i>>8), 0, 0)
+	}
+
+	got := decodeHextileBody(t, body, 16, 16)
+	if !bytes.Equal(got, body[1:]) {
+		t.Fatalf("raw tile pixels differ from the bytes that carried them")
+	}
+}
+
+// TestDecodeHextilePersistsColoursAcrossTiles checks the background and
+// foreground colours persist across tiles when a later tile does not specify
+// them. A decoder that reset them per tile would fill the second tile black.
+func TestDecodeHextilePersistsColoursAcrossTiles(t *testing.T) {
+	bg := lePixel(0x21, 0x22, 0x23)
+	fg := lePixel(0x31, 0x32, 0x33)
+	body := []byte{
+		// Tile 0: background and foreground specified, one 1x1 subrect at 0,0.
+		hextileBgSpecified | hextileFgSpecified | hextileAnySubrects,
+		bg[0], bg[1], bg[2], bg[3],
+		fg[0], fg[1], fg[2], fg[3],
+		1, 0x00, 0x00,
+		// Tile 1: neither colour specified, one 1x1 subrect at 0,0.
+		hextileAnySubrects,
+		1, 0x00, 0x00,
+	}
+
+	got := decodeHextileBody(t, body, 32, 16)
+	want := repeatPixel(bg, 32*16)
+	copy(want[0:4], fg)     // tile 0 at 0,0
+	copy(want[(16)*4:], fg) // tile 1 at x=16
+	if !bytes.Equal(got, want) {
+		t.Fatalf("tile 1 = % x, want the persisted colours", got[16*4:16*4+8])
+	}
+}
+
+// TestDecodeHextilePartialTile checks a rectangle smaller than a tile decodes
+// only its own pixels, so a 4x2 rectangle allocates and fills 4x2.
+func TestDecodeHextilePartialTile(t *testing.T) {
+	bg := lePixel(0x51, 0x52, 0x53)
+	body := append([]byte{hextileBgSpecified}, bg...)
+
+	got := decodeHextileBody(t, body, 4, 2)
+	if !bytes.Equal(got, repeatPixel(bg, 4*2)) {
+		t.Fatalf("partial tile = % x, want 4x2 of the background colour", got)
+	}
+}
+
+// TestDecodeHextileRejectsSubrectOutsideTile checks a subrectangle whose bit
+// fields name an area larger than the tile is reported, not drawn as a wrap
+// into the next row.
+func TestDecodeHextileRejectsSubrectOutsideTile(t *testing.T) {
+	body := []byte{
+		hextileAnySubrects,
+		1,    // one subrectangle
+		0xf0, // x=15, y=0
+		0xf0, // 16 wide, 1 high: 15+16 is past the 16 pixel tile
+	}
+	err := decodeHextile(bytes.NewReader(body), make([]byte, 16*16*4), 16, 16, 4)
+	if err == nil || !strings.Contains(err.Error(), "outside a") {
+		t.Fatalf("err = %v, want an out-of-tile error", err)
+	}
+}
+
+// TestDecodeHextileShortBodyFails checks a truncated Hextile body is reported
+// rather than decoded as far as it goes, which would leave the stream
+// misaligned for the next message.
+func TestDecodeHextileShortBodyFails(t *testing.T) {
+	// BackgroundSpecified with no background colour behind it.
+	err := decodeHextile(bytes.NewReader([]byte{hextileBgSpecified}), make([]byte, 16*16*4), 16, 16, 4)
+	if err == nil {
+		t.Fatal("a truncated Hextile body was not reported")
+	}
+}
+
+// TestCopyRectOverlapDirections checks a CopyRect whose source and destination
+// overlap copies the pixels that were there before the copy, whichever way the
+// two regions overlap. Each pixel encodes its x and y so a wrong source or a
+// wrong copy direction changes the bytes.
+func TestCopyRectOverlapDirections(t *testing.T) {
+	const w, h = 8, 4
+	cases := []struct {
+		name       string
+		dstX, dstY int
+		srcX, srcY int
+		cw, ch     int
+	}{
+		{"down-overlap", 0, 1, 0, 0, 8, 3},
+		{"up-overlap", 0, 0, 0, 1, 8, 3},
+		{"same-row-overlap", 2, 0, 0, 0, 6, 1},
+		{"disjoint", 0, 2, 0, 0, 4, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fc, _ := framedTestConn(t, w, h)
+			for y := 0; y < h; y++ {
+				for x := 0; x < w; x++ {
+					copy(fc.frame[(y*w+x)*4:], lePixel(byte(x), byte(y), 0))
+				}
+			}
+			before := append([]byte(nil), fc.frame...)
+
+			rect := &Rectangle{X: uint16(c.dstX), Y: uint16(c.dstY), Width: uint16(c.cw), Height: uint16(c.ch), Encoding: encodingCopyRect}
+			got, err := fc.copyRect(rect, c.srcX, c.srcY)
+			if err != nil {
+				t.Fatalf("copyRect: %v", err)
+			}
+
+			want := make([]byte, c.cw*c.ch*4)
+			for row := 0; row < c.ch; row++ {
+				src := ((c.srcY+row)*w + c.srcX) * 4
+				copy(want[row*c.cw*4:], before[src:src+c.cw*4])
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("copied pixels = % x, want the pre-copy source % x", got, want)
+			}
+			for row := 0; row < c.ch; row++ {
+				dst := ((c.dstY+row)*w + c.dstX) * 4
+				wantRow := want[row*c.cw*4 : (row+1)*c.cw*4]
+				if !bytes.Equal(fc.frame[dst:dst+c.cw*4], wantRow) {
+					t.Fatalf("framebuffer row %d = % x, want % x", row, fc.frame[dst:dst+c.cw*4], wantRow)
+				}
+			}
+		})
+	}
+}
+
+// TestCopyRectRejectsSourceOutsideFrame checks a source the server names outside
+// the framebuffer is reported rather than read, which would be a read past the
+// end of the buffer.
+func TestCopyRectRejectsSourceOutsideFrame(t *testing.T) {
+	fc, _ := framedTestConn(t, 4, 4)
+	rect := &Rectangle{X: 0, Y: 0, Width: 4, Height: 4, Encoding: encodingCopyRect}
+	if _, err := fc.copyRect(rect, 2, 0); err == nil || !strings.Contains(err.Error(), "outside the framebuffer") {
+		t.Fatalf("err = %v, want an out-of-framebuffer error", err)
+	}
+}
+
+// TestRectHeaderRejectsRectangleOutsideFramebuffer checks a rectangle header
+// that runs past the framebuffer is reported before its body is read.
+func TestRectHeaderRejectsRectangleOutsideFramebuffer(t *testing.T) {
+	fc, _ := framedTestConn(t, 4, 4)
+	fc.NbRect = 1
+	fc.BitRect.Rects = make([]Rectangles, 1)
+
+	errCh := make(chan error, 1)
+	fc.On("error", func(e error) {
+		select {
+		case errCh <- e:
+		default:
+		}
+	})
+
+	fc.recvRectHeader(rectHeader(Rectangle{X: 2, Y: 0, Width: 4, Height: 4, Encoding: encodingRaw}), nil)
+
+	select {
+	case err := <-errCh:
+		if !strings.Contains(err.Error(), "outside the framebuffer") {
+			t.Fatalf("error = %v, want an out-of-framebuffer error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a rectangle outside the framebuffer was not reported")
+	}
+}
+
+// TestFramebufferUpdateMixedEncodingsEndToEnd feeds one update with a Raw, a
+// Hextile and a CopyRect rectangle over a scripted connection and checks the
+// pixels each one produced and the framebuffer they left behind. The CopyRect
+// copies the Hextile half over the Raw half, so the framebuffer ends with the
+// Hextile pixels on both halves while the Raw rectangle's own data still holds
+// what Raw carried.
+func TestFramebufferUpdateMixedEncodingsEndToEnd(t *testing.T) {
+	const w, h = 4, 4
+	fc, server := framedTestConn(t, w, h)
+	fc.NbRect = 3
+	fc.BitRect.Rects = make([]Rectangles, 3)
+
+	bitmap := make(chan *BitRect, 1)
+	errCh := make(chan error, 1)
+	fc.On("bitmap", func(b *BitRect) {
+		select {
+		case bitmap <- b:
+		default:
+		}
+	})
+	fc.On("error", func(e error) {
+		select {
+		case errCh <- e:
+		default:
+		}
+	})
+
+	patternA := make([]byte, 4*2*4)
+	for i := range patternA {
+		patternA[i] = byte(0xa0 + i)
+	}
+	patternB := lePixel(0xb1, 0xb2, 0xb3)
+	hextileBody := append([]byte{hextileBgSpecified}, patternB...)
+
+	stream := &bytes.Buffer{}
+	stream.Write(patternA) // rectangle 0: Raw 4x2 at 0,0
+	stream.Write(rectHeader(Rectangle{X: 0, Y: 2, Width: 4, Height: 2, Encoding: encodingHextile}))
+	stream.Write(hextileBody) // rectangle 1: Hextile 4x2 at 0,2
+	stream.Write(rectHeader(Rectangle{X: 0, Y: 0, Width: 4, Height: 2, Encoding: encodingCopyRect}))
+	stream.Write([]byte{0, 0, 0, 2}) // rectangle 2: CopyRect 4x2 at 0,0 from 0,2
+	go server.Write(stream.Bytes())
+
+	fc.recvRectHeader(rectHeader(Rectangle{X: 0, Y: 0, Width: 4, Height: 2, Encoding: encodingRaw}), nil)
+
+	select {
+	case b := <-bitmap:
+		if len(b.Rects) != 3 {
+			t.Fatalf("got %d rectangles, want 3", len(b.Rects))
+		}
+		if !bytes.Equal(b.Rects[0].Data, patternA) {
+			t.Fatalf("Raw rectangle data = % x, want % x", b.Rects[0].Data, patternA)
+		}
+		hextilePixels := repeatPixel(patternB, 4*2)
+		if !bytes.Equal(b.Rects[1].Data, hextilePixels) {
+			t.Fatalf("Hextile rectangle data = % x, want % x", b.Rects[1].Data, hextilePixels)
+		}
+		if !bytes.Equal(b.Rects[2].Data, hextilePixels) {
+			t.Fatalf("CopyRect rectangle data = % x, want the copied Hextile pixels % x", b.Rects[2].Data, hextilePixels)
+		}
+		if b.Rects[2].Rect.SrcX != 0 || b.Rects[2].Rect.SrcY != 2 {
+			t.Fatalf("CopyRect source = %d,%d, want 0,2", b.Rects[2].Rect.SrcX, b.Rects[2].Rect.SrcY)
+		}
+		wantFrame := append(append([]byte(nil), hextilePixels...), hextilePixels...)
+		if !bytes.Equal(fc.Framebuffer(), wantFrame) {
+			t.Fatalf("framebuffer = % x, want % x", fc.Framebuffer(), wantFrame)
+		}
+	case err := <-errCh:
+		t.Fatalf("unexpected error: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the mixed update")
+	}
+}
+
+// TestInitFramebufferRejectsZeroSize checks a server that announces an empty
+// desktop is reported rather than allocated.
+func TestInitFramebufferRejectsZeroSize(t *testing.T) {
+	fc := NewRFBConn(nil, "")
+	fc.s = &ServerInit{Width: 0, Height: 10}
+	fc.BitRect.Pf = NewPixelFormat()
+	if err := fc.initFramebuffer(); err == nil {
+		t.Fatal("a zero width desktop was not reported")
+	}
+}
+
+// TestInitFramebufferRejectsOversize checks a desktop whose framebuffer would be
+// larger than the bound is reported before it sizes the allocation.
+func TestInitFramebufferRejectsOversize(t *testing.T) {
+	fc := NewRFBConn(nil, "")
+	fc.s = &ServerInit{Width: 65535, Height: 65535}
+	fc.BitRect.Pf = NewPixelFormat()
+	if err := fc.initFramebuffer(); err == nil || !strings.Contains(err.Error(), "over the") {
+		t.Fatalf("err = %v, want an over-the-limit error", err)
+	}
+}
+
+// TestInitFramebufferAllocates checks the framebuffer is the desktop's
+// width*height*bytesPerPixel and its stride is one row.
+func TestInitFramebufferAllocates(t *testing.T) {
+	fc := NewRFBConn(nil, "")
+	fc.s = &ServerInit{Width: 4, Height: 2}
+	fc.BitRect.Pf = NewPixelFormat()
+	if err := fc.initFramebuffer(); err != nil {
+		t.Fatalf("initFramebuffer: %v", err)
+	}
+	if len(fc.frame) != 4*2*4 || fc.frameStride != 4*4 {
+		t.Fatalf("framebuffer %d bytes, stride %d; want 32 bytes, stride 16", len(fc.frame), fc.frameStride)
 	}
 }

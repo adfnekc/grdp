@@ -6,6 +6,11 @@
 // in protocol/rfb. Its clipboard is implemented in both directions: text the
 // server cuts arrives as the "clipboard-text" event, and SetClipboardText
 // publishes with ClientCutText.
+//
+// For an RDP session the pixels are read from Framebuffer, whichever drawing
+// path the server chose. The RFB client keeps its own framebuffer inside
+// protocol/rfb instead, because an RFB server picks the pixel format per
+// connection rather than sending BGRA.
 package client
 
 import (
@@ -14,13 +19,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adfnekc/grdp/glog"
+
 	"github.com/adfnekc/grdp/protocol/rfb"
 )
 
 // VncClient is the RFB (VNC) client. It is exercised against a real server by
 // scripts/vnc-dev.sh, which starts TigerVNC and runs the live tests: a frame is
-// received and parsed, and the clipboard works in both directions. Raw and
-// CopyRect encodings only, and RequestClipboardText is not implemented.
+// received and parsed, and the clipboard works in both directions. Raw, CopyRect
+// and Hextile encodings are implemented and advertised, and the live tests have
+// seen the server choose Hextile for ordinary rectangles and CopyRect for a real
+// scroll. RequestClipboardText is not implemented, which a test records.
 //
 // Login blocks until the handshake completes, fails, or the configured timeout
 // expires, so it is safe to register handlers and drive input afterwards; before
@@ -157,6 +166,21 @@ func (c *VncClient) KeyDown(sc int, name string) {
 	k.DownFlag = 1
 	k.Key = uint32(sc)
 	c.vnc.SendKeyEvent(k)
+}
+
+// UnicodeKeyDown implements the Control interface. RFB has no Unicode key
+// event: a KeyEvent carries an X11 keysym or a scancode and nothing else, so
+// there is no way to say which character an input method produced. The call is
+// accepted and logged rather than silently ignored, and Client.TypeText returns
+// an error on a VNC session instead of reaching here.
+func (c *VncClient) UnicodeKeyDown(r rune) {
+	glog.Warnf("vnc: %U cannot be sent; RFB has no Unicode key event", r)
+}
+
+// UnicodeKeyUp implements the Control interface, and is the counterpart of
+// UnicodeKeyDown: there is nothing to release.
+func (c *VncClient) UnicodeKeyUp(r rune) {
+	glog.Warnf("vnc: %U cannot be sent; RFB has no Unicode key event", r)
 }
 
 // MouseMove implements the Control interface. It does nothing until Login has

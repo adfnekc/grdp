@@ -46,8 +46,11 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       see below.
 * [x] VNC, against a real TigerVNC server: a frame is received and parsed, and
       the clipboard works in both directions. `scripts/vnc-dev.sh` fetches
-      TigerVNC without root and runs the live tests. Raw and CopyRect encodings
-      only, and `RequestClipboardText` is not implemented, which a test records.
+      TigerVNC without root and runs the live tests. Raw, CopyRect and Hextile
+      encodings, and `RequestClipboardText` is not implemented, which a test
+      records. The live tests have seen TigerVNC choose Hextile for ordinary
+      rectangles and CopyRect for a real scroll, and check that the copied pixels
+      are the ones the source held.
 
 Not done, or not finished:
 * [ ] RemoteFX Progressive (codec ids 0x0009 and 0x000D), which needs its own

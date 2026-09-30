@@ -18,6 +18,7 @@ import (
 	"github.com/tomatome/win"
 )
 
+// COM HRESULT and clipboard error codes.
 const (
 	S_OK                 = 0x00000000
 	E_UNEXPECTED         = 0x8000FFFF
@@ -36,8 +37,10 @@ const (
 	CO_E_CLASSSTRING     = 0x800401F3
 )
 
+// HRESULT is a COM result code.
 type HRESULT uintptr
 
+// Error renders the common clipboard HRESULTs by name.
 func (hr HRESULT) Error() string {
 	switch uint32(hr) {
 	case 0x80040064:
@@ -52,6 +55,7 @@ func (hr HRESULT) Error() string {
 	return fmt.Sprintf("%d", hr)
 }
 
+// TYMED_* are the storage-medium types of a STGMEDIUM.
 const (
 	TYMED_NULL     = 0x0
 	TYMED_HGLOBAL  = 0x1
@@ -81,6 +85,7 @@ type iDataObjectVtbl struct {
 	EnumDAdvise           uintptr
 }
 
+// FORMATETC describes a clipboard format request (WIN32 API).
 type FORMATETC struct {
 	CFormat        uint32
 	DvTargetDevice uintptr
@@ -88,21 +93,27 @@ type FORMATETC struct {
 	Index          int32
 	Tymed          uint32
 }
+
+// STGMEDIUM is the storage medium a data object returns (WIN32 API).
 type STGMEDIUM struct {
 	Tymed          uint32
 	UnionMember    uintptr
 	PUnkForRelease *IUnknown
 }
+
+// ISequentialStreamVtbl is the vtable of an ISequentialStream.
 type ISequentialStreamVtbl struct {
 	iUnknownVtbl
 	Read  uintptr
 	Write uintptr
 }
 
+// IUnknown is the base COM interface.
 type IUnknown struct {
 	vtbl iUnknownVtbl
 }
 
+// Release drops a reference to the COM object.
 func (obj *IUnknown) Release() error {
 	ret, _, _ := syscall.Syscall(
 		obj.vtbl.Release,
@@ -117,12 +128,14 @@ func (obj *IUnknown) Release() error {
 	return nil
 }
 
+// Release frees the medium unless the caller owns its release.
 func (m STGMEDIUM) Release() {
 	if m.PUnkForRelease == nil {
 		win.ReleaseStgMedium((*win.STGMEDIUM)(unsafe.Pointer(&m)))
 	}
 }
 
+// Stream returns the medium as an IStream; the medium must be TYMED_ISTREAM.
 func (m STGMEDIUM) Stream() (*IStream, error) {
 	if m.Tymed != TYMED_ISTREAM {
 		return nil, fmt.Errorf("invalid Tymed")
@@ -130,6 +143,7 @@ func (m STGMEDIUM) Stream() (*IStream, error) {
 	return (*IStream)(unsafe.Pointer(m.UnionMember)), nil
 }
 
+// Bytes returns the medium as a byte slice; the medium must be TYMED_HGLOBAL.
 func (m STGMEDIUM) Bytes() ([]byte, error) {
 	if m.Tymed != TYMED_HGLOBAL {
 		return nil, fmt.Errorf("invalid Tymed")
@@ -144,10 +158,12 @@ func (m STGMEDIUM) Bytes() ([]byte, error) {
 	return result, nil
 }
 
+// IDataObject is the COM data object the client puts on the Windows clipboard.
 type IDataObject struct {
 	vtbl *iDataObjectVtbl
 }
 
+// Release drops a reference to the data object.
 func (obj *IDataObject) Release() error {
 	ret, _, _ := syscall.Syscall(
 		obj.vtbl.Release,
@@ -162,6 +178,7 @@ func (obj *IDataObject) Release() error {
 	return nil
 }
 
+// GetData renders formatEtc into medium.
 func (obj *IDataObject) GetData(formatEtc *FORMATETC, medium *STGMEDIUM) error {
 	s2 := unsafe.Sizeof(*medium)
 	_ = s2
@@ -179,6 +196,7 @@ func (obj *IDataObject) GetData(formatEtc *FORMATETC, medium *STGMEDIUM) error {
 	return nil
 }
 
+// GetDataHere renders formatEtc into a caller supplied medium.
 func (obj *IDataObject) GetDataHere(formatEtc *FORMATETC, medium *STGMEDIUM) error {
 	ret, _, _ := syscall.Syscall(
 		obj.vtbl.GetDataHere,
@@ -193,6 +211,8 @@ func (obj *IDataObject) GetDataHere(formatEtc *FORMATETC, medium *STGMEDIUM) err
 	}
 	return nil
 }
+
+// QueryGetData reports whether formatEtc can be rendered.
 func (obj *IDataObject) QueryGetData(formatEtc *FORMATETC) error {
 	ret, _, _ := syscall.Syscall(
 		obj.vtbl.QueryGetData,
@@ -207,6 +227,8 @@ func (obj *IDataObject) QueryGetData(formatEtc *FORMATETC) error {
 	}
 	return nil
 }
+
+// EnumFormatEtc returns an enumerator of the object's formats.
 func (obj *IDataObject) EnumFormatEtc(direction uint32, pIEnumFORMATETC **IEnumFORMATETC) error {
 	ret, _, _ := syscall.Syscall(
 		obj.vtbl.EnumFormatEtc,
@@ -230,10 +252,12 @@ type iEnumFORMATETCVtbl struct {
 	Clone uintptr
 }
 
+// IEnumFORMATETC enumerates FORMATETC entries.
 type IEnumFORMATETC struct {
 	vtbl *iEnumFORMATETCVtbl
 }
 
+// Release drops a reference to the enumerator.
 func (obj *IEnumFORMATETC) Release() error {
 	ret, _, _ := syscall.Syscall(
 		obj.vtbl.Release,
@@ -248,6 +272,7 @@ func (obj *IEnumFORMATETC) Release() error {
 	return nil
 }
 
+// Next copies up to len(formatEtc) entries into formatEtc.
 func (obj *IEnumFORMATETC) Next(formatEtc []FORMATETC, celtFetched *uint32) error {
 	ret, _, _ := syscall.Syscall6(
 		obj.vtbl.Next,
@@ -265,6 +290,7 @@ func (obj *IEnumFORMATETC) Next(formatEtc []FORMATETC, celtFetched *uint32) erro
 	return nil
 }
 
+// EnumInstance is the IEnumFORMATETC implementation backed by a format list.
 type EnumInstance struct {
 	iEnumFORMATETC IEnumFORMATETC
 	refCount       int32
@@ -272,6 +298,7 @@ type EnumInstance struct {
 	formatEtc      []FORMATETC
 }
 
+// COM interface ids for the clipboard data object surface.
 var (
 	IID_IDataObject    = win.GUID{0x10e, 0, 0, [8]byte{0xc0, 0, 0, 0, 0, 0, 0, 0x46}}
 	IID_IUnknown       = win.GUID{0x000, 0, 0, [8]byte{0xc0, 0, 0, 0, 0, 0, 0, 0x46}}
@@ -300,6 +327,7 @@ func newEnumInstance(fs []FORMATETC) *EnumInstance {
 	return &instance
 }
 
+// QueryInterface answers for IEnumFORMATETC and IUnknown.
 func (i *EnumInstance) QueryInterface(riid win.REFGUID, ppvObject *uintptr) uintptr {
 	if win.IsEqualGUID(riid, &IID_IEnumFORMATETC) ||
 		win.IsEqualGUID(riid, &IID_IUnknown) {
@@ -311,11 +339,13 @@ func (i *EnumInstance) QueryInterface(riid win.REFGUID, ppvObject *uintptr) uint
 	return E_NOINTERFACE
 }
 
+// AddRef increments the enumerator's reference count.
 func (i *EnumInstance) AddRef() uintptr {
 	n := atomic.AddInt32(&i.refCount, 1)
 	return uintptr(n)
 }
 
+// Release decrements the enumerator's reference count.
 func (i *EnumInstance) Release() uintptr {
 	n := atomic.AddInt32(&i.refCount, -1)
 	if n == 0 {
@@ -325,6 +355,7 @@ func (i *EnumInstance) Release() uintptr {
 	return uintptr(n)
 }
 
+// Next copies up to celt entries into rgelt and reports how many were copied.
 func (i *EnumInstance) Next(celt uint32, rgelt *FORMATETC, pceltFetched *uint32) uintptr {
 	r := make([]FORMATETC, celt)
 	var idx uint32
@@ -344,6 +375,8 @@ func (i *EnumInstance) Next(celt uint32, rgelt *FORMATETC, pceltFetched *uint32)
 	}
 	return 0
 }
+
+// Skip advances the enumerator by celt entries.
 func (i *EnumInstance) Skip(celt uint32) uintptr {
 	if i.index+int(celt) > len(i.formatEtc) {
 		return E_FAIL
@@ -351,10 +384,14 @@ func (i *EnumInstance) Skip(celt uint32) uintptr {
 	i.index += int(celt)
 	return 0
 }
+
+// Reset rewinds the enumerator to the first entry.
 func (i *EnumInstance) Reset() uintptr {
 	i.index = 0
 	return 0
 }
+
+// Clone returns an enumerator at the same position.
 func (i *EnumInstance) Clone(ppEnum **IEnumFORMATETC) uintptr {
 	ins := newEnumInstance(i.formatEtc)
 	ins.index = i.index
@@ -362,6 +399,9 @@ func (i *EnumInstance) Clone(ppEnum **IEnumFORMATETC) uintptr {
 
 	return 0
 }
+
+// CreateDataObject builds the OLE data object for c, offering the file
+// descriptor and file contents formats to the server.
 func CreateDataObject(c *CliprdrClient) *IDataObject {
 	fmtetc := make([]FORMATETC, 2)
 	stgmeds := make([]STGMEDIUM, 2)
@@ -392,6 +432,7 @@ func CreateDataObject(c *CliprdrClient) *IDataObject {
 	return (*IDataObject)(unsafe.Pointer(instance))
 }
 
+// DataInstance is the IDataObject implementation behind CreateDataObject.
 type DataInstance struct {
 	iDataObject IDataObject
 	refCount    int32
@@ -422,6 +463,7 @@ func newDataInstance() *DataInstance {
 	return &instance
 }
 
+// QueryInterface answers for IDataObject and IUnknown.
 func (i *DataInstance) QueryInterface(riid win.REFGUID, ppvObject *uintptr) uintptr {
 	if win.IsEqualGUID(riid, &IID_IDataObject) ||
 		win.IsEqualGUID(riid, &IID_IUnknown) {
@@ -434,11 +476,13 @@ func (i *DataInstance) QueryInterface(riid win.REFGUID, ppvObject *uintptr) uint
 	return E_NOINTERFACE
 }
 
+// AddRef increments the data object's reference count.
 func (i *DataInstance) AddRef() uintptr {
 	n := atomic.AddInt32(&i.refCount, 1)
 	return uintptr(n)
 }
 
+// Release decrements the data object's reference count.
 func (i *DataInstance) Release() uintptr {
 	n := atomic.AddInt32(&i.refCount, -1)
 	if n == 0 {
@@ -448,6 +492,8 @@ func (i *DataInstance) Release() uintptr {
 	return uintptr(n)
 }
 
+// GetData renders the requested format, fetching the file list from the
+// server and opening a stream for each entry.
 func (i *DataInstance) GetData(formatEtc *FORMATETC, medium *STGMEDIUM) uintptr {
 	idx := -1
 	for j, f := range i.formatEtc {
@@ -474,7 +520,10 @@ func (i *DataInstance) GetData(formatEtc *FORMATETC, medium *STGMEDIUM) uintptr 
 			}
 			medium.UnionMember = HmemAlloc(b)
 			var dsc FileGroupDescriptor
-			dsc.Unpack(b)
+			if err := dsc.Unpack(b); err != nil {
+				glog.Error("cliprdr: bad FILEGROUPDESCRIPTORW: ", err)
+				return E_FAIL
+			}
 			if dsc.CItems > 0 {
 				glog.Debug("Items:", dsc.CItems)
 				i.streams = make([]*StreamInstance, dsc.CItems)
@@ -501,10 +550,12 @@ func (i *DataInstance) GetData(formatEtc *FORMATETC, medium *STGMEDIUM) uintptr 
 	return 0
 }
 
+// GetDataHere is not implemented.
 func (i *DataInstance) GetDataHere(formatEtc *FORMATETC, medium *STGMEDIUM) uintptr {
 	return E_NOTIMPL
 }
 
+// QueryGetData reports whether the requested format is offered.
 func (i *DataInstance) QueryGetData(formatEtc *FORMATETC) uintptr {
 	for _, f := range i.formatEtc {
 		if formatEtc.Tymed&f.Tymed != 0 &&
@@ -516,14 +567,17 @@ func (i *DataInstance) QueryGetData(formatEtc *FORMATETC) uintptr {
 	return E_FORMATETC
 }
 
+// GetCanonicalFormatEtc is not implemented.
 func (i *DataInstance) GetCanonicalFormatEtc(informatEtc, outformatEtc *FORMATETC) uintptr {
 	return E_NOTIMPL
 }
 
+// SetData is not implemented; the client only renders formats.
 func (i *DataInstance) SetData(formatEtc *FORMATETC, medium *STGMEDIUM, r bool) uintptr {
 	return E_NOTIMPL
 }
 
+// EnumFormatEtc returns an enumerator over the offered formats.
 func (i *DataInstance) EnumFormatEtc(dwDirection uint32, ppenumFormatEtc **IEnumFORMATETC) uintptr {
 	if dwDirection == 1 {
 		ins := newEnumInstance(i.formatEtc)
@@ -534,33 +588,42 @@ func (i *DataInstance) EnumFormatEtc(dwDirection uint32, ppenumFormatEtc **IEnum
 	return E_NOTIMPL
 }
 
+// DAdvise is not supported.
 func (i *DataInstance) DAdvise(formatEtc *FORMATETC, advf uint32, pAdvSink uintptr, pdwConnection *uint32) uintptr {
 	return E_ADVISENOTSUPPORTED
 }
+
+// DUnadvise is not supported.
 func (i *DataInstance) DUnadvise(dwDirection uint32) uintptr {
 	return E_ADVISENOTSUPPORTED
 }
+
+// EnumDAdvise is not supported.
 func (i *DataInstance) EnumDAdvise(ppenumAdvise uintptr) uintptr {
 	return E_ADVISENOTSUPPORTED
 }
 
+// STREAM_SEEK_* are the IStream.Seek origins.
 const (
 	STREAM_SEEK_SET = 0
 	STREAM_SEEK_CUR = 1
 	STREAM_SEEK_END = 2
 )
 
+// STATFLAG_* select what IStream.Stat reports.
 const (
 	STATFLAG_DEFAULT = 0
 	STATFLAG_NONAME  = 1
 	STATFLAG_NOOPEN  = 2
 )
 
+// Storage error codes.
 const (
 	STG_E_INSUFFICIENTMEMORY = 0x80030008
 	STG_E_INVALIDFLAG        = 0x800300FF
 )
 
+// STGTY_* are the storage element types reported by IStream.Stat.
 const (
 	STGTY_STORAGE   = 1
 	STGTY_STREAM    = 2
@@ -568,18 +631,21 @@ const (
 	STGTY_PROPERTY  = 4
 )
 
+// LOCK_* are the IStream.LockRegion lock types.
 const (
 	LOCK_WRITE     = 1
 	LOCK_EXCLUSIVE = 2
 	LOCK_ONLYONCE  = 4
 )
 
+// Generic access rights.
 const (
 	GENERIC_READ    = 0x80000000
 	GENERIC_WRITE   = 0x40000000
 	GENERIC_EXECUTE = 0x20000000
 )
 
+// IStreamVtbl is the vtable of an IStream.
 type IStreamVtbl struct {
 	ISequentialStreamVtbl
 	Seek         uintptr
@@ -593,29 +659,42 @@ type IStreamVtbl struct {
 	Clone        uintptr
 }
 
+// IStream is a COM stream over one remote file.
 type IStream struct {
 	vtbl *IStreamVtbl
 }
+
+// ULARGE_INTEGER is a 64 bit unsigned integer with low/high accessors.
 type ULARGE_INTEGER struct {
 	QuadPart uint64
 }
+
+// LARGE_INTEGER is a 64 bit signed integer with low/high accessors.
 type LARGE_INTEGER struct {
 	QuadPart int64
 }
 
+// LowPart returns the low 32 bits.
 func (l *ULARGE_INTEGER) LowPart() *uint32 {
 	return (*uint32)(unsafe.Pointer(&l.QuadPart))
 }
+
+// HighPart returns the high 32 bits.
 func (l *ULARGE_INTEGER) HighPart() *uint32 {
 	return (*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&l.QuadPart)) + uintptr(4)))
 }
+
+// LowPart returns the low 32 bits.
 func (l *LARGE_INTEGER) LowPart() *uint32 {
 	return (*uint32)(unsafe.Pointer(&l.QuadPart))
 }
+
+// HighPart returns the high 32 bits.
 func (l *LARGE_INTEGER) HighPart() *int32 {
 	return (*int32)(unsafe.Pointer(uintptr(unsafe.Pointer(&l.QuadPart)) + uintptr(4)))
 }
 
+// StreamInstance is the IStream implementation for one remote file entry.
 type StreamInstance struct {
 	iStream  IStream
 	streamId uint32
@@ -626,6 +705,8 @@ type StreamInstance struct {
 	dsc      FileDescriptor
 	data     interface{}
 }
+
+// STATSTG is the IStream.Stat result structure.
 type STATSTG struct {
 	pwcsName          []uint16
 	sType             uint32
@@ -640,6 +721,7 @@ type STATSTG struct {
 	reserved          uint32
 }
 
+// Read fills buffer from the stream, requesting the range from the server.
 func (obj *IStream) Read(buffer []byte) (int, error) {
 	bufPtr := &buffer[0]
 	var read uint32
@@ -661,9 +743,13 @@ func (obj *IStream) Read(buffer []byte) (int, error) {
 	}
 	return int(read), nil
 }
+
+// Close releases the stream, making it an io.ReadCloser.
 func (obj *IStream) Close() error {
 	return obj.Release()
 }
+
+// Release drops a reference to the stream.
 func (obj *IStream) Release() error {
 	ret, _, _ := syscall.Syscall(
 		obj.vtbl.Release,
@@ -721,6 +807,7 @@ func newStream(index uint32, data interface{}, dsc *FileDescriptor) *StreamInsta
 	return &instance
 }
 
+// QueryInterface answers for IStream and IUnknown.
 func (i *StreamInstance) QueryInterface(riid win.REFGUID, ppvObject *uintptr) uintptr {
 	if win.IsEqualGUID(riid, &IID_IStream) ||
 		win.IsEqualGUID(riid, &IID_IUnknown) {
@@ -732,11 +819,13 @@ func (i *StreamInstance) QueryInterface(riid win.REFGUID, ppvObject *uintptr) ui
 	return E_NOINTERFACE
 }
 
+// AddRef increments the stream's reference count.
 func (i *StreamInstance) AddRef() uintptr {
 	n := atomic.AddInt32(&i.refCount, 1)
 	return uintptr(n)
 }
 
+// Release decrements the stream's reference count.
 func (i *StreamInstance) Release() uintptr {
 	n := atomic.AddInt32(&i.refCount, -1)
 	if n == 0 {
@@ -746,6 +835,8 @@ func (i *StreamInstance) Release() uintptr {
 	return uintptr(n)
 }
 
+// Read copies up to cb bytes of the file into pv, fetching the range from the
+// server, and reports the count in cbRead.
 func (i *StreamInstance) Read(pv uintptr, cb uint32, cbRead *uint32) uintptr {
 	glog.Debug("StreamInstance Read:", i.lOffset.QuadPart, i.lSize.QuadPart)
 	if i.lOffset.QuadPart >= i.lSize.QuadPart {
@@ -776,10 +867,12 @@ func (i *StreamInstance) Read(pv uintptr, cb uint32, cbRead *uint32) uintptr {
 	return 0
 }
 
+// Write is refused; a remote file stream is read only.
 func (i *StreamInstance) Write(pv uintptr, cb uint32, cbWritten *uint32) uintptr {
 	return E_ACCESSDENIED
 }
 
+// Seek moves the stream position according to dwOrigin.
 func (i *StreamInstance) Seek(dlibMove LARGE_INTEGER, dwOrigin uint32, plibNewPosition *ULARGE_INTEGER) uintptr {
 	glog.Debug("StreamInstance Seek:", dwOrigin, dlibMove, plibNewPosition)
 	var newoffset uint64 = i.lOffset.QuadPart
@@ -812,30 +905,37 @@ func (i *StreamInstance) Seek(dlibMove LARGE_INTEGER, dwOrigin uint32, plibNewPo
 	return 0
 }
 
+// SetSize is not implemented; a remote file stream is read only.
 func (i *StreamInstance) SetSize(libNewSize ULARGE_INTEGER) uintptr {
 	return E_NOTIMPL
 }
 
+// CopyTo is not implemented.
 func (i *StreamInstance) CopyTo(pstm *IStream, cb ULARGE_INTEGER, cbRead, cbWritten *ULARGE_INTEGER) uintptr {
 	return E_NOTIMPL
 }
 
+// Commit is not implemented.
 func (i *StreamInstance) Commit(grfCommitFlags uint32) uintptr {
 	return E_NOTIMPL
 }
 
+// Revert is not implemented.
 func (i *StreamInstance) Revert() uintptr {
 	return E_NOTIMPL
 }
 
+// LockRegion is not implemented.
 func (i *StreamInstance) LockRegion(libOffset, cb ULARGE_INTEGER, dwLockType uint32) uintptr {
 	return E_NOTIMPL
 }
 
+// UnlockRegion is not implemented.
 func (i *StreamInstance) UnlockRegion(libOffset, cb ULARGE_INTEGER, dwLockType uint32) uintptr {
 	return E_NOTIMPL
 }
 
+// Stat reports the stream type and size.
 func (i *StreamInstance) Stat(pstatstg *STATSTG, grfStatFlag uint32) uintptr {
 	switch grfStatFlag {
 	case STATFLAG_DEFAULT:
@@ -859,6 +959,7 @@ func (i *StreamInstance) Stat(pstatstg *STATSTG, grfStatFlag uint32) uintptr {
 	return 0
 }
 
+// Clone is not implemented.
 func (i *StreamInstance) Clone(ppstm **IStream) uintptr {
 	return E_NOTIMPL
 }

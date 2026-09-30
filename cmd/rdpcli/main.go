@@ -193,6 +193,7 @@ func main() {
 	wait := flag.Duration("wait", 20*time.Second, "how long to wait for the session to become ready")
 	bitmaps := flag.Int("bitmaps", 0, "exit after this many bitmap updates (0 = wait until timeout)")
 	dump := flag.String("dump", "", "write the composited framebuffer to this PNG file")
+	frame := flag.String("frame", "", "write the library's own framebuffer (Client.Framebuffer) to this PNG file")
 	rects := flag.Bool("rects", false, "log each bitmap rectangle's geometry")
 	var actions []inputAction
 	keys := actionSeq{list: &actions, isType: false}
@@ -200,6 +201,8 @@ func main() {
 	types := actionSeq{list: &actions, isType: true}
 	flag.Var(types, "type", "type an ASCII string into the focused window, repeatable")
 	postInput := flag.Duration("post-input", 3*time.Second, "wait after input playback before dumping")
+	unicodeText := flag.String("unicode-text", "", "type this string using Unicode key events rather than scancodes")
+	unicodeHold := flag.Duration("unicode-hold", 0, "how long to hold each Unicode key down (0 sends the release immediately)")
 	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
 	pointerLog := flag.Bool("pointer", false, "log server-side pointer updates (position and shape)")
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
@@ -283,6 +286,7 @@ func main() {
 	})
 
 	var inputPlayed bool
+	var unicodePlayed bool
 	c.OnReady(func() {
 		select {
 		case ready <- struct{}{}:
@@ -308,6 +312,24 @@ func main() {
 					if err := c.RequestClipboardText(); err != nil {
 						fmt.Fprintln(os.Stderr, "request clipboard:", err)
 					}
+				}
+			}()
+		}
+
+		if *unicodeText != "" && !unicodePlayed {
+			unicodePlayed = true
+			go func() {
+				// Unicode key events rather than scancodes, which is how an
+				// input method's output reaches the server: a scancode cannot
+				// say which character was meant.
+				fmt.Printf("typing via Unicode key events: %q\n", *unicodeText)
+				if err := c.TypeText(*unicodeText, *unicodeHold); err != nil {
+					fmt.Fprintln(os.Stderr, "unicode text:", err)
+				}
+				time.Sleep(*postInput)
+				select {
+				case done <- struct{}{}:
+				default:
 				}
 			}()
 		}
@@ -411,11 +433,13 @@ func main() {
 		case <-done:
 			fmt.Printf("received %d bitmap rectangles, closing\n", bitmapCount)
 			writeDump()
+			writeFrameDump(c, *frame)
 			c.Close()
 			return
 		case <-timer.C:
 			fmt.Printf("timeout after %s (bitmap rectangles received: %d)\n", *wait, bitmapCount)
 			writeDump()
+			writeFrameDump(c, *frame)
 			c.Close()
 			if bitmapCount == 0 {
 				os.Exit(4)
@@ -429,6 +453,50 @@ func main() {
 // Note: client.Bitmap.BitsPerPixel already holds bytes-per-pixel.
 // blitScreen copies an order rendered screen into the framebuffer. Orders draw
 // the whole desktop, so this is a full frame rather than a patch.
+// writeFrameDump writes the library's own framebuffer, rather than the copy this
+// tool builds from OnBitmap, so that the two can be compared. They should agree
+// pixel for pixel: the framebuffer is composited from the same updates that this
+// tool sees, and a disagreement means one of the two compositors is wrong. That
+// comparison is the point of the flag, so it is worth running both and diffing
+// the PNGs rather than eyeballing either one.
+func writeFrameDump(c *client.Client, path string) {
+	if path == "" {
+		return
+	}
+	fb := c.Framebuffer()
+	if fb == nil {
+		fmt.Fprintln(os.Stderr, "frame: the client has no framebuffer")
+		return
+	}
+	w, h := fb.Size()
+	if w <= 0 || h <= 0 {
+		fmt.Fprintln(os.Stderr, "frame: the framebuffer is empty")
+		return
+	}
+	px, stride := fb.Pix(), fb.Stride()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			i := y*stride + x*4
+			if i+4 > len(px) {
+				break
+			}
+			img.Set(x, y, color.RGBA{R: px[i+2], G: px[i+1], B: px[i], A: 255})
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "frame:", err)
+		return
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		fmt.Fprintln(os.Stderr, "frame:", err)
+		return
+	}
+	fmt.Printf("wrote the library framebuffer to %s (%dx%d)\n", path, w, h)
+}
+
 func blitScreen(fb *image.RGBA, s *orders.Screen) {
 	w, h := s.Size()
 	px := s.Pixels()
@@ -487,7 +555,13 @@ func blit(fb *image.RGBA, b client.Bitmap) {
 			var r, g, bl uint8
 			switch bpp {
 			case 2:
-				v := uint16(b.Data[i]) | uint16(b.Data[i+1])<<8
+				// Most significant byte first, which is the order our RLE
+				// decoder emits 16bpp pixels in (core/rle.go decompress2 ends
+				// with PutUint16BE). Reading it the way a DIB would be read,
+				// little endian, swaps the red and blue ends of every pixel.
+				// An uncompressed 16bpp update is not covered by that evidence
+				// and has never been seen: this client asks for 32bpp.
+				v := uint16(b.Data[i])<<8 | uint16(b.Data[i+1])
 				r = uint8((v >> 11) & 0x1f)
 				g = uint8((v >> 5) & 0x3f)
 				bl = uint8(v & 0x1f)

@@ -5,7 +5,10 @@ package cliprdr
 
 import (
 	"bytes"
+	"io"
+	"os"
 	"syscall"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/tomatome/win"
 )
 
+// Clipboard format names registered by the Windows clipboard (WIN32 API).
 const (
 	CFSTR_SHELLIDLIST         = "Shell IDList Array"
 	CFSTR_SHELLIDLISTOFFSET   = "Shell Object Offsets"
@@ -37,8 +41,11 @@ const (
 	CFSTR_PERFORMEDDROPEFFECT = "Performed DropEffect"
 	CFSTR_PREFERREDDROPEFFECT = "Preferred DropEffect"
 )
+
+// DVASPECT_CONTENT is the FORMATETC aspect for the clipboard content itself.
 const DVASPECT_CONTENT = 0x1
 
+// Predefined Windows clipboard formats (WIN32 API).
 const (
 	CF_TEXT         = 1
 	CF_BITMAP       = 2
@@ -59,22 +66,32 @@ const (
 	CF_DIBV5        = 17
 	CF_MAX          = 18
 )
+
+// Private window message and flag the clipboard watcher posts to itself to
+// install the OLE data object.
 const (
 	WM_CLIPRDR_MESSAGE = (w32.WM_USER + 156)
 	OLE_SETCLIPBOARD   = 1
 )
 
+// Control is the Windows clipboard window handle plus the OLE data object the
+// client currently owns.
 type Control struct {
 	hwnd       uintptr
 	dataObject *IDataObject
 }
 
+// withOpenClipboard runs f while the OS clipboard is open, closing it after.
 func (c *Control) withOpenClipboard(f func()) {
 	if OpenClipboard(c.hwnd) {
 		f()
 		CloseClipboard()
 	}
 }
+
+// ClipWatcher owns the hidden clipboard window. It publishes local clipboard
+// changes to the server and installs the OLE data object that answers server
+// pastes.
 func ClipWatcher(c *CliprdrClient) {
 	win.OleInitialize(0)
 	defer win.OleUninitialize()
@@ -137,39 +154,59 @@ func ClipWatcher(c *CliprdrClient) {
 	}
 
 }
+
+// OpenClipboard opens the OS clipboard for the given window.
 func OpenClipboard(hwnd uintptr) bool {
 	return win.OpenClipboard(win.HWND(hwnd))
 }
+
+// CloseClipboard closes the OS clipboard.
 func CloseClipboard() bool {
 	return win.CloseClipboard()
 }
+
+// CountClipboardFormats returns how many formats the OS clipboard holds.
 func CountClipboardFormats() int32 {
 	return win.CountClipboardFormats()
 }
+
+// IsClipboardFormatAvailable reports whether the OS clipboard holds format id.
 func IsClipboardFormatAvailable(id uint32) bool {
 	return win.IsClipboardFormatAvailable(win.UINT(id))
 }
+
+// EnumClipboardFormats lists the OS clipboard formats; pass an id to continue
+// from, starting with zero.
 func EnumClipboardFormats(formatId uint32) uint32 {
 	id := win.EnumClipboardFormats(win.UINT(formatId))
 	return uint32(id)
 }
+
+// GetClipboardFormatName returns the name of a registered clipboard format.
 func GetClipboardFormatName(id uint32) string {
 	buf := make([]uint16, 250)
 	n := win.GetClipboardFormatName(win.UINT(id), win.LPWSTR(unsafe.Pointer(&buf[0])), int32(len(buf)))
 	return string(utf16.Decode(buf[:n]))
 }
+
+// EmptyClipboard empties the OS clipboard.
 func EmptyClipboard() bool {
 	return win.EmptyClipboard()
 }
+
+// RegisterClipboardFormat registers a named format and returns its id.
 func RegisterClipboardFormat(format string) uint32 {
 	id := win.RegisterClipboardFormat(format)
 	return uint32(id)
 }
+
+// IsClipboardOwner reports whether h currently owns the clipboard.
 func IsClipboardOwner(h win.HWND) bool {
 	hwnd := win.GetClipboardOwner()
 	return h == hwnd
 }
 
+// HmemAlloc copies data into a new HGLOBAL, for SetClipboardData.
 func HmemAlloc(data []byte) uintptr {
 	ln := (len(data))
 	h := win.GlobalAlloc(0x0002, win.SIZE_T(ln))
@@ -187,6 +224,8 @@ func HmemAlloc(data []byte) uintptr {
 	return uintptr(h)
 
 }
+
+// SetClipboardData publishes hmem as the owner of formatId.
 func SetClipboardData(formatId uint32, hmem uintptr) bool {
 	r := win.SetClipboardData(win.UINT(formatId), win.HANDLE(hmem))
 	if r == 0 {
@@ -195,6 +234,8 @@ func SetClipboardData(formatId uint32, hmem uintptr) bool {
 	}
 	return true
 }
+
+// GetClipboardData reads and decodes the OS clipboard contents of formatId.
 func GetClipboardData(formatId uint32) string {
 	r := win.GetClipboardData(win.UINT(formatId))
 	if r == 0 {
@@ -212,6 +253,8 @@ func GetClipboardData(formatId uint32) string {
 	return core.UnicodeDecode(result)
 }
 
+// GetFormatList returns the formats the OS clipboard can provide, files
+// included when it is sharing a CF_HDROP list.
 func GetFormatList(hwnd uintptr) []CliprdrFormat {
 	list := make([]CliprdrFormat, 0, 10)
 	if OpenClipboard(hwnd) {
@@ -243,12 +286,44 @@ func GetFormatList(hwnd uintptr) []CliprdrFormat {
 	return list
 }
 
+// localFormatList returns the formats the local clipboard can provide. On
+// Windows that is whatever the OS clipboard currently holds, files included
+// when it is sharing a CF_HDROP list.
+func (c *CliprdrClient) localFormatList() []CliprdrFormat {
+	return GetFormatList(c.hwnd)
+}
+
+// clipboardFileProvider exposes the files the OS clipboard is sharing as a
+// FileProvider, so the protocol layer itself never opens a path. It is the
+// fallback source on Windows when the application has not set its own
+// provider.
+type clipboardFileProvider struct{}
+
+func (clipboardFileProvider) Names() []string { return GetFileNames() }
+
+func (clipboardFileProvider) Info(name string) (int64, time.Time, bool) {
+	fi, err := os.Stat(name)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return fi.Size(), fi.ModTime(), fi.IsDir()
+}
+
+func (clipboardFileProvider) Open(name string) (io.ReadCloser, error) {
+	return os.Open(name)
+}
+
+// platformClipboardFiles returns the OS clipboard file list as a FileProvider.
+func platformClipboardFiles() FileProvider { return clipboardFileProvider{} }
+
+// OleGetClipboard returns the current OLE clipboard data object.
 func OleGetClipboard() *IDataObject {
 	var dataObject *IDataObject
 	win.OleGetClipboard((**win.IDataObject)(unsafe.Pointer(&dataObject)))
 	return dataObject
 }
 
+// OleSetClipboard makes dataObject the OLE clipboard contents.
 func OleSetClipboard(dataObject *IDataObject) bool {
 	r := win.OleSetClipboard((*win.IDataObject)(unsafe.Pointer(dataObject)))
 	if r != 0 {
@@ -258,6 +333,8 @@ func OleSetClipboard(dataObject *IDataObject) bool {
 	return true
 }
 
+// OleIsCurrentClipboard reports whether dataObject currently owns the OLE
+// clipboard.
 func OleIsCurrentClipboard(dataObject *IDataObject) bool {
 	r := win.OleIsCurrentClipboard((*win.IDataObject)(unsafe.Pointer(dataObject)))
 	if r != 0 {
@@ -265,21 +342,31 @@ func OleIsCurrentClipboard(dataObject *IDataObject) bool {
 	}
 	return true
 }
+
+// GlobalSize returns the size of an HGLOBAL.
 func GlobalSize(hMem uintptr) win.SIZE_T {
 	return win.GlobalSize(win.HGLOBAL(hMem))
 }
+
+// GlobalLock locks an HGLOBAL and returns its address.
 func GlobalLock(hMem uintptr) uintptr {
 	r := win.GlobalLock(win.HGLOBAL(hMem))
 
 	return uintptr(r)
 }
+
+// GlobalUnlock unlocks an HGLOBAL.
 func GlobalUnlock(hMem uintptr) {
 	win.GlobalUnlock(win.HGLOBAL(hMem))
 }
 
+// SendCliprdrMessage asks the clipboard window to install the OLE data object.
 func (c *Control) SendCliprdrMessage() {
 	win.PostMessage(win.HWND(c.hwnd), WM_CLIPRDR_MESSAGE, OLE_SETCLIPBOARD, 0)
 }
+
+// GetFileInfo converts the Win32 file attribute data of an os.FileInfo.Sys
+// into a FILE_ATTRIBUTE flag, an 8 byte FILETIME and the two size halves.
 func GetFileInfo(sys interface{}) (uint32, []byte, uint32, uint32) {
 	f := sys.(*syscall.Win32FileAttributeData)
 	b := &bytes.Buffer{}
@@ -288,6 +375,7 @@ func GetFileInfo(sys interface{}) (uint32, []byte, uint32, uint32) {
 	return f.FileAttributes, b.Bytes(), f.FileSizeHigh, f.FileSizeLow
 }
 
+// GetFileNames returns the paths the OS clipboard shares through CF_HDROP.
 func GetFileNames() []string {
 	o := OleGetClipboard()
 	var formatEtc FORMATETC
@@ -322,8 +410,8 @@ func GetFileNames() []string {
 	return fs
 }
 
+// File share and file attribute flags (WIN32 API).
 const (
-	/* File attribute flags */
 	FILE_SHARE_READ   = 0x00000001
 	FILE_SHARE_WRITE  = 0x00000002
 	FILE_SHARE_DELETE = 0x00000004
@@ -348,6 +436,8 @@ const (
 	FILE_ATTRIBUTE_EA                  = 0x00040000
 )
 
+// DROPFILES is the CF_HDROP header that precedes the double NUL terminated
+// list of file paths.
 type DROPFILES struct {
 	pFiles uintptr
 	pt     uintptr

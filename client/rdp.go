@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"image"
 	"net"
 	"strings"
 	"time"
@@ -43,6 +44,11 @@ type RdpClient struct {
 
 	// Set when drawing orders are enabled; nil otherwise.
 	screen *orders.Screen
+
+	// fb wraps screen for callers. It exists for every session, not only one
+	// with orders enabled, because the bitmap path composites into the same
+	// buffer.
+	fb *Framebuffer
 }
 
 type pendingEvent struct {
@@ -145,10 +151,24 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	// server stop sending bitmap updates and put everything through the bitmap
 	// cache, so the renderer has to exist before the capability is announced.
 	if c.setting != nil && c.setting.EnableOrders {
-		c.screen = orders.NewScreen(c.setting.Width, c.setting.Height)
 		c.pdu.SetOrderSupport(true)
-		// The ready event carries no argument, unlike the ones that follow.
-		c.pdu.Once("ready", func() {
+	}
+
+	// The framebuffer exists for every session, whichever way the server draws.
+	// Bitmap updates, surface bits and orders all land in it, so a caller has
+	// one place to read pixels from instead of one per drawing path, and the
+	// pixels outlive the callback that delivered them.
+	c.screen = orders.NewScreen(width, height)
+	c.fb = &Framebuffer{screen: c.screen}
+	// The ready event carries no argument, unlike the ones that follow.
+	c.pdu.Once("ready", func() {
+		c.pdu.On("bitmap", func(d interface{}) {
+			c.composite(bitmapsFromEvent(d, TC_RDP))
+		})
+		c.pdu.On("surface-bits", func(d interface{}) {
+			c.composite(surfaceBitmaps(d.(*pdu.SurfaceBitsCommand)))
+		})
+		if c.setting != nil && c.setting.EnableOrders {
 			c.pdu.On("orders", func(d interface{}) {
 				pdus, ok := d.([]pdu.OrderPdu)
 				if !ok {
@@ -162,10 +182,29 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 				if dirty.Empty() {
 					return
 				}
+				// The old event keeps its meaning for callers that still use
+				// it: one rectangle for the batch.
 				c.pdu.Emit("orders-frame", dirty)
+				c.pdu.Emit("frame", []image.Rectangle{dirty})
 			})
-		})
-	}
+		}
+		if c.gfx != nil {
+			c.gfx.On("gfx-frame", func(d interface{}) {
+				c.compositeSurfaces(d.(rdpgfx.Frame).Surfaces)
+			})
+			// A reset names the desktop the server will composite into, and
+			// means every surface known so far is gone, so the buffer is
+			// resized and reported as entirely redrawn.
+			c.gfx.On("gfx-reset", func(d interface{}) {
+				r := d.(rdpgfx.Reset)
+				if r.Width <= 0 || r.Height <= 0 {
+					return
+				}
+				c.screen.Resize(r.Width, r.Height)
+				c.pdu.Emit("frame", []image.Rectangle{image.Rect(0, 0, r.Width, r.Height)})
+			})
+		}
+	})
 
 	if c.setting != nil && c.setting.EnableClipboard {
 		clip := cliprdr.NewCliprdrClient()
@@ -370,6 +409,70 @@ func (c *RdpClient) MouseDown(button int, x, y int) {
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+}
+
+// framebuffer returns the wrapper around this session's pixel buffer, or nil
+// before Login has built it. The wrapper is made once, so the pointer stays
+// valid across calls even though the buffer under it can be resized.
+func (c *RdpClient) framebuffer() *Framebuffer {
+	if c == nil {
+		return nil
+	}
+	return c.fb
+}
+
+// composite copies decoded bitmaps into the framebuffer and reports the merged
+// area that changed. A bitmap that lands entirely outside the frame changes
+// nothing and is dropped, which is what keeps a server that draws off screen
+// from growing the dirty region to something the caller cannot use.
+func (c *RdpClient) composite(bs []Bitmap) {
+	if c == nil || c.screen == nil || len(bs) == 0 {
+		return
+	}
+	screenW, screenH := c.screen.Size()
+	bounds := image.Rect(0, 0, screenW, screenH)
+	var dirty []image.Rectangle
+	for _, b := range bs {
+		if b.Width <= 0 || b.Height <= 0 || len(b.Data) == 0 {
+			continue
+		}
+		// The update gives the destination by its top left corner, and the
+		// bitmap's own size says how far it reaches. DestRight and DestBottom
+		// are inclusive on the wire, so they are deliberately not used here:
+		// adding the size to the corner cannot be off by one.
+		dst := image.Rect(b.DestLeft, b.DestTop, b.DestLeft+b.Width, b.DestTop+b.Height)
+		dirty = addDirty(dirty, c.screen.Blit(b.Data, b.Width, b.Height, b.BitsPerPixel, dst), bounds)
+	}
+	if len(dirty) == 0 {
+		return
+	}
+	c.pdu.Emit("frame", dirty)
+}
+
+// compositeSurfaces copies the surfaces of one graphics channel frame into the
+// framebuffer, each at the position it was mapped to, resampled if the server
+// asked for a size other than the surface's own.
+func (c *RdpClient) compositeSurfaces(surfaces []*rdpgfx.Surface) {
+	if c == nil || c.screen == nil || len(surfaces) == 0 {
+		return
+	}
+	screenW, screenH := c.screen.Size()
+	bounds := image.Rect(0, 0, screenW, screenH)
+	var dirty []image.Rectangle
+	for _, s := range surfaces {
+		pixels, w, h := s.CompositePixels()
+		if w <= 0 || h <= 0 || len(pixels) == 0 {
+			continue
+		}
+		x, y := s.Origin()
+		// The graphics channel delivers BGRA, which is the framebuffer's own
+		// format, so nothing is converted here.
+		dirty = addDirty(dirty, c.screen.Blit(pixels, w, h, 4, image.Rect(x, y, x+w, y+h)), bounds)
+	}
+	if len(dirty) == 0 {
+		return
+	}
+	c.pdu.Emit("frame", dirty)
 }
 
 // Close closes the underlying transport. It is safe on a partially built client

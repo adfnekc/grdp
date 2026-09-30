@@ -138,3 +138,83 @@ func TestSendMouseEventFraming(t *testing.T) {
 		t.Fatalf("input PDU % X does not contain % X", tr.buf.Bytes(), want)
 	}
 }
+
+// The fast-path Unicode keyboard event is three bytes: the event header, whose
+// low five bits are the flags, then the two byte code. FreeRDP's server side
+// parser is the authority for that shape (fastpath_recv_input_event_unicode in
+// libfreerdp/core/fastpath.c reads one UINT16 and takes the release flag from
+// eventFlags in the header), and it is the reason this test checks the release
+// bit rather than only the code.
+//
+// The header used to be written as eventCode<<5 alone, which drops the release
+// flag: every Unicode event then arrived as a key press, the key never came up,
+// and nothing was typed. No server in this repository's reach would say so:
+// xrdp advertises INPUT_FLAG_UNICODE and then never delivers the result to X,
+// so this is pinned here instead.
+func TestFastPathInputUnicode(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   UnicodeKeyEvent
+		want []byte
+	}{
+		{"a down", UnicodeKeyEvent{Unicode: 'a'}, []byte{0x80, 0x61, 0x00}},
+		{"a up", UnicodeKeyEvent{KeyboardFlags: KBDFLAGS_RELEASE, Unicode: 'a'}, []byte{0x81, 0x61, 0x00}},
+		// A character outside ASCII, which is the point of the event: its code
+		// is written little endian, so the low byte comes first.
+		{"CJK down", UnicodeKeyEvent{Unicode: 0x4E2D}, []byte{0x80, 0x2D, 0x4E}},
+		{"CJK up", UnicodeKeyEvent{KeyboardFlags: KBDFLAGS_RELEASE, Unicode: 0x4E2D}, []byte{0x81, 0x2D, 0x4E}},
+	}
+	for _, c := range cases {
+		fp := &fakeFastPath{}
+		cl := NewClient(newCaptureTransport())
+		cl.SetFastPathSender(fp)
+		cl.SendInputEvents(INPUT_EVENT_UNICODE, []InputEventsInterface{&c.ev})
+		if fp.numEvents != 1 {
+			t.Errorf("%s: numEvents = %d, want 1", c.name, fp.numEvents)
+		}
+		if !bytes.Equal(fp.data, c.want) {
+			t.Errorf("%s: data = % X, want % X", c.name, fp.data, c.want)
+		}
+	}
+}
+
+// The two halves of a surrogate pair travel as two events in one message, which
+// is what makes a supplementary character possible at all: the event carries a
+// single 16 bit code. Both events must be present, in order, and the message
+// must say so in its event count.
+func TestFastPathInputUnicodeSurrogatePair(t *testing.T) {
+	high, low := rune(0xD83D), rune(0xDE00) // U+1F600
+	fp := &fakeFastPath{}
+	cl := NewClient(newCaptureTransport())
+	cl.SetFastPathSender(fp)
+	cl.SendInputEvents(INPUT_EVENT_UNICODE, []InputEventsInterface{
+		&UnicodeKeyEvent{Unicode: uint16(high)},
+		&UnicodeKeyEvent{Unicode: uint16(low)},
+	})
+	if fp.numEvents != 2 {
+		t.Fatalf("numEvents = %d, want 2", fp.numEvents)
+	}
+	want := []byte{0x80, 0x3D, 0xD8, 0x80, 0x00, 0xDE}
+	if !bytes.Equal(fp.data, want) {
+		t.Errorf("data = % X, want % X", fp.data, want)
+	}
+}
+
+// The slow path puts the release flag in the real keyboardFlags field instead,
+// so the two encodings differ and both have to be right.
+func TestSlowPathInputUnicode(t *testing.T) {
+	tr := newCaptureTransport()
+	cl := NewClient(tr)
+	cl.SendInputEvents(INPUT_EVENT_UNICODE, []InputEventsInterface{
+		&UnicodeKeyEvent{KeyboardFlags: KBDFLAGS_RELEASE, Unicode: 0x4E2D},
+	})
+	if tr.buf.Len() == 0 {
+		t.Fatal("nothing was sent on the slow path")
+	}
+	// The event data is keyboardFlags, unicodeCode, pad2Octets, all little
+	// endian: release 0x8000, 0x4E2D, 0x0000.
+	want := []byte{0x00, 0x80, 0x2D, 0x4E, 0x00, 0x00}
+	if !bytes.Contains(tr.buf.Bytes(), want) {
+		t.Errorf("slow path data = % X, does not contain % X", tr.buf.Bytes(), want)
+	}
+}

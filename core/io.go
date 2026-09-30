@@ -165,20 +165,27 @@ func Uint16BE(d0, d1 uint8) uint16 {
 	return binary.BigEndian.Uint16(b)
 }
 
-// RGB565ToRGB expands a 5-6-5 packed colour to eight bits per channel.
+// RGB565ToRGB expands a 5-6-5 packed colour to eight bits per channel. The
+// parentheses are load bearing for the reader rather than for the parser: & and
+// >> have the same precedence and associate left, so the unparenthesised form
+// already means (data & mask) >> shift. That is not obvious, and an obvious
+// looking "fix" of it breaks the colours. The expansion truncates, so full scale
+// comes out as 248 rather than 255.
 func RGB565ToRGB(data uint16) (r, g, b uint8) {
-	r = uint8(data & 0xF800 >> 8)
-	g = uint8(data & 0x07E0 >> 3)
-	b = uint8(data & 0x001F << 3)
+	r = uint8((data & 0xF800) >> 8)
+	g = uint8((data & 0x07E0) >> 3)
+	b = uint8((data & 0x001F) << 3)
 
 	return
 }
 
-// RGB555ToRGB expands a 5-5-5 packed colour to eight bits per channel.
+// RGB555ToRGB expands a 5-5-5 packed colour to eight bits per channel, with the
+// same truncating expansion and the same load bearing parentheses as
+// RGB565ToRGB.
 func RGB555ToRGB(data uint16) (r, g, b uint8) {
-	r = uint8(data & 0x7C00 >> 7)
-	g = uint8(data & 0x03E0 >> 2)
-	b = uint8(data & 0x001F << 3)
+	r = uint8((data & 0x7C00) >> 7)
+	g = uint8((data & 0x03E0) >> 2)
+	b = uint8((data & 0x001F) << 3)
 
 	return
 }

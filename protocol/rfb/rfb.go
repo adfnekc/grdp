@@ -34,6 +34,10 @@ const (
 	SEC_VNC     uint8 = 2
 )
 
+// RFBConn is the RFB (VNC) connection. It drives the handshake, decodes the
+// server's framebuffer updates into the framebuffer it retains, and sends the
+// client's input and clipboard messages. Its parse steps emit events; the
+// tests in this package drive them over a scripted net.Pipe server.
 type RFBConn struct {
 	emission.Emitter
 	// The Socket connection to the client
@@ -52,6 +56,13 @@ type RFBConn struct {
 	// stored. NbRect counts how many are still to arrive, so it cannot also be
 	// the write position without storing the rectangles in reverse order.
 	rectIndex int
+	// frame is the framebuffer every rectangle is decoded into. RFB is
+	// stateful: an incremental update assumes the client kept the previous one,
+	// which is what makes CopyRect meaningful, so the decoded pixels have to be
+	// retained between updates. frameStride is one row's length in bytes; a
+	// rectangle narrower than the desktop is not contiguous in the buffer.
+	frame       []byte
+	frameStride int
 }
 
 // The RFB client in this package is inherited from the upstream fork. Its
@@ -72,6 +83,53 @@ const (
 	maxSecurityReasonBytes = 1 << 20
 )
 
+// maxFramebufferBytes bounds the framebuffer a connection keeps. It is sized
+// from the ServerInit geometry and the active pixel format, both of which come
+// off the wire, so the product is checked before it sizes the allocation. The
+// ceiling matches the one the RDP bitmap path uses (core's maxDecodedBytes).
+const maxFramebufferBytes = 64 << 20
+
+// maxHextileWireBytes bounds the bytes one Hextile rectangle may carry. A tile
+// of 255 coloured subrectangles carries up to 255*(bytesPerPixel+2) bytes for
+// 256 pixels, so the wire form can exceed the decoded size; the number of tiles
+// comes from the geometry, which maxRectBytes already bounds, and this is a
+// second ceiling on the same wire form.
+const maxHextileWireBytes = 4 * maxRectBytes
+
+// The RFB encodings this client implements. CopyRect and Hextile are the ones
+// beyond Raw; the values are the encoding ids on the wire, checked against
+// TigerVNC's common/rfb/encodings.h.
+const (
+	encodingRaw      = 0
+	encodingCopyRect = 1
+	encodingHextile  = 5
+)
+
+// copyRectBodySize is the whole body of a CopyRect rectangle: two big-endian
+// uint16 source coordinates. The rectangle's own width and height come from the
+// rectangle header, so they are not repeated on the wire.
+const copyRectBodySize = 4
+
+// hextileTilePixels is the side of a Hextile tile and hextileTileArea is how
+// many pixels one holds.
+const (
+	hextileTilePixels = 16
+	hextileTileArea   = hextileTilePixels * hextileTilePixels
+)
+
+// Hextile subencoding bits (RFC 6143 section 7.7.4), checked against TigerVNC's
+// common/rfb/hextileConstants.h. The brief that asked for this said four bits
+// (1, 2, 4, 8); the reference has five, and Raw is bit 0.
+const (
+	hextileRaw              = 1 << 0
+	hextileBgSpecified      = 1 << 1
+	hextileFgSpecified      = 1 << 2
+	hextileAnySubrects      = 1 << 3
+	hextileSubrectsColoured = 1 << 4
+)
+
+// NewRFBConn wraps a connected socket in an RFBConn. It does not read or write
+// until start is called through RFB.Connect.
 func NewRFBConn(s net.Conn, passwd string) *RFBConn {
 	fc := &RFBConn{
 		Emitter:  *emission.NewEmitter(),
@@ -91,15 +149,20 @@ func (fc *RFBConn) start() {
 	core.StartReadBytes(12, fc, fc.recvProtocolVersion)
 }
 
+// Read reads raw bytes from the underlying connection. It exists so RFBConn
+// satisfies the reader the read helpers expect.
 func (fc *RFBConn) Read(b []byte) (n int, err error) {
 	return fc.Conn.Read(b)
 }
 
+// Write writes raw bytes to the underlying connection.
 func (fc *RFBConn) Write(data []byte) (n int, err error) {
 	buff := &bytes.Buffer{}
 	buff.Write(data)
 	return fc.Conn.Write(buff.Bytes())
 }
+
+// Close closes the underlying connection.
 func (fc *RFBConn) Close() error {
 	return fc.Conn.Close()
 }
@@ -324,6 +387,8 @@ func (fc *RFBConn) startServerInit() {
 	core.StartReadBytes(20, fc, fc.recvServerInit)
 }
 
+// ServerInit is the server's opening message: the desktop geometry and its
+// default pixel format.
 type ServerInit struct {
 	Width       uint16       `struc:"little"`
 	Height      uint16       `struc:"little"`
@@ -378,11 +443,73 @@ func (fc *RFBConn) recvServerName(s []byte, err error) {
 	// the requested format becomes the active one and is what BitRect reports.
 	fc.sendPixelFormat()
 	fc.BitRect.Pf = NewPixelFormat()
+	// The framebuffer is sized from the ServerInit geometry and the format the
+	// client just asked for. A size that fails the bound is reported here, before
+	// any rectangle arrives, rather than rounded down: a framebuffer of the wrong
+	// size silently corrupts every rectangle after it.
+	if err := fc.initFramebuffer(); err != nil {
+		glog.Errorf("%v", err)
+		fc.Emit("error", err)
+		return
+	}
 	fc.sendSetEncoding()
 	fc.sendFramebufferUpdateRequest(0, 0, 0, fc.s.Width, fc.s.Height)
 
 	fc.Emit("ready")
 	core.StartReadBytes(1, fc, fc.recvServerOrder)
+}
+
+// initFramebuffer allocates the connection's framebuffer from the ServerInit
+// geometry and the active pixel format. Both come off the wire, so the total is
+// checked against maxFramebufferBytes before it sizes the allocation.
+func (fc *RFBConn) initFramebuffer() error {
+	if fc.s == nil {
+		return errors.New("rfb: no server init to size the framebuffer")
+	}
+	w, h := int(fc.s.Width), int(fc.s.Height)
+	if w <= 0 || h <= 0 {
+		return fmt.Errorf("rfb: server desktop size %dx%d is out of range", w, h)
+	}
+	bpp := fc.bytesPerPixel()
+	size := w * h * bpp
+	if size < 0 || size > maxFramebufferBytes {
+		return fmt.Errorf("rfb: framebuffer of %dx%d at %d bpp is %d bytes, over the %d byte limit",
+			w, h, bpp*8, size, maxFramebufferBytes)
+	}
+	fc.frame = make([]byte, size)
+	fc.frameStride = w * bpp
+	return nil
+}
+
+// bytesPerPixel is the size of one pixel in the active format. The format is
+// whatever the client asked for with SetPixelFormat; before that it is the
+// server's, and a BitsPerPixel of zero falls back to four the way the old body
+// length did.
+func (fc *RFBConn) bytesPerPixel() int {
+	if fc.BitRect.Pf != nil {
+		if n := int(fc.BitRect.Pf.BitsPerPixel) / 8; n > 0 {
+			return n
+		}
+	}
+	return 4
+}
+
+// Framebuffer returns the pixels of every rectangle decoded so far, laid out
+// row by row in the active pixel format with no row padding. Its length is
+// width*height*bytesPerPixel; FramebufferSize reports the geometry and
+// BitRect.Pf the format. It is nil before ServerInit has been read or when the
+// desktop size was rejected. A rectangle narrower than the desktop is not
+// contiguous in it, which is why Rectangles.Data carries the rectangle's own
+// destination pixels rather than a slice of this buffer.
+func (fc *RFBConn) Framebuffer() []byte { return fc.frame }
+
+// FramebufferSize returns the framebuffer's width and height in pixels, or
+// (0, 0) before ServerInit has been read.
+func (fc *RFBConn) FramebufferSize() (width, height int) {
+	if fc.s == nil {
+		return 0, 0
+	}
+	return int(fc.s.Width), int(fc.s.Height)
 }
 
 func (fc *RFBConn) sendPixelFormat() {
@@ -416,16 +543,26 @@ func writePixelFormat(w io.Writer, pf *PixelFormat) {
 	core.WriteUInt16BE(pf.Padding, w)
 	core.WriteUInt8(pf.Padding1, w)
 }
+
+// sendSetEncoding advertises every encoding this client decodes in one
+// SetEncodings message. The message is a count followed by that many 32 bit
+// ids, so the encodings are a single list: a second message would replace the
+// first rather than add to it.
 func (fc *RFBConn) sendSetEncoding() {
 	glog.Debug("sendSetEncoding")
+	encodings := [...]uint32{encodingRaw, encodingCopyRect, encodingHextile}
 	buff := &bytes.Buffer{}
-	core.WriteUInt8(2, buff)
-	core.WriteUInt8(0, buff)
-	core.WriteUInt16BE(1, buff)
-	core.WriteUInt32BE(0, buff)
+	core.WriteUInt8(2, buff) // SetEncodings
+	core.WriteUInt8(0, buff) // padding
+	core.WriteUInt16BE(uint16(len(encodings)), buff)
+	for _, e := range encodings {
+		core.WriteUInt32BE(e, buff)
+	}
 	fc.Write(buff.Bytes())
 }
 
+// FrameBufferUpdateRequest is the client's RequestFramebufferUpdate message:
+// whether the server may send only changes, and the rectangle to update.
 type FrameBufferUpdateRequest struct {
 	Incremental uint8
 	X           uint16
@@ -476,11 +613,18 @@ func (fc *RFBConn) recvServerOrder(s []byte, err error) {
 	}
 }
 
+// BitRect is the set of rectangles of one FramebufferUpdate, along with the
+// pixel format they are in. It is emitted as the "bitmap" event when the last
+// rectangle of the update has been decoded.
 type BitRect struct {
 	Rects []Rectangles
 	Pf    *PixelFormat
 }
 
+// Rectangles is one rectangle of an update: its header and its destination
+// pixels. Data is the pixels of the rectangle itself, width*height*bytesPerPixel
+// of them, so a rectangle narrower than the desktop is still contiguous; the
+// connection's whole framebuffer is available through Framebuffer.
 type Rectangles struct {
 	Rect *Rectangle
 	Data []byte
@@ -508,12 +652,17 @@ func (fc *RFBConn) recvFrameBufferUpdateHeader(s []byte, err error) {
 	core.StartReadBytes(12, fc, fc.recvRectHeader)
 }
 
+// Rectangle is a rectangle header. SrcX and SrcY are set for a CopyRect, whose
+// pixels come from elsewhere in the framebuffer; they are zero for every other
+// encoding.
 type Rectangle struct {
 	X        uint16 `struc:"little"`
 	Y        uint16 `struc:"little"`
 	Width    uint16 `struc:"little"`
 	Height   uint16 `struc:"little"`
 	Encoding uint32 `struc:"little"`
+	SrcX     uint16
+	SrcY     uint16
 }
 
 func (fc *RFBConn) recvRectHeader(s []byte, err error) {
@@ -528,40 +677,340 @@ func (fc *RFBConn) recvRectHeader(s []byte, err error) {
 	w, _ := core.ReadUint16BE(r)
 	h, _ := core.ReadUint16BE(r)
 	e, _ := core.ReadUInt32BE(r)
-	rect := &Rectangle{x, y, w, h, e}
+	rect := &Rectangle{X: x, Y: y, Width: w, Height: h, Encoding: e}
 
 	fc.BitRect.Rects[fc.rectIndex].Rect = rect
+	glog.Infof("rect %dx%d at %d,%d encoding %s", rect.Width, rect.Height, rect.X, rect.Y, encodingName(rect.Encoding))
 
-	// The body length depends on the encoding, and this client advertises Raw
-	// only. A length guessed for a different encoding would misread the rest of
-	// the update, so anything but Raw is reported rather than read.
-	if rect.Encoding != 0 {
+	// The body length and how it is read depend on the encoding. A length
+	// guessed for a different encoding would misread the rest of the update, so
+	// an encoding this client does not implement is reported rather than read as
+	// something else.
+	switch rect.Encoding {
+	case encodingRaw:
+		size, err := fc.rectBodySize(rect)
+		if err != nil {
+			glog.Errorf("%v", err)
+			fc.Emit("error", err)
+			return
+		}
+		if err := fc.checkRectFits(rect); err != nil {
+			fc.Emit("error", err)
+			return
+		}
+		glog.Infof("raw rectangle body is %d bytes", size)
+		core.StartReadBytes(size, fc, fc.recvRawBody)
+	case encodingCopyRect:
+		if err := fc.checkRectFits(rect); err != nil {
+			fc.Emit("error", err)
+			return
+		}
+		core.StartReadBytes(copyRectBodySize, fc, fc.recvCopyRectBody)
+	case encodingHextile:
+		size, err := fc.rectBodySize(rect)
+		if err != nil {
+			glog.Errorf("%v", err)
+			fc.Emit("error", err)
+			return
+		}
+		if err := fc.checkRectFits(rect); err != nil {
+			fc.Emit("error", err)
+			return
+		}
+		// Hextile has no body length on the wire, so it is read tile by tile
+		// straight from the connection here, in this read goroutine.
+		fc.recvHextileRect(rect, size)
+	default:
 		glog.Errorf("rfb: unsupported rectangle encoding %d", rect.Encoding)
 		fc.Emit("error", fmt.Errorf("rfb: unsupported rectangle encoding %d", rect.Encoding))
-		return
 	}
-	bytesPerPixel := 4
-	if fc.BitRect.Pf != nil {
-		if n := int(fc.BitRect.Pf.BitsPerPixel) / 8; n > 0 {
-			bytesPerPixel = n
-		}
-	}
-	size := int(rect.Width) * int(rect.Height) * bytesPerPixel
-	if size < 0 || size > maxRectBytes {
-		glog.Errorf("rfb: rectangle %dx%d is out of range", rect.Width, rect.Height)
-		fc.Emit("error", fmt.Errorf("rfb: rectangle %dx%d is out of range", rect.Width, rect.Height))
-		return
-	}
-	glog.Infof("rect:%+v, len=%d", rect, size)
-	core.StartReadBytes(size, fc, fc.recvRectBody)
 }
-func (fc *RFBConn) recvRectBody(s []byte, err error) {
-	glog.Debug("RFBConn recvRectBody", hex.EncodeToString(s), err)
+
+// encodingName names an encoding for logs, including the ones this client does
+// not implement, which are then reported by id.
+func encodingName(e uint32) string {
+	switch e {
+	case encodingRaw:
+		return "Raw"
+	case encodingCopyRect:
+		return "CopyRect"
+	case encodingHextile:
+		return "Hextile"
+	default:
+		return fmt.Sprintf("id %d", e)
+	}
+}
+
+// rectBodySize returns the number of pixel bytes a rectangle decodes to. Width,
+// height and the active pixel format all come off the wire, so the product is
+// bounded before it sizes a read or an allocation.
+func (fc *RFBConn) rectBodySize(rect *Rectangle) (int, error) {
+	size := int(rect.Width) * int(rect.Height) * fc.bytesPerPixel()
+	if size < 0 || size > maxRectBytes {
+		return 0, fmt.Errorf("rfb: rectangle %dx%d is out of range", rect.Width, rect.Height)
+	}
+	return size, nil
+}
+
+// rectInFrame reports whether a rectangle of w by h pixels at x,y lies inside
+// the framebuffer.
+func (fc *RFBConn) rectInFrame(x, y, w, h int) bool {
+	if fc.s == nil {
+		return false
+	}
+	return x >= 0 && y >= 0 && w >= 0 && h >= 0 &&
+		x+w <= int(fc.s.Width) && y+h <= int(fc.s.Height)
+}
+
+// checkRectFits reports whether a rectangle header names a region inside the
+// framebuffer. The coordinates are uint16 on the wire; a rectangle that runs
+// past the framebuffer is rejected rather than wrapped, which would write the
+// wrong rows.
+func (fc *RFBConn) checkRectFits(rect *Rectangle) error {
+	if !fc.rectInFrame(int(rect.X), int(rect.Y), int(rect.Width), int(rect.Height)) {
+		return fmt.Errorf("rfb: rectangle %dx%d at %d,%d is outside the framebuffer",
+			rect.Width, rect.Height, rect.X, rect.Y)
+	}
+	return nil
+}
+
+// writeRect stores a rectangle's decoded pixels in the framebuffer. data is the
+// rectangle's pixels, width*height*bytesPerPixel of them; the framebuffer row is
+// frameStride bytes, so the rows are copied one at a time.
+func (fc *RFBConn) writeRect(rect *Rectangle, data []byte) {
+	bpp := fc.bytesPerPixel()
+	rowBytes := int(rect.Width) * bpp
+	for row := 0; row < int(rect.Height); row++ {
+		dst := (int(rect.Y)+row)*fc.frameStride + int(rect.X)*bpp
+		src := row * rowBytes
+		copy(fc.frame[dst:dst+rowBytes], data[src:src+rowBytes])
+	}
+}
+
+// recvRawBody stores a Raw rectangle's body and hands it on.
+func (fc *RFBConn) recvRawBody(s []byte, err error) {
 	if err != nil {
 		fc.Emit("error", err)
 		return
 	}
+	rect := fc.BitRect.Rects[fc.rectIndex].Rect
+	fc.writeRect(rect, s)
 	fc.BitRect.Rects[fc.rectIndex].Data = s
+	fc.finishRect()
+}
+
+// recvCopyRectBody reads the two source coordinates of a CopyRect and copies
+// that region into the rectangle's position.
+func (fc *RFBConn) recvCopyRectBody(s []byte, err error) {
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	r := bytes.NewReader(s)
+	srcX, _ := core.ReadUint16BE(r)
+	srcY, _ := core.ReadUint16BE(r)
+	rect := fc.BitRect.Rects[fc.rectIndex].Rect
+	rect.SrcX, rect.SrcY = srcX, srcY
+	data, err := fc.copyRect(rect, int(srcX), int(srcY))
+	if err != nil {
+		fc.Emit("error", err)
+		return
+	}
+	fc.BitRect.Rects[fc.rectIndex].Data = data
+	fc.finishRect()
+}
+
+// copyRect copies the source region named by a CopyRect into the rectangle's
+// position in the framebuffer and returns the destination pixels. Source and
+// destination can overlap, so the rows are copied in the direction that reads
+// each source row before it is overwritten; a single row is copied with copy,
+// which handles an overlap within the row the way memmove does. A source or
+// destination outside the framebuffer is rejected rather than wrapped, because
+// the coordinates are uint16 on the wire and wrapping would read or write the
+// wrong rows.
+func (fc *RFBConn) copyRect(rect *Rectangle, srcX, srcY int) ([]byte, error) {
+	bpp := fc.bytesPerPixel()
+	w, h := int(rect.Width), int(rect.Height)
+	dstX, dstY := int(rect.X), int(rect.Y)
+	if !fc.rectInFrame(srcX, srcY, w, h) {
+		return nil, fmt.Errorf("rfb: CopyRect source %dx%d at %d,%d is outside the framebuffer",
+			w, h, srcX, srcY)
+	}
+	if !fc.rectInFrame(dstX, dstY, w, h) {
+		return nil, fmt.Errorf("rfb: CopyRect destination %dx%d at %d,%d is outside the framebuffer",
+			w, h, dstX, dstY)
+	}
+	stride := fc.frameStride
+	rowBytes := w * bpp
+	srcOff := srcY*stride + srcX*bpp
+	dstOff := dstY*stride + dstX*bpp
+	if dstY > srcY {
+		// The destination is below the source, so copy from the bottom up: each
+		// source row is read before the row above it is overwritten.
+		for row := h - 1; row >= 0; row-- {
+			copy(fc.frame[dstOff+row*stride:dstOff+row*stride+rowBytes],
+				fc.frame[srcOff+row*stride:srcOff+row*stride+rowBytes])
+		}
+	} else {
+		for row := 0; row < h; row++ {
+			copy(fc.frame[dstOff+row*stride:dstOff+row*stride+rowBytes],
+				fc.frame[srcOff+row*stride:srcOff+row*stride+rowBytes])
+		}
+	}
+	// The destination pixels are now in place; hand back the rectangle's own
+	// pixels, which for a rectangle narrower than the desktop are not contiguous
+	// in the framebuffer.
+	data := make([]byte, h*rowBytes)
+	for row := 0; row < h; row++ {
+		copy(data[row*rowBytes:], fc.frame[dstOff+row*stride:dstOff+row*stride+rowBytes])
+	}
+	return data, nil
+}
+
+// recvHextileRect reads and decodes one Hextile rectangle into the framebuffer.
+// Its body has no length field, so it is read tile by tile straight from the
+// connection: the number of tiles comes from the rectangle geometry and each
+// tile says how many subrectangles it carries, so every read is bounded. size is
+// the rectangle's decoded size, already checked against maxRectBytes.
+func (fc *RFBConn) recvHextileRect(rect *Rectangle, size int) {
+	data := make([]byte, size)
+	if err := decodeHextile(fc.Conn, data, int(rect.Width), int(rect.Height), fc.bytesPerPixel()); err != nil {
+		glog.Errorf("%v", err)
+		fc.Emit("error", err)
+		return
+	}
+	fc.writeRect(rect, data)
+	fc.BitRect.Rects[fc.rectIndex].Data = data
+	fc.finishRect()
+}
+
+// decodeHextile reads one Hextile rectangle's body from r and writes its pixels
+// into data, which is width*height*bytesPerPixel bytes. It is separate from
+// recvHextileRect so the decoder can be fed bytes without a connection.
+//
+// The decoder follows RFC 6143 section 7.7.4 and TigerVNC's
+// common/rfb/HextileDecoder: a background and foreground colour persist across
+// tiles until a tile's subencoding replaces them, and a tile with AnySubrects
+// clear is the whole tile in the background colour.
+func decodeHextile(r io.Reader, data []byte, w, h, bpp int) error {
+	stride := w * bpp
+	bg := make([]byte, bpp)
+	fg := make([]byte, bpp)
+	tile := make([]byte, hextileTileArea*bpp)
+
+	budget := maxHextileWireBytes
+	read := func(dst []byte) error {
+		if len(dst) > budget {
+			return fmt.Errorf("rfb: Hextile rectangle carries more than %d bytes", maxHextileWireBytes)
+		}
+		budget -= len(dst)
+		_, err := io.ReadFull(r, dst)
+		if err != nil {
+			return fmt.Errorf("rfb: Hextile body: %w", err)
+		}
+		return nil
+	}
+
+	var one [1]byte
+	for ty := 0; ty < h; ty += hextileTilePixels {
+		th := minInt(hextileTilePixels, h-ty)
+		for tx := 0; tx < w; tx += hextileTilePixels {
+			tw := minInt(hextileTilePixels, w-tx)
+			tileBytes := tw * th * bpp
+
+			if err := read(one[:]); err != nil {
+				return err
+			}
+			sub := one[0]
+
+			if sub&hextileRaw != 0 {
+				if err := read(tile[:tileBytes]); err != nil {
+					return err
+				}
+				blitTile(data, stride, tile, tw, th, tx, ty, bpp)
+				continue
+			}
+
+			// The background colour persists across tiles when unspecified, so
+			// bg and fg are not reset here. A tile is the background colour and
+			// then the subrectangles are drawn in the foreground colour.
+			if sub&hextileBgSpecified != 0 {
+				if err := read(bg); err != nil {
+					return err
+				}
+			}
+			for i := 0; i < tileBytes; i += bpp {
+				copy(tile[i:i+bpp], bg)
+			}
+
+			if sub&hextileFgSpecified != 0 {
+				if err := read(fg); err != nil {
+					return err
+				}
+			}
+
+			if sub&hextileAnySubrects != 0 {
+				if err := read(one[:]); err != nil {
+					return err
+				}
+				nSubrects := int(one[0])
+				for i := 0; i < nSubrects; i++ {
+					if sub&hextileSubrectsColoured != 0 {
+						// Each subrectangle carries its own foreground colour.
+						if err := read(fg); err != nil {
+							return err
+						}
+					}
+					var xywh [2]byte
+					if err := read(xywh[:]); err != nil {
+						return err
+					}
+					sx, sy := int(xywh[0]>>4), int(xywh[0]&15)
+					sw, sh := int(xywh[1]>>4)+1, int(xywh[1]&15)+1
+					// The bit fields can name a subrectangle larger than the tile,
+					// which would be read as a wrap into another row.
+					if sx+sw > tw || sy+sh > th {
+						return fmt.Errorf("rfb: Hextile subrectangle %dx%d at %d,%d is outside a %dx%d tile", sw, sh, sx, sy, tw, th)
+					}
+					for row := 0; row < sh; row++ {
+						base := ((sy+row)*tw + sx) * bpp
+						for c := 0; c < sw; c++ {
+							copy(tile[base+c*bpp:base+c*bpp+bpp], fg)
+						}
+					}
+				}
+			}
+
+			blitTile(data, stride, tile, tw, th, tx, ty, bpp)
+		}
+	}
+	return nil
+}
+
+// blitTile copies one decoded Hextile tile into the rectangle's pixel buffer.
+// data is the rectangle, tile is tw by th pixels and stride is the rectangle's
+// row length in bytes.
+func blitTile(data []byte, stride int, tile []byte, tw, th, tx, ty, bpp int) {
+	rowBytes := tw * bpp
+	for row := 0; row < th; row++ {
+		dst := (ty+row)*stride + tx*bpp
+		src := row * rowBytes
+		copy(data[dst:dst+rowBytes], tile[src:src+rowBytes])
+	}
+}
+
+// minInt is the smaller of a and b. It stands in for the builtin min, which the
+// go 1.18 language version in go.mod does not have.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// finishRect advances to the next rectangle of the update, or emits the update
+// and requests the next one when this was the last.
+func (fc *RFBConn) finishRect() {
 	fc.rectIndex++
 	fc.NbRect--
 	glog.Info("fc.NbRect:", fc.NbRect)
@@ -611,6 +1060,8 @@ func (fc *RFBConn) recvServerCutTextBody(s []byte, err error) {
 	core.StartReadBytes(1, fc, fc.recvServerOrder)
 }
 
+// PixelFormat is the RFB PIXEL_FORMAT structure: how many bits a pixel is, how
+// big each colour channel is and where it sits in the pixel.
 type PixelFormat struct {
 	BitsPerPixel  uint8  `struc:"little"`
 	Depth         uint8  `struc:"little"`
@@ -626,6 +1077,9 @@ type PixelFormat struct {
 	Padding1      uint8  `struc:"little"`
 }
 
+// ReadPixelFormat reads a PIXEL_FORMAT structure. RFB is big-endian, so the
+// colour maxima are read big-endian even though the struc tags on PixelFormat
+// say little-endian.
 func ReadPixelFormat(r io.Reader) *PixelFormat {
 	p := NewPixelFormat()
 	p.BitsPerPixel, _ = core.ReadUInt8(r)
@@ -655,6 +1109,9 @@ func NewPixelFormat() *PixelFormat {
 	}
 }
 
+// RFB is the client side of an RFB session. It carries the transport, the
+// negotiated version and the pixel format, and it writes the client messages:
+// keyboard, pointer and clipboard. RFBConn decodes the server's replies.
 type RFB struct {
 	core.Transport
 	Version       string
@@ -665,12 +1122,17 @@ type RFB struct {
 	CurrentRect   *Rectangle
 }
 
+// NewRFB wraps a transport in an RFB session with the newest protocol version
+// this client implements. Connect starts the handshake.
 func NewRFB(t core.Transport) *RFB {
 	fb := &RFB{t, RFB003008, SEC_INVALID, "", NewPixelFormat(), 0, &Rectangle{}}
 
 	return fb
 }
 
+// Connect starts the handshake by reading the server's protocol version banner.
+// It returns an error only for a missing transport; a handshake failure arrives
+// as an "error" event.
 func (fb *RFB) Connect() error {
 	if fb.Transport == nil {
 		return errors.New("no transport")
@@ -696,12 +1158,15 @@ func (fb *RFB) recvProtocolVersion(version string) {
 	fb.Write(b.Bytes())
 }
 
+// KeyEvent is a client keyboard event: whether the key went down and which key
+// it is. The key is an X11 keysym.
 type KeyEvent struct {
 	DownFlag uint8  `struc:"little"`
 	Padding  uint16 `struc:"little"`
 	Key      uint32 `struc:"little"`
 }
 
+// SendKeyEvent writes a KeyEvent message to the server.
 func (fb *RFB) SendKeyEvent(k *KeyEvent) {
 	b := &bytes.Buffer{}
 	core.WriteUInt8(4, b)
@@ -711,12 +1176,15 @@ func (fb *RFB) SendKeyEvent(k *KeyEvent) {
 	fb.Write(b.Bytes())
 }
 
+// PointerEvent is a client pointer event: the button or buttons held and the
+// pointer position.
 type PointerEvent struct {
 	Mask uint8  `struc:"little"`
 	XPos uint16 `struc:"little"`
 	YPos uint16 `struc:"little"`
 }
 
+// SendPointEvent writes a PointerEvent message to the server.
 func (fb *RFB) SendPointEvent(p *PointerEvent) {
 	b := &bytes.Buffer{}
 	core.WriteUInt8(5, b)
@@ -733,6 +1201,7 @@ type ClientCutText struct {
 	Message string
 }
 
+// SendClientCutText writes a ClientCutText message to the server.
 func (fb *RFB) SendClientCutText(t *ClientCutText) {
 	b := &bytes.Buffer{}
 	core.WriteUInt8(6, b)

@@ -40,7 +40,9 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 
 * [x] **VNC（RFB）** —— 已对**真实 TigerVNC 服务端**验证：能收到并解析帧，
       且**剪贴板双向可用**。`scripts/vnc-dev.sh` 无需 root 即可拉取 TigerVNC 并跑实机测试。
-      目前只支持 Raw 与 CopyRect 编码，`RequestClipboardText` 未实现（有测试记录这一点）。
+      目前支持 Raw、CopyRect 与 Hextile 编码，`RequestClipboardText` 未实现（有测试记录这一点）。
+      实机测试中看到 TigerVNC 对普通矩形选 **Hextile**、对真实滚动选 **CopyRect**，
+      并校验复制出来的像素正是源位置当时的内容。
 
 未实现 / 未完成：
 
