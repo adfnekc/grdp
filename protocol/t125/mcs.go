@@ -45,6 +45,49 @@ const (
 	SEND_DATA_INDICATION                       = 26
 )
 
+// Reason names from T.125's DisconnectProviderUltimatum, for documentation. The
+// byte a real server sends does not decode as a value of this list; see
+// DisconnectError.
+const (
+	RN_DOMAIN_DISCONNECTED = 0
+	RN_PROVIDER_INITIATED  = 1
+	RN_TOKEN_PURGED        = 2
+	RN_USER_REQUESTED      = 3
+	RN_CHANNEL_PURGED      = 4
+)
+
+// DisconnectError is a Disconnect Provider Ultimatum: the server ending the
+// session, or announcing that it is ending.
+//
+// What it is good for is the distinction that matters to a caller: the server
+// ended this session, so the session still exists on the server, detached, and
+// connecting again gets it back. A dropped network sends no ultimatum at all,
+// so the presence of one is what tells the two apart, and that is a fact rather
+// than a reading of the bytes.
+//
+// The reason is carried but NOT interpreted, and that is deliberate. What the
+// bytes should mean is not settled: T.125 declares Reason a CHOICE of NULLs
+// while other renderings of the same ASN.1 declare an ENUMERATED, and the byte a
+// real server sends does not decode as either. Against a local xrdp a takeover
+// arrives as
+//
+//     tpkt recvData 02 f0 80 21 80
+//
+// where 21 is the option byte naming disconnectProviderUltimatum and 80 is the
+// reason, and 0x80 is not a value a five alternative Reason can hold. Guessing
+// what it stands for would be exactly the mistake this repository keeps
+// catching, so the reason is exposed as it arrived and the classification uses
+// only what is certain.
+type DisconnectError struct {
+	// Reason is the byte after the option, passed through unread. Its meaning
+	// is not established; see the note above.
+	Reason uint8
+}
+
+func (e *DisconnectError) Error() string {
+	return fmt.Sprintf("mcs: the server ended the session (disconnect ultimatum, reason byte 0x%02x)", e.Reason)
+}
+
 const (
 	MCS_GLOBAL_CHANNEL_ID uint16 = 1003
 	MCS_USERCHANNEL_BASE         = 1001
@@ -475,7 +518,19 @@ func (c *MCSClient) recvData(s []byte) {
 	}
 
 	if readMCSPDUHeader(option, DISCONNECT_PROVIDER_ULTIMATUM) {
-		c.Emit("error", errors.New("MCS DISCONNECT_PROVIDER_ULTIMATUM"))
+		// The reason follows the option byte as a one octet PER enumerated
+		// value. It used to be dropped, and the whole thing reported as the
+		// string "MCS DISCONNECT_PROVIDER_ULTIMATUM", which left a caller no
+		// way to tell being taken over from losing the network except by
+		// matching on that text.
+		reason, err := core.ReadUInt8(r)
+		if err != nil {
+			// A truncated ultimatum still means the session is over, so it is
+			// reported with the reason unknown rather than dropped.
+			glog.Warnf("mcs: disconnect ultimatum without a reason: %v", err)
+			reason = 0xff
+		}
+		c.Emit("error", &DisconnectError{Reason: reason})
 		c.transport.Close()
 		return
 	} else if !readMCSPDUHeader(option, c.recvOpCode) {

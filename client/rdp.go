@@ -334,6 +334,16 @@ func (c *RdpClient) On(event string, f interface{}) {
 	if c == nil {
 		return
 	}
+	if event == "error" {
+		// Classified here rather than at each caller, so that a handler
+		// registered with OnError sees the same distinction that Login
+		// returns: a disconnect after the session started arrives only as an
+		// event, and it is the one an operator most needs told apart from a
+		// lost connection.
+		if fn, ok := f.(func(error)); ok {
+			f = func(e error) { fn(classifyError(e)) }
+		}
+	}
 	if c.pdu == nil {
 		// Registered before Login: buffer and replay once the layers exist.
 		c.pending = append(c.pending, pendingEvent{event, f})

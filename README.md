@@ -102,6 +102,7 @@ operator looking in the wrong place.
 | Nothing is listening | wraps a `*net.OpError` with `ECONNREFUSED` | `errors.Is(err, syscall.ECONNREFUSED)` |
 | The host is unreachable | the same, with `EHOSTUNREACH` or a timeout | `errors.Is(err, syscall.EHOSTUNREACH)` |
 | The server wants a different security protocol | `*x224.NegotiationFailure`, with a code | `errors.As(err, &x224.NegotiationFailure{})` |
+| The server ended the session, usually because another connection took it over | wraps `ErrSessionEndedByServer` | `errors.Is(err, client.ErrSessionEndedByServer)` |
 
 ```sh
 $ rdpcli -host host -user user -pass wrong -proto nla
@@ -114,6 +115,12 @@ login failed: client: the server did not accept the credentials: nla: the CredSS
 does not say the password was wrong: a server that vanished in the middle of the
 exchange looks the same. What it does rule out is TLS itself, since a certificate
 problem fails before the exchange begins.
+
+The last of those is the one that looks most like a fault and is not: a session
+taken over by another connection is still on the server, detached, and connecting
+again gets it back. A dropped network sends no disconnect ultimatum at all, so
+the presence of one is what tells the two apart, and that is a fact rather than a
+reading of the bytes.
 
 The one case with no signal at all is a server that accepts the connection and
 then reports the failure *inside the session*, which is what xrdp does: it shows

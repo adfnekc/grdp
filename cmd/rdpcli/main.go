@@ -533,6 +533,15 @@ func main() {
 			fmt.Println("session ready")
 		case err := <-failed:
 			fmt.Fprintf(os.Stderr, "session error: %v\n", err)
+			// Say which kind it was. A session ended by the server looks
+			// exactly like a lost connection and is not one: it is still
+			// there, detached, and reconnecting gets it back.
+			if errors.Is(err, client.ErrSessionEndedByServer) {
+				fmt.Fprintln(os.Stderr, "  kind: ended by the server — usually another connection took the session over; it is not lost, and reconnecting gets it back")
+			}
+			if errors.Is(err, client.ErrAuthenticationFailed) {
+				fmt.Fprintln(os.Stderr, "  kind: authentication")
+			}
 			c.Close()
 			os.Exit(2)
 		case <-closed:

@@ -18,6 +18,7 @@ import (
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
 	"github.com/adfnekc/grdp/protocol/rfb"
+	"github.com/adfnekc/grdp/protocol/t125"
 	"github.com/adfnekc/grdp/protocol/tpkt"
 )
 
@@ -40,6 +41,21 @@ const DefaultLoginTimeout = 30 * time.Second
 // exchange rather than about the password. What it does rule out is TLS itself:
 // a certificate problem fails before this point and does not wrap it.
 var ErrAuthenticationFailed = errors.New("client: the server did not accept the credentials")
+
+// ErrSessionEndedByServer reports that the server sent a disconnect ultimatum:
+// it ended this session, most often because the same account connected from
+// somewhere else and took it over.
+//
+// A gateway has to tell this from a dropped connection, because the two look
+// alike and only one is a fault. The session is not lost: it is still on the
+// server, detached, and connecting again gets it back. An operator told
+// "connection lost" goes looking for a network problem that does not exist.
+//
+// It says the server ended the session, and no more than that. Whether the cause
+// was a takeover or a logoff is not on the wire in any form this library could
+// decode, so it is not claimed; see tpkt's DisconnectError for the byte that
+// would have to be read to say, and why it was not read.
+var ErrSessionEndedByServer = errors.New("client: the server ended the session, which usually means another connection took it over")
 
 // ErrUnreachable is not defined here: a failure to reach the host is a *net.OpError
 // from Login, wrapped rather than formatted, so errors.Is distinguishes a refused
@@ -184,14 +200,14 @@ func (c *Client) LoginContext(ctx context.Context) error {
 		// Classified here as well as on the event path below: the security
 		// negotiation happens during Login and can fail synchronously, which
 		// is the route a refused logon actually takes.
-		return classifyLoginError(err)
+		return classifyError(err)
 	}
 
 	select {
 	case <-ready:
 		return nil
 	case err := <-errCh:
-		return classifyLoginError(err)
+		return classifyError(err)
 	case <-closed:
 		return errors.New("client: connection closed before the session became ready")
 	case <-ctx.Done():
@@ -199,7 +215,7 @@ func (c *Client) LoginContext(ctx context.Context) error {
 	}
 }
 
-// classifyLoginError turns the handshake's errors into ones a caller can act on.
+// classifyError turns a session's errors into ones a caller can act on.
 //
 // The case it exists for is a refused logon. An NLA server does not answer a bad
 // password with an error of its own; it tears the TLS connection down, so the
@@ -214,13 +230,42 @@ func (c *Client) LoginContext(ctx context.Context) error {
 // than formatting it, so errors.Is tells a refused port from an unreachable
 // network. A protocol selection failure is already a *x224.NegotiationFailure
 // with a code.
-func classifyLoginError(err error) error {
+func classifyError(err error) error {
+	// Idempotent: the event path and the return path both classify, and a
+	// second pass must not wrap what the first one already did.
+	if errors.Is(err, ErrAuthenticationFailed) || errors.Is(err, ErrSessionEndedByServer) {
+		return err
+	}
 	var cred *tpkt.CredSSPError
 	if errors.As(err, &cred) && cred.Err != nil {
 		return &authenticationError{err: err}
 	}
+	// A disconnect ultimatum with the reason a server sends for a session
+	// taken over, or ended at the user's end. Anything else it says is left as
+	// the server stated it.
+	// Any disconnect ultimatum means the server ended the session, which is the
+	// whole of what a caller needs: no ultimatum arrives when a network simply
+	// goes away.
+	var disc *t125.DisconnectError
+	if errors.As(err, &disc) {
+		return &serverEndedError{err: err}
+	}
 	return err
 }
+
+// serverEndedError wraps a disconnect that was not a fault. It carries the
+// sentinel through Is and the original error through Unwrap, for the same reason
+// authenticationError does: one %w cannot point at two errors, and a caller needs
+// both the classification and the cause.
+type serverEndedError struct {
+	err error
+}
+
+func (e *serverEndedError) Error() string { return ErrSessionEndedByServer.Error() + ": " + e.err.Error() }
+
+func (e *serverEndedError) Is(target error) bool { return target == ErrSessionEndedByServer }
+
+func (e *serverEndedError) Unwrap() error { return e.err }
 
 // authenticationError wraps a failure that happened while the server was
 // deciding whether to accept the credentials.

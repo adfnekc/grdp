@@ -30,6 +30,33 @@ Verified end to end, using only this library:
   produces the expected output on screen, so modifier keys (the upper case
   letters need shift) and Enter are all delivered correctly.
 
+## The disconnect ultimatum's reason byte is not decoded
+
+A session taken over by another connection is reported as the server ending it,
+which is certain, and not as a takeover, which is not. The reason byte that would
+have to be read to say is passed through raw.
+
+Against a local xrdp, the takeover arrives as exactly five bytes:
+
+    02 f0 80 | 21 80
+    X.224 DT | mcsDPum
+
+`21` is the option byte naming disconnectProviderUltimatum, as the existing
+header check reads it, and the single byte of PER-encoded content is `80`. That
+is the reason, and `0x80` is not a value a five alternative Reason can hold.
+
+The disagreement is in the references: T.125 declares
+`Reason ::= CHOICE { rn-domain-disconnected NULL, rn-provider-initiated NULL,
+rn-token-purged NULL, rn-user-requested NULL, rn-channel-purged NULL, ... }` while
+other renderings of the same ASN.1, including the one Wireshark generates from,
+declare an ENUMERATED, and an annotated dump in MS-RDPBCGR shows
+`reason = rn-user-requested (3)` as one octet. None of those produces `0x80`.
+
+So the classification rests on what is not in dispute - an ultimatum arrived, so
+the server ended the session - and the byte is exposed as it came. Working out
+the encoding is a job for a capture of a client that works, which is the same
+method that settled the questions above it.
+
 ## Display Control: the dynamic channel alone was not created
 
 What is settled. With `Setting.EnableDisplayControl` and nothing else, the
