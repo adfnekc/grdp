@@ -245,6 +245,18 @@ func (g *gateway) handleInput(raw []byte) {
 		if err := c.TypeText(in.Text, 8*time.Millisecond); err != nil {
 			log.Printf("text: %v", err)
 		}
+	case "refresh":
+		// The page asks for a whole frame, which it needs after clearing its
+		// canvas: resizing a canvas clears it, so a browser that has just been
+		// resized would otherwise show the parts of the desktop that happened
+		// to be redrawn and nothing else. Asking is explicit, where the
+		// alternative is the page hoping something will happen to redraw it.
+		if fb := g.client.Framebuffer(); fb != nil {
+			bounds := fb.Bounds()
+			g.mu.Lock()
+			g.dirty = client.MergeDirty(g.dirty, bounds, bounds)
+			g.mu.Unlock()
+		}
 	default:
 		log.Printf("input: unknown type %q", in.Type)
 	}
@@ -434,9 +446,10 @@ ws.onmessage = (ev) => {
     if (msg.type === 'size') {
       natural = {w: msg.w, h: msg.h};
       if (screen.width !== msg.w || screen.height !== msg.h) {
-        // Resizing clears the canvas, so ask for a whole frame by resetting
-        // the bitmap; the server sends one on connect and after a resize.
+        // Resizing a canvas clears it, so ask for a whole frame instead of
+        // waiting to see which parts of the desktop happen to be redrawn.
         screen.width = msg.w; screen.height = msg.h;
+        send({type: 'refresh'});
       }
       fit();
       status.textContent = msg.w + 'x' + msg.h;
@@ -640,20 +653,105 @@ func runSelftest(g *gateway, ln net.Listener) int {
 				cursors++
 			}
 		}
+		// A read deadline that expires leaves the connection unusable for reading,
+		// so this one is not talked to again after the window above. The refresh
+		// is checked on a connection of its own below.
 		g.mu.Lock()
 		frames := g.frames
 		g.mu.Unlock()
+		// The first frame a newcomer gets is the whole desktop, so its size is
+		// the desktop size.
+		refreshed := checkRefresh(ln, w, h)
 		fmt.Printf("selftest: ok — page has a canvas, %s, %d bytes as JPEG (%dx%d), "+
-			"%d cursor images, %d frames encoded\n",
+			"%d cursor images, %d frames encoded, full frame on request: %v\n",
 			map[bool]string{true: "size announced", false: "no size"}[sawSize],
-			len(msg)-binaryHeader, w, h, cursors, frames)
+			len(msg)-binaryHeader, w, h, cursors, frames, refreshed)
 		if cursors == 0 {
 			// Not a failure: a session whose pointer never changed shape has
 			// nothing to send. Saying so is better than implying it was seen.
 			fmt.Println("selftest: no pointer shape arrived during the run")
 		}
+		if !refreshed {
+			fmt.Fprintln(os.Stderr, "selftest: asking for a whole frame did not produce one")
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintln(os.Stderr, "selftest: no frame arrived")
 	return 1
+}
+
+// frameAt reports whether a message is a frame covering the whole desktop at the
+// origin, which is what a refresh has to produce and what an incremental update
+// does not.
+func frameAt(msg []byte, w, h int) bool {
+	return len(msg) >= binaryHeader &&
+		binary.LittleEndian.Uint16(msg[0:2]) == msgFrame &&
+		binary.LittleEndian.Uint16(msg[2:4]) == 0 && binary.LittleEndian.Uint16(msg[4:6]) == 0 &&
+		int(binary.LittleEndian.Uint16(msg[6:8])) == w &&
+		int(binary.LittleEndian.Uint16(msg[8:10])) == h
+}
+
+// checkRefresh opens its own connection and asks for a whole frame.
+//
+// It is separate because the connection above has had a read deadline expire on
+// it, which leaves it unusable for reading: a refresh checked there would be
+// asking a socket that could no longer answer, and would report the feature
+// broken when the test was. A newcomer gets a whole frame as soon as it
+// connects, so the check is that a second one arrives when asked for.
+func checkRefresh(ln net.Listener, w, h int) bool {
+	url := "ws://" + ln.Addr().String() + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "selftest: refresh dial: %v\n", err)
+		return false
+	}
+	defer conn.Close()
+
+	msgs := make(chan []byte, 64)
+	go func() {
+		defer close(msgs)
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			select {
+			case msgs <- data:
+			default:
+			}
+		}
+	}()
+	// Reads happen on their own goroutine and the waits below are timers, so
+	// that no deadline ever expires on the socket: that is what made the first
+	// version of this check misleading.
+	wholeFrames := 0
+	timeout := time.After(20 * time.Second)
+	asked := false
+	for {
+		select {
+		case msg, ok := <-msgs:
+			if !ok {
+				return false
+			}
+			if frameAt(msg, w, h) {
+				wholeFrames++
+				if wholeFrames >= 2 {
+					return true
+				}
+				if wholeFrames == 1 && !asked {
+					// The whole frame that arrived on connect. Now ask for
+					// another: the second one is the evidence.
+					asked = true
+					if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"refresh"}`)); err != nil {
+						fmt.Fprintf(os.Stderr, "selftest: write refresh: %v\n", err)
+						return false
+					}
+				}
+			}
+		case <-timeout:
+			fmt.Fprintf(os.Stderr, "selftest: %d whole frames arrived, want 2\n", wholeFrames)
+			return false
+		}
+	}
 }
