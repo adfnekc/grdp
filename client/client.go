@@ -334,6 +334,38 @@ func (c *Client) OnSurfaceReset(f func(width, height int)) {
 	})
 }
 
+// RequestResize asks the server to change the desktop to w by h pixels.
+//
+// It reports an error when the session cannot do it: the Display Control channel
+// has to be opened at connect time, with Setting.EnableDisplayControl, because
+// opening a dynamic channel changes the connect sequence. It also reports an
+// error for a size the server will not accept, rather than clamping it, so that
+// a caller is not told its request succeeded when the size was changed.
+//
+// The server applies the change on its own schedule, so the size is not changed
+// by the time this returns. OnResize says when it has, and Framebuffer follows.
+func (c *Client) RequestResize(w, h int) error {
+	r, ok := c.ctl.(*RdpClient)
+	if !ok {
+		return errors.New("client: resizing is an RDP feature; this session has no display control channel")
+	}
+	return r.requestResize(w, h)
+}
+
+// OnResize registers f to be called when the desktop size changes.
+//
+// It is driven by what the server draws, not by what was asked for: the server
+// decides whether a resize is allowed and when to apply it, and the first update
+// at a new size is the confirmation. A shrink is not reported this way on the
+// bitmap path, because nothing in a bitmap update says the desktop got smaller;
+// the graphics channel does say so, and resizes both ways.
+func (c *Client) OnResize(f func(w, h int)) {
+	c.ctl.On("resize", func(data interface{}) {
+		p := data.(image.Point)
+		f(p.X, p.Y)
+	})
+}
+
 // Files returns the clipboard's file transfer surface, or nil when the
 // clipboard channel is not enabled or the session is not RDP.
 //
@@ -538,6 +570,13 @@ type Setting struct {
 	// with the server. Use Client.OnClipboardText and Client.SetClipboardText
 	// to bridge it to the local clipboard.
 	EnableClipboard bool
+
+	// EnableDisplayControl opens the Display Control dynamic virtual channel, so
+	// that RequestResize can ask the server to change the desktop size while the
+	// session runs. It is off by default for the same reason as EGFX: opening a
+	// dynamic channel changes the connect sequence, and a caller that is not
+	// going to resize anything should not have its negotiation altered.
+	EnableDisplayControl bool
 
 	// EnableOrders advertises support for the MEMBLT drawing order and renders
 	// the drawing orders that follow, into a framebuffer reachable through

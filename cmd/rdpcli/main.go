@@ -208,6 +208,8 @@ func main() {
 	cursorLog := flag.Bool("cursor", false, "log decoded pointer shapes and system cursors")
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
 	ordersFlag := flag.Bool("orders", false, "advertise and render drawing orders (bitmap cache and MEMBLT)")
+	dispFlag := flag.Bool("display-control", false, "open the Display Control channel (needed for -resize)")
+	resize := flag.String("resize", "", "ask the server to resize to WxH once the session is ready")
 	clip := flag.Bool("clipboard", false, "enable the clipboard channel and log text received")
 	setClip := flag.String("set-clipboard", "", "publish this text on the shared clipboard once ready")
 	clipReq := flag.Duration("request-clipboard-after", 0, "ask the server for its clipboard text this long after ready (0 disables)")
@@ -222,6 +224,7 @@ func main() {
 	s.NoFastPathInput = *slowInput
 	s.EnableEGFX = *egfx
 	s.EnableOrders = *ordersFlag
+	s.EnableDisplayControl = *dispFlag || *resize != ""
 	s.EnableClipboard = *clip
 
 	c := client.NewClient(*host, *user, *pass, client.TC_RDP, s)
@@ -288,10 +291,30 @@ func main() {
 
 	var inputPlayed bool
 	var unicodePlayed bool
+	c.OnResize(func(w, h int) {
+		fmt.Printf("desktop resized to %dx%d\n", w, h)
+	})
 	c.OnReady(func() {
 		select {
 		case ready <- struct{}{}:
 		default:
+		}
+		if *resize != "" {
+			go func() {
+				var w, h int
+				if _, err := fmt.Sscanf(*resize, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
+					fmt.Fprintf(os.Stderr, "resize: %q is not WxH\n", *resize)
+					return
+				}
+				// The server applies this on its own schedule, so a
+				// failure here is reported rather than retried, and a
+				// server that does not support it says so.
+				if err := c.RequestResize(w, h); err != nil {
+					fmt.Fprintf(os.Stderr, "resize: %v\n", err)
+					return
+				}
+				fmt.Printf("asked the server to resize to %dx%d\n", w, h)
+			}()
 		}
 		// The clipboard is independent of input playback. It used to sit inside
 		// the guard below, so -set-clipboard was silently ignored unless some

@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"github.com/adfnekc/grdp/orders"
 	"github.com/adfnekc/grdp/plugin"
 	"github.com/adfnekc/grdp/plugin/cliprdr"
+	"github.com/adfnekc/grdp/plugin/disp"
 	"github.com/adfnekc/grdp/plugin/drdynvc"
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/nla"
@@ -45,6 +47,10 @@ type RdpClient struct {
 
 	// Set when drawing orders are enabled; nil otherwise.
 	screen *orders.Screen
+
+	// disp is the display control channel, set when Setting.EnableDisplayControl
+	// is on. It is how the desktop size is changed without reconnecting.
+	disp *disp.DisplayControlClient
 
 	// fb wraps screen for callers. It exists for every session, not only one
 	// with orders enabled, because the bitmap path composites into the same
@@ -146,18 +152,31 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	// virtual channel layer and the graphics channel are both registered, so
 	// it is opt in: the server may start sending surface commands instead of
 	// bitmap updates as soon as the channel is created.
-	if c.setting != nil && c.setting.EnableEGFX {
-		gfx := rdpgfx.NewGfxClient()
+	//
+	// The dynamic virtual channel layer also carries Display Control, so it is
+	// opened when either of the two needs it. Opening it changes the connect
+	// sequence, which is why it is not always on.
+	if c.setting != nil && (c.setting.EnableEGFX || c.setting.EnableDisplayControl) {
 		dvc := drdynvc.NewDvcClient()
-		gfx.SetSender(dvc.SendData)
-		dvc.Register(rdpgfx.DVCChannelName, gfx)
-		c.channels.Register(dvc)
-		c.gfx = gfx
 		c.dvc = dvc
-		// The channel also has to be requested from the server, and the
-		// early capability flag has to say we support the dynamic channel
-		// and graphics protocol.
+		c.channels.Register(dvc)
 		c.mcs.SetClientDynvcProtocol()
+
+		if c.setting.EnableEGFX {
+			gfx := rdpgfx.NewGfxClient()
+			gfx.SetSender(dvc.SendData)
+			dvc.Register(rdpgfx.DVCChannelName, gfx)
+			c.gfx = gfx
+		}
+		if c.setting.EnableDisplayControl {
+			d := disp.NewDisplayControlClient()
+			d.SetSender(dvc.SendData)
+			dvc.Register(disp.DVCChannelName, d)
+			d.OnCaps(func(caps disp.Caps) {
+				c.pdu.Emit("disp-caps", caps)
+			})
+			c.disp = d
+		}
 	}
 
 	// Drawing orders. Enabling them means advertising MEMBLT, which makes the
@@ -228,8 +247,7 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 				if r.Width <= 0 || r.Height <= 0 {
 					return
 				}
-				c.screen.Resize(r.Width, r.Height)
-				c.pdu.Emit("frame", []image.Rectangle{image.Rect(0, 0, r.Width, r.Height)})
+				c.resizeFramebuffer(r.Width, r.Height)
 			})
 		}
 	})
@@ -449,6 +467,15 @@ func (c *RdpClient) framebuffer() *Framebuffer {
 	return c.fb
 }
 
+// requestResize asks the server to change the desktop size. See
+// Client.RequestResize.
+func (c *RdpClient) requestResize(w, h int) error {
+	if c == nil || c.disp == nil {
+		return errors.New("client: the display control channel is not enabled; set Setting.EnableDisplayControl")
+	}
+	return c.disp.RequestResize(w, h)
+}
+
 // onPointerPDU handles a slow-path pointer update: the pointer moved, its shape
 // changed, the server named a system cursor, or the server referred back to a
 // shape it already sent.
@@ -604,6 +631,23 @@ func (c *RdpClient) composite(bs []Bitmap) {
 		return
 	}
 	screenW, screenH := c.screen.Size()
+	// A server that starts drawing outside the frame it was told about has
+	// changed the desktop size, which happens after a display control resize.
+	// The buffer follows rather than clipping the new area away, and the
+	// change is reported so a caller can resize whatever it is drawing into.
+	wantW, wantH := screenW, screenH
+	for _, b := range bs {
+		if b.DestLeft+b.Width > wantW {
+			wantW = b.DestLeft + b.Width
+		}
+		if b.DestTop+b.Height > wantH {
+			wantH = b.DestTop + b.Height
+		}
+	}
+	if wantW > screenW || wantH > screenH {
+		c.resizeFramebuffer(wantW, wantH)
+		screenW, screenH = c.screen.Size()
+	}
 	bounds := image.Rect(0, 0, screenW, screenH)
 	var dirty []image.Rectangle
 	for _, b := range bs {
@@ -621,6 +665,23 @@ func (c *RdpClient) composite(bs []Bitmap) {
 		return
 	}
 	c.pdu.Emit("frame", dirty)
+}
+
+// resizeFramebuffer changes the buffer's size and reports it. Everything is
+// redrawn at the new size, since the old contents no longer describe the
+// desktop.
+func (c *RdpClient) resizeFramebuffer(w, h int) {
+	if c == nil || c.screen == nil || w <= 0 || h <= 0 {
+		return
+	}
+	curW, curH := c.screen.Size()
+	if w == curW && h == curH {
+		return
+	}
+	glog.Infof("client: desktop is now %dx%d", w, h)
+	c.screen.Resize(w, h)
+	c.pdu.Emit("resize", image.Point{X: w, Y: h})
+	c.pdu.Emit("frame", []image.Rectangle{image.Rect(0, 0, w, h)})
 }
 
 // compositeSurfaces copies the surfaces of one graphics channel frame into the
