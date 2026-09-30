@@ -18,11 +18,32 @@ import (
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
 	"github.com/adfnekc/grdp/protocol/rfb"
+	"github.com/adfnekc/grdp/protocol/tpkt"
 )
 
 // DefaultLoginTimeout bounds how long Login waits for the RDP session to
 // become ready after the transport handshake succeeds.
 const DefaultLoginTimeout = 30 * time.Second
+
+// ErrAuthenticationFailed reports that the CredSSP exchange did not complete, so
+// the credentials were not accepted.
+//
+// It is the distinction an operator needs and cannot get from the message alone:
+// a wrong password against an NLA server surfaces as a TLS alert, because
+// Windows drops the connection rather than answering with an NTLM status, and
+// that reads like a certificate problem. Errors from Login wrap this one when
+// the failure happened after TLS was established, which is where the
+// authentication exchange runs.
+//
+// It is not proof that the password was wrong. A server that disappeared in the
+// middle of the exchange looks the same, which is why the name is about the
+// exchange rather than about the password. What it does rule out is TLS itself:
+// a certificate problem fails before this point and does not wrap it.
+var ErrAuthenticationFailed = errors.New("client: the server did not accept the credentials")
+
+// ErrUnreachable is not defined here: a failure to reach the host is a *net.OpError
+// from Login, wrapped rather than formatted, so errors.Is distinguishes a refused
+// connection from an unreachable network the way it normally would.
 
 // Clipboard directions accepted by the (currently inert) Setting.SetClipboard.
 const (
@@ -160,20 +181,69 @@ func (c *Client) LoginContext(ctx context.Context) error {
 	})
 
 	if err := c.ctl.Login(c.host, c.user, c.passwd, c.setting.Width, c.setting.Height); err != nil {
-		return err
+		// Classified here as well as on the event path below: the security
+		// negotiation happens during Login and can fail synchronously, which
+		// is the route a refused logon actually takes.
+		return classifyLoginError(err)
 	}
 
 	select {
 	case <-ready:
 		return nil
 	case err := <-errCh:
-		return err
+		return classifyLoginError(err)
 	case <-closed:
 		return errors.New("client: connection closed before the session became ready")
 	case <-ctx.Done():
 		return fmt.Errorf("client: session not ready: %w", ctx.Err())
 	}
 }
+
+// classifyLoginError turns the handshake's errors into ones a caller can act on.
+//
+// The case it exists for is a refused logon. An NLA server does not answer a bad
+// password with an error of its own; it tears the TLS connection down, so the
+// failure arrives as a TLS alert that reads like a certificate problem and sends
+// an operator looking in the wrong place entirely. A CredSSP failure happened
+// after TLS was already established, so it is about the credentials: that is
+// what ErrAuthenticationFailed says, and what it deliberately does not say is
+// that the password was wrong, because a server that vanished mid-exchange is
+// indistinguishable from one that refused.
+//
+// A failure to reach the host needs no help: Login wraps the net.OpError rather
+// than formatting it, so errors.Is tells a refused port from an unreachable
+// network. A protocol selection failure is already a *x224.NegotiationFailure
+// with a code.
+func classifyLoginError(err error) error {
+	var cred *tpkt.CredSSPError
+	if errors.As(err, &cred) && cred.Err != nil {
+		return &authenticationError{err: err}
+	}
+	return err
+}
+
+// authenticationError wraps a failure that happened while the server was
+// deciding whether to accept the credentials.
+//
+// It carries both halves of what a caller needs, which is why it is a type and
+// not a wrapped sentinel with the cause formatted into the message: Is answers
+// for the sentinel, so a caller can branch on "was this the password", and
+// Unwrap keeps the original error, so the TLS alert that Windows sends instead
+// of an answer is still in the chain and in the message. Formatting the cause in
+// with %v would lose it, and a single %w cannot point at two errors.
+type authenticationError struct {
+	err error
+}
+
+func (e *authenticationError) Error() string {
+	return ErrAuthenticationFailed.Error() + ": " + e.err.Error()
+}
+
+func (e *authenticationError) Is(target error) bool {
+	return target == ErrAuthenticationFailed
+}
+
+func (e *authenticationError) Unwrap() error { return e.err }
 
 // KeyUp releases the key whose PC set 1 scancode is sc. A value in
 // 0xE000..0xE0FF is sent as an extended key: the low byte is the scancode and

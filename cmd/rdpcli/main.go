@@ -8,18 +8,22 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"net"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/adfnekc/grdp/client"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/protocol/x224"
 	"github.com/adfnekc/grdp/orders"
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
@@ -492,6 +496,30 @@ func main() {
 	start := time.Now()
 	if err := c.Login(); err != nil {
 		fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
+		// Say which kind of failure it was, because the message alone does
+		// not: a refused logon against an NLA server arrives as a TLS alert.
+		if errors.Is(err, client.ErrAuthenticationFailed) {
+			fmt.Fprintln(os.Stderr, "  kind: authentication — the exchange did not complete, which is usually a rejected password")
+		}
+		// Only a failure to connect counts as a network fault. A TLS alert is
+		// also a net.OpError, with an operation of "remote error", and calling
+		// that a network problem next to "authentication" would be two answers
+		// to one question.
+		var netErr *net.OpError
+		if errors.As(err, &netErr) && netErr.Op == "dial" {
+			switch {
+			case errors.Is(err, syscall.ECONNREFUSED):
+				fmt.Fprintln(os.Stderr, "  kind: unreachable — nothing is listening on that address and port")
+			case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+				fmt.Fprintln(os.Stderr, "  kind: unreachable — the host or network is not reachable from here")
+			default:
+				fmt.Fprintln(os.Stderr, "  kind: unreachable — the connection could not be established")
+			}
+		}
+		var neg *x224.NegotiationFailure
+		if errors.As(err, &neg) {
+			fmt.Fprintf(os.Stderr, "  kind: security negotiation (code 0x%08x)\n", neg.Code)
+		}
 		os.Exit(1)
 	}
 	fmt.Printf("session ready in %s\n", time.Since(start).Round(time.Millisecond))

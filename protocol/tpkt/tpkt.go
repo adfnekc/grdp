@@ -43,6 +43,13 @@ type TPKT struct {
 	// the value the version 5 and later binding hashes are computed over.
 	credsspVersion int
 	clientNonce    []byte
+
+	// awaitingVerdict is set once the credentials have been presented and the
+	// server has not yet shown that it accepted them. A failure in that window
+	// is about the credentials; a failure before it is about TLS, and one after
+	// it is about the session. The window closes on the first RDP PDU, which is
+	// the server's evidence that the logon succeeded.
+	awaitingVerdict bool
 }
 
 func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
@@ -66,22 +73,74 @@ func (t *TPKT) SetStrictPubKeyAuth(strict bool) {
 	t.strictPubKeyAuth = strict
 }
 
+// CredSSPError is returned when the CredSSP exchange fails once TLS is already
+// up.
+//
+// The distinction it carries is one of stage, and it is the only one available.
+// A failure in StartTLS is about the certificate or the TLS negotiation, before
+// anything has been authenticated. A failure after that is about the
+// authentication exchange itself, and the commonest cause by far is a rejected
+// password: Windows does not answer a bad logon with an NTLM status, it drops
+// the TLS connection, so what a caller sees is a TLS alert that on its own reads
+// like a negotiation fault.
+//
+// tpkt does not claim to know the password was wrong, because a server that
+// vanished mid-exchange looks the same. It claims only that the trouble is in the
+// credentials the exchange carried rather than in the TLS beneath it.
+type CredSSPError struct {
+	Err error
+}
+
+func (e *CredSSPError) Error() string {
+	return "nla: the CredSSP authentication exchange failed: " + e.Err.Error()
+}
+
+// Unwrap exposes the underlying error, which for a refused logon is usually a
+// TLS alert from the server tearing the connection down.
+func (e *CredSSPError) Unwrap() error { return e.Err }
+
 func (t *TPKT) StartNLA() error {
 	if err := t.StartTLS(); err != nil {
 		glog.Info("start tls failed", err)
+		// Nothing has been authenticated yet, so this is about TLS and not
+		// about credentials.
 		return fmt.Errorf("nla: start TLS: %w", err)
 	}
 
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
 	if _, err := t.Conn.Write(req); err != nil {
-		return fmt.Errorf("nla: send NegotiateMessage: %w", err)
+		return &CredSSPError{Err: fmt.Errorf("send NegotiateMessage: %w", err)}
 	}
 
 	data, err := t.readCredSSP()
 	if err != nil {
-		return fmt.Errorf("nla: read challenge: %w", err)
+		return &CredSSPError{Err: fmt.Errorf("read challenge: %w", err)}
 	}
-	return t.recvChallenge(data)
+	if err := t.recvChallenge(data); err != nil {
+		return &CredSSPError{Err: err}
+	}
+	// The challenge is answered and the credentials are on their way. Windows
+	// does not answer a bad logon with an NTLM status: it drops the TLS
+	// connection, and the alert arrives on the ordinary read path a moment
+	// later, outside this function. The window is therefore left open, and
+	// classifyAuthError closes it.
+	t.awaitingVerdict = true
+	return nil
+}
+
+// classifyAuthError marks a failure that happened while the server was deciding
+// whether to accept the credentials.
+//
+// This is the distinction a caller cannot make from the message: a refused logon
+// against an NLA server reaches them as a TLS alert, which on its own reads like
+// a certificate problem and sends an operator to the wrong place. The stage is
+// what says otherwise, and the stage is known here and not in the caller.
+func (t *TPKT) classifyAuthError(err error, what string) error {
+	if err == nil || !t.awaitingVerdict {
+		return err
+	}
+	t.awaitingVerdict = false
+	return &CredSSPError{Err: fmt.Errorf("%s: %w", what, err)}
 }
 
 // credSSPMaxMessage bounds a single CredSSP TSRequest to avoid unbounded memory
@@ -280,8 +339,14 @@ func (t *TPKT) SendFastPathInput(numEvents byte, data []byte) (n int, err error)
 func (t *TPKT) recvHeader(s []byte, err error) {
 	glog.Trace("tpkt recvHeader", hex.EncodeToString(s), err)
 	if err != nil {
-		t.emitReadError(err)
+		t.emitReadError(t.classifyAuthError(err, "read header"))
 		return
+	}
+	// A valid header is the server carrying on with the session, which is what
+	// says the credentials were accepted.
+	if t.awaitingVerdict {
+		glog.Debug("tpkt: the server carried on, so the logon was accepted")
+		t.awaitingVerdict = false
 	}
 
 	r := bytes.NewReader(s)

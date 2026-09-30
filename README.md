@@ -87,6 +87,40 @@ Not done, or not finished:
       offers MEMBLT alone: asking an older server for orders never watched
       working would be worse than leaving it on bitmap updates.
 
+## What a failed login looks like
+
+Login failures are classified, because the message alone does not say which kind
+it was and the most common one is the most misleading. Against an NLA server a
+wrong password does not come back as an authentication error: Windows does not
+answer a bad logon, it drops the TLS connection, so what arrives is
+`tls: internal error`, which reads like a certificate problem and sends an
+operator looking in the wrong place.
+
+| What happened | The error | How to test it |
+| --- | --- | --- |
+| The password was refused | wraps `ErrAuthenticationFailed` | `errors.Is(err, client.ErrAuthenticationFailed)` |
+| Nothing is listening | wraps a `*net.OpError` with `ECONNREFUSED` | `errors.Is(err, syscall.ECONNREFUSED)` |
+| The host is unreachable | the same, with `EHOSTUNREACH` or a timeout | `errors.Is(err, syscall.EHOSTUNREACH)` |
+| The server wants a different security protocol | `*x224.NegotiationFailure`, with a code | `errors.As(err, &x224.NegotiationFailure{})` |
+
+```sh
+$ rdpcli -host host -user user -pass wrong -proto nla
+login failed: client: the server did not accept the credentials: nla: the CredSSP
+              authentication exchange failed: read header: remote error: tls: internal error
+  kind: authentication — the exchange did not complete, which is usually a rejected password
+```
+
+`ErrAuthenticationFailed` says the exchange did not complete, and deliberately
+does not say the password was wrong: a server that vanished in the middle of the
+exchange looks the same. What it does rule out is TLS itself, since a certificate
+problem fails before the exchange begins.
+
+The one case with no signal at all is a server that accepts the connection and
+then reports the failure *inside the session*, which is what xrdp does: it shows
+a `login failed for user` dialog as pixels and sends nothing on the wire. There
+is no protocol-level way for a client to notice that, and inventing one — reading
+the screen — is not something this library is going to do.
+
 ## A headless gateway
 
 `cmd/rdpws` is a gateway in one file: it holds an RDP session, serves the screen

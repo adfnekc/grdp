@@ -137,7 +137,10 @@ func split(user string) (domain string, uname string) {
 func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
 	if err != nil {
-		return fmt.Errorf("[dial err] %v", err)
+		// Wrapped rather than formatted so that the underlying net.OpError
+		// survives: errors.Is(err, syscall.ECONNREFUSED) is how a caller tells
+		// a closed port from an unreachable host, and %v would lose it.
+		return fmt.Errorf("client: cannot reach the server: %w", err)
 	}
 
 	domain, user := split(user)
@@ -287,7 +290,7 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 
 	err = c.x224.Connect()
 	if err != nil {
-		return fmt.Errorf("[x224 connect err] %v", err)
+		return fmt.Errorf("client: the RDP connection failed: %w", err)
 	}
 	return nil
 }
