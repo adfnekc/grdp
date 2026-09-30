@@ -173,6 +173,7 @@ const (
 	RAIL_SVC_CHANNEL_NAME    = "rail"    //远程应用
 	DRDYNVC_SVC_CHANNEL_NAME = "drdynvc" //动态虚拟通道
 	REMDESK_SVC_CHANNEL_NAME = "remdesk" //远程协助
+	DISP_SVC_CHANNEL_NAME    = "disp"    //显示控制
 )
 
 const (
@@ -187,6 +188,12 @@ var StaticVirtualChannels = map[string]int{
 		CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL,
 	RAIL_SVC_CHANNEL_NAME: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP |
 		CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL,
+	// Display Control is carried on a dynamic channel, but it is also named
+	// here as a static one. FreeRDP declares both, and a server that is asked
+	// only for the dynamic channel does not create it: Windows never offered
+	// Microsoft::Windows::RDS::DisplayControl until the static name was added
+	// to the connect sequence beside drdynvc.
+	DISP_SVC_CHANNEL_NAME: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP,
 }
 
 const (

@@ -32,20 +32,39 @@ Verified end to end, using only this library:
 
 ## Display Control: the dynamic channel alone was not created
 
-With `Setting.EnableDisplayControl` and nothing else, the connect sequence
-advertises exactly one channel, `drdynvc`, and Windows never creates the
-DisplayControl channel on it: no `Microsoft::Windows::RDS::DisplayControl` appears
-in the dynamic channel exchange, and `RequestResize` reports
+What is settled. With `Setting.EnableDisplayControl` and nothing else, the
+connect sequence advertises exactly one channel, `drdynvc`, and Windows never
+creates the dynamic channel: `Microsoft::Windows::RDS::DisplayControl` does not
+appear in the exchange, and `RequestResize` reports "the display control channel
+is not open".
 
-    resize: disp: the display control channel is not open
+Advertising the **static** `disp` channel as well — which is what FreeRDP does,
+since it carries both `DISP_CHANNEL_NAME "disp"` and
+`DISP_DVC_CHANNEL_NAME "Microsoft::Windows::RDS::DisplayControl"` — gets further.
+The connect sequence now carries two channels and this host joins both:
 
-which is at least the honest answer rather than a wait. The next thing to try is
-advertising the **static** `disp` channel in the Client Network Data as well.
-FreeRDP carries both names, `DISP_CHANNEL_NAME "disp"` and
-`DISP_DVC_CHANNEL_NAME "Microsoft::Windows::RDS::DisplayControl"`, which is a
-hint that some servers want the static one before they will offer the dynamic
-one. That is untested here, and it is written down as the next step rather than
-guessed at.
+    clientNetworkData: {ChannelCount:2 [{Name:drdynvc ...} {Name:disp ...}]}
+    sec on connect: [{1003 global} {1007 user} {1004 drdynvc} {1005 disp}]
+
+With that, `RequestResize` sends: the layout goes out on the static channel and
+rdpcli prints "asked the server to resize to 1280x720". So the channel is up and
+the message is framed and written as a static channel payload.
+
+What is not settled. The host does nothing with it. The desktop stays 1024x768,
+`OnResize` never fires, and the server sends nothing back on the channel at all:
+no `DISPLAYCONTROL_CAPS_PDU`, which it would send if it were treating the channel
+as Display Control. Three channel option sets were tried —
+`INITIALIZED|ENCRYPT_RDP`, that plus `COMPRESS_RDP`, and `INITIALIZED` alone —
+with no difference, which rules out the options being the whole story but not
+much else.
+
+So the layout bytes are checked field by field against FreeRDP's sender and round
+tripped through their own reader, the channel is joined, and the message is sent,
+and the host still ignores it. The next step is the one that has settled every
+other question in this file: **capture what a client that works sends**. Point
+mstsc or FreeRDP at this host, resize the window, and compare its connect
+sequence and its display control PDUs against these. Guessing has lost too often
+to start now.
 
 ## Symptom: keyboard input that reaches nothing
 

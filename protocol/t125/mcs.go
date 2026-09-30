@@ -9,6 +9,7 @@ import (
 	"reflect"
 
 	"github.com/adfnekc/grdp/plugin/cliprdr"
+	"github.com/adfnekc/grdp/plugin/disp"
 	"github.com/adfnekc/grdp/plugin/drdynvc"
 	"github.com/adfnekc/grdp/plugin/rail"
 
@@ -288,6 +289,17 @@ func (c *MCSClient) SetClientDynvcProtocol() {
 
 func (c *MCSClient) SetClientRemoteProgram() {
 	c.clientNetworkData.AddVirtualChannel(rail.ChannelName, rail.ChannelOption)
+}
+
+// SetClientDisplayControl asks for Display Control, both ways round.
+//
+// The messages travel on the dynamic channel, but the static channel of the same
+// name is advertised beside drdynvc as well, because that is what FreeRDP does
+// and because Windows will not create the dynamic one without it: asked for
+// drdynvc alone, the server never mentions
+// Microsoft::Windows::RDS::DisplayControl at all.
+func (c *MCSClient) SetClientDisplayControl() {
+	c.clientNetworkData.AddVirtualChannel(disp.ChannelName, disp.ChannelOption)
 }
 
 func (c *MCSClient) SetClientCliprdr() {

@@ -16,11 +16,20 @@ import (
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
+	"github.com/adfnekc/grdp/plugin"
 	"github.com/adfnekc/grdp/glog"
 )
 
 // DVCChannelName is the dynamic virtual channel this package speaks on.
 const DVCChannelName = "Microsoft::Windows::RDS::DisplayControl"
+
+// ChannelName is the static virtual channel of the same name. Both are
+// advertised: the messages travel on the dynamic one, but a server that is not
+// offered the static one does not create the dynamic one either.
+const ChannelName = plugin.DISP_SVC_CHANNEL_NAME
+
+// ChannelOption is what the static channel is advertised with.
+const ChannelOption = plugin.CHANNEL_OPTION_INITIALIZED | plugin.CHANNEL_OPTION_ENCRYPT_RDP
 
 // Fixed sizes from MS-RDPEDISP. The header is a type and a length, the layout
 // PDU adds a monitor size and a count, and each monitor is forty bytes.
@@ -102,6 +111,7 @@ type DisplayControlClient struct {
 	channel  uint32
 	open     bool
 	send     func(channelID uint32, data []byte) error
+	static   core.ChannelSender
 	lastSent []byte
 }
 
@@ -183,6 +193,29 @@ func (c *DisplayControlClient) OnData(data []byte) {
 	}
 }
 
+// GetType reports the static channel this handler answers for, which is how the
+// channel layer knows to route to it.
+func (c *DisplayControlClient) GetType() (string, uint32) {
+	return ChannelName, ChannelOption
+}
+
+// Sender installs the static channel's writer.
+//
+// Display Control can travel on either channel, and the messages are the same on
+// both, so this handler speaks whichever one the server set up. Windows joins the
+// static channel and never creates the dynamic one, so this is the path that
+// actually works there.
+func (c *DisplayControlClient) Sender(f core.ChannelSender) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.static = f
+}
+
+// Process consumes one payload from the static channel.
+func (c *DisplayControlClient) Process(s []byte) {
+	c.OnData(s)
+}
+
 // RequestResize asks the server to change the primary monitor to width by
 // height. The whole layout has to be sent, not just the one monitor that
 // changed, so a single monitor layout is built here.
@@ -260,18 +293,31 @@ func appendUint32(b []byte, v uint32) []byte {
 }
 
 // write sends a message, and refuses to say it succeeded when there is no
-// channel to send it on.
+// channel to send it on. The dynamic channel is preferred when it exists and the
+// static one is the fallback, because a server that set up both would rather
+// have the dynamic one.
 func (c *DisplayControlClient) write(pdu []byte) error {
 	c.mu.Lock()
 	send, channel, open := c.send, c.channel, c.open
-	if open {
-		c.lastSent = append([]byte(nil), pdu...)
-	}
+	static := c.static
 	c.mu.Unlock()
-	if send == nil || !open {
-		return fmt.Errorf("disp: the display control channel is not open")
+
+	if open && send != nil {
+		c.mu.Lock()
+		c.lastSent = append([]byte(nil), pdu...)
+		c.mu.Unlock()
+		return send(channel, pdu)
 	}
-	return send(channel, pdu)
+	if static != nil {
+		c.mu.Lock()
+		c.lastSent = append([]byte(nil), pdu...)
+		c.mu.Unlock()
+		if _, err := static.SendToChannel(ChannelName, pdu); err != nil {
+			return fmt.Errorf("disp: send on the static channel: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("disp: the display control channel is not open")
 }
 
 // LastSent returns the last layout this client sent, which is what a test

@@ -172,7 +172,15 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 			c.gfx = gfx
 		}
 		if c.setting.EnableDisplayControl {
+			// The static channel as well as the dynamic one: a server that
+			// is not offered it does not create the dynamic one, which is
+			// how this went unnoticed against Windows at first.
+			c.mcs.SetClientDisplayControl()
 			d := disp.NewDisplayControlClient()
+			// Registered twice on purpose: the messages are identical on the
+			// static and the dynamic channel, and Windows uses the static one.
+			// The dynamic registration is kept for servers that use it.
+			c.channels.Register(d)
 			d.SetSender(dvc.SendData)
 			dvc.Register(disp.DVCChannelName, d)
 			d.OnCaps(func(caps disp.Caps) {
