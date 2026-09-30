@@ -28,6 +28,21 @@ func colourShape(pixels ...[3]byte) *pdu.PointerShape {
 	}
 }
 
+// colour32Shape is the same shape at 32bpp, where the pixels carry their own
+// alpha. The two depths have different rules, so the tests have to say which
+// they mean.
+func colour32Shape(pixels ...[4]byte) *pdu.PointerShape {
+	xor := make([]byte, 0, len(pixels)*4)
+	for _, p := range pixels {
+		xor = append(xor, p[0], p[1], p[2], p[3])
+	}
+	and := make([]byte, ((len(pixels)+15)/16)*2)
+	return &pdu.PointerShape{
+		Width: len(pixels), Height: 1, XorBpp: 4,
+		HotspotX: 0, HotspotY: 0, Xor: xor, And: and,
+	}
+}
+
 func rgbaAt(c *Cursor, x, y int) [4]byte {
 	o := y*c.Image.Stride + x*4
 	return [4]byte{c.Image.Pix[o], c.Image.Pix[o+1], c.Image.Pix[o+2], c.Image.Pix[o+3]}
@@ -49,18 +64,58 @@ func TestCursorAndMaskClearIsOpaque(t *testing.T) {
 	}
 }
 
-// An AND bit of one means the pixel is not drawn. It has to end up fully
-// transparent rather than black, or a cursor would have a black background.
-func TestCursorAndMaskSetIsTransparent(t *testing.T) {
-	s := colourShape([3]byte{10, 20, 30}, [3]byte{40, 50, 60})
-	// 0x80 is the most significant bit, which is the first pixel of the row.
+// The AND mask on a colour pointer is not a transparency mask, which is what
+// this test asserted before a real Windows target said otherwise. An AND bit of
+// one means the colour decides: black becomes transparent, white becomes the
+// inverse of the background, and anything else is drawn with its own alpha.
+//
+// The Windows 10 cursor is why this matters. Its AND mask is mostly set, because
+// the shape lives in the alpha channel, so treating a set bit as transparent
+// erased all but one pixel of the arrow.
+func TestCursorColourAndMaskDependsOnTheColour(t *testing.T) {
+	// A dark colour that is not black keeps its pixel, alpha and all.
+	s := colour32Shape([4]byte{10, 20, 30, 200}, [4]byte{40, 50, 60, 128})
+	s.And[0] = 0x80 // the first pixel only
+	cur := cursorFromShape(s)
+	if got := rgbaAt(cur, 0, 0); got != [4]byte{30, 20, 10, 200} {
+		t.Errorf("and=1 with a dark colour = %v, want it kept with its alpha", got)
+	}
+	if got := rgbaAt(cur, 1, 0); got != [4]byte{60, 50, 40, 128} {
+		t.Errorf("and=0 = %v, want it kept with its alpha", got)
+	}
+}
+
+// Black with the AND bit set is the transparency: it is how a shape says "leave
+// the screen alone here".
+func TestCursorColourAndMaskClearsBlack(t *testing.T) {
+	s := colour32Shape([4]byte{0, 0, 0, 255}, [4]byte{1, 2, 3, 255})
 	s.And[0] = 0x80
 	cur := cursorFromShape(s)
 	if got := rgbaAt(cur, 0, 0); got != [4]byte{0, 0, 0, 0} {
-		t.Errorf("masked pixel = %v, want all zero", got)
+		t.Errorf("and=1 black = %v, want transparent", got)
 	}
-	if got := rgbaAt(cur, 1, 0); got != [4]byte{60, 50, 40, 255} {
-		t.Errorf("unmasked pixel = %v, want [60 50 40 255]", got)
+	if got := rgbaAt(cur, 1, 0); got != [4]byte{3, 2, 1, 255} {
+		t.Errorf("and=0 = %v, want it kept", got)
+	}
+}
+
+// A 24bpp pointer has no alpha of its own, so white with the AND bit set means
+// the inverse of the background, and a colour that is neither white nor black is
+// a hole.
+func TestCursor24bppAndMaskIsTheOldRule(t *testing.T) {
+	s := colourShape([3]byte{0xff, 0xff, 0xff}, [3]byte{10, 20, 30})
+	s.And[0] = 0xC0 // both pixels
+	cur := cursorFromShape(s)
+	if got := rgbaAt(cur, 0, 0); got[3] != 0xff {
+		t.Errorf("and=1 white at 24bpp = %v, want the inverted substitute drawn", got)
+	}
+	if got := rgbaAt(cur, 1, 0); got != [4]byte{0, 0, 0, 0} {
+		t.Errorf("and=1 with a colour that is neither white nor black at 24bpp = %v, want transparent", got)
+	}
+	// With the bit clear there is no alpha to use, so the pixel is made opaque.
+	s2 := colourShape([3]byte{10, 20, 30})
+	if got := rgbaAt(cursorFromShape(s2), 0, 0); got != [4]byte{30, 20, 10, 255} {
+		t.Errorf("and=0 at 24bpp = %v, want opaque", got)
 	}
 }
 

@@ -26,7 +26,8 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
       能力集里宣告的 **20 个缓存槽真的实现了**，所以 CACHED 引用能取回形状而不是让光标消失；
       系统光标会如实标记；网关可从 `OnCursor` 拿到带 alpha 的 RGBA。
       已在 xrdp 上验证：它发的是双色光标，取回的热点值是真实光标该有的
-      （箭头 `0,0`、工字 `4,8`），而不是垃圾值
+      （箭头 `0,0`、工字 `4,8`），而不是垃圾值；并在**真实 Windows 10** 上验证：
+      41×39 的箭头与工字分别有 145 到 352 个不透明像素
 * [x] 键盘与鼠标输入，含修饰键
 * [x] 剪贴板文本**双向**
 * [x] NSCodec 与 RemoteFX (RFX) 位图编解码器，**与 libfreerdp 的解码器逐字节比对**
@@ -97,6 +98,7 @@ selftest: ok — page has a canvas, size announced, 12881 bytes as JPEG (1024x76
 | 绘图订单 | 整个 Windows 锁屏经位图缓存送达，两条路径差异仅剩时钟 |
 | VNC | 真实 TigerVNC：帧能收到，剪贴板双向可用 |
 | NSCodec、RemoteFX、ZGFX | 与 libfreerdp **逐字节**比对（输入由其编码器产生，期望输出由其解码器给出）|
+| Windows 上的光标 | 真实 Windows 10：41×39、热点落在箭头尖端，并暴露了 xrdp 的双色光标永远不会走到的 AND 掩码规则 |
 | 健壮性 | 模糊测试（抓到 2 个死循环、3 个 panic；语料已留存）|
 | 形状/字形/九宫格/多矩形订单 | **仅**依据 FreeRDP 解析器 + 单测：没有可达服务端会发它们 |
 | AVC420 / AVC444 分帧 | **仅**依据 FreeRDP 解析器 + 单测：解码需要本库不自带的解码器 |

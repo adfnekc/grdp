@@ -30,7 +30,8 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       cursors are reported as such, and a gateway gets RGBA with alpha from
       OnCursor. Verified against xrdp, which sends two colour cursors and whose
       shapes come back with the hotspots a real cursor has (arrow at 0,0, I beam
-      at 4,8) rather than garbage.
+      at 4,8) rather than garbage, and against a real Windows 10 host, whose
+      41x39 arrows and I beams come back with 145 to 352 opaque pixels each.
 * [x] Keyboard and mouse input, including modifier keys
 * [x] Clipboard, text, both directions
 * [x] NSCodec and RemoteFX (RFX) bitmap codecs, checked byte for byte against
@@ -127,6 +128,7 @@ without having been run against something that did not write the test.
 | Drawing orders | A whole Windows lock screen through the bitmap cache, and the two drawing paths agree to the taskbar clock |
 | VNC | A real TigerVNC server: a frame arrives, and the clipboard works both ways |
 | NSCodec, RemoteFX, ZGFX | Byte for byte against libfreerdp, whose encoder produced the input and whose decoder produced the expected output |
+| Cursors on Windows | A real Windows 10 host: 41x39 shapes, hotspots at the arrow's tip, and the AND mask rule that xrdp's two colour cursors never exercise |
 | Robustness | Fuzzing, which found two infinite loops and three panics; the corpus is kept |
 | The shape, glyph, nine grid and multi rectangle orders | FreeRDP's parsers and unit tests only: no reachable server sends them |
 | The AVC420 and AVC444 framing | FreeRDP's parsers and unit tests only: decoding needs a decoder this does not ship |

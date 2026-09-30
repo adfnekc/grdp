@@ -121,6 +121,7 @@ func typeString(c *client.Client, s string) {
 //	press:0x1c        key down + up (hex scancode)
 //	down:0xe05b       key down
 //	up:0xe05b         key up
+//	unicode:ABC       type a string as Unicode key events rather than scancodes
 //	move:x,y          move the pointer
 //	click:x,y         move and left click
 //	wait:300          pause in milliseconds
@@ -142,6 +143,15 @@ func playInput(c *client.Client, events []string) {
 			}
 			if parts[0] != "down" {
 				c.KeyUp(int(sc), "")
+			}
+		case "unicode":
+			// Characters rather than scancodes, which is what an input
+			// method produces: a scancode cannot say which character was
+			// composed. Held briefly so that a server which turns them back
+			// into keystrokes sees a key go down and up rather than both at
+			// once.
+			if err := c.TypeText(parts[1], 10*time.Millisecond); err != nil {
+				fmt.Fprintln(os.Stderr, "unicode text:", err)
 			}
 		case "move", "click":
 			xy := strings.SplitN(parts[1], ",", 2)
@@ -421,8 +431,29 @@ func main() {
 					}
 				}
 			}
-			fmt.Printf("cursor: %dx%d hotspot=(%d,%d) opaque=%d/%d\n",
-				cur.Width, cur.Height, cur.Hotspot.X, cur.Hotspot.Y, opaque, cur.Width*cur.Height)
+			// The mask statistics are here because a cursor that decodes to
+			// almost nothing looks the same as one that decodes correctly and
+			// is drawn transparent: the counts say which has happened.
+			andSet, andClear := 0, 0
+			for _, b := range cur.And {
+				for i := 0; i < 8; i++ {
+					if b&(1<<uint(7-i)) != 0 {
+						andSet++
+					} else {
+						andClear++
+					}
+				}
+			}
+			alphaNonZero := 0
+			for i := 3; i < len(cur.Image.Pix); i += 4 {
+				if cur.Image.Pix[i] != 0 {
+					alphaNonZero++
+				}
+			}
+			fmt.Printf("cursor: %dx%d hotspot=(%d,%d) bpp=%d xor=%dB and=%dB and1=%d and0=%d alpha!=0:%d opaque=%d/%d\n",
+				cur.Width, cur.Height, cur.Hotspot.X, cur.Hotspot.Y,
+				cur.XorBpp, len(cur.Xor), len(cur.And), andSet, andClear, alphaNonZero,
+				opaque, cur.Width*cur.Height)
 		})
 		cursorPositions := 0
 		c.OnCursorPos(func(x, y int) { cursorPositions++ })

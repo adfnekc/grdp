@@ -41,6 +41,19 @@ type Cursor struct {
 	// the rest would be a guess about a value a caller is better placed to
 	// interpret.
 	SystemType uint32
+
+	// XorBpp is the bytes per pixel the shape was decoded at: three for a
+	// 24bpp pointer, four for a 32bpp one, and one for a two colour pointer,
+	// where it means one bit per pixel rather than one byte. It is what a
+	// caller needs in order to read Xor for itself.
+	XorBpp int
+
+	// Xor and And are the masks the Image was built from, in the layout they
+	// arrived in, so that a caller which wants to composite the pointer its
+	// own way does not have to decode the image back into them. Most callers
+	// want Image.
+	Xor []byte
+	And []byte
 }
 
 // Hidden reports whether the server asked for no pointer at all.
@@ -54,10 +67,13 @@ func (c *Cursor) Hidden() bool {
 // both were taken from FreeRDP rather than reasoned out.
 //
 // A colour pointer's XOR mask is bottom up, so its rows are walked from the
-// bottom, and the AND mask is one bit per pixel: zero means the colour is drawn
-// as it is, one means the pixel is not drawn at all. A 32bpp shape carries its
-// own alpha and that is used as it stands, which is how Windows sends a pointer
-// with soft edges; a 24bpp one has no alpha, so a kept pixel is fully opaque.
+// bottom, and it carries the colour and, at 32bpp, the alpha that draws it. The
+// AND mask does not simply mark transparency, which is the mistake this made
+// first: an AND bit of one means look at the colour, and black becomes
+// transparent while white becomes the inverse of what is behind it. Everything
+// else keeps the colour and its alpha, which is how a Windows 10 cursor with its
+// soft edges survives at all. An AND bit of zero uses the colour directly, with
+// the alpha forced opaque when there is no alpha to use.
 //
 // A two colour pointer (one bit per pixel, XorBpp of one) is the other way up:
 // FreeRDP's decoder only flips the colour case, so the rows here are read top
@@ -110,9 +126,7 @@ func cursorFromShape(s *pdu.PointerShape) *Cursor {
 				default:
 					return nil
 				}
-				if andBit == 1 {
-					px = [4]byte{}
-				}
+				px = colourCursorPixel(px, andBit, s.XorBpp, x, y)
 			}
 			o := y*img.Stride + x*4
 			copy(img.Pix[o:o+4], px[:])
@@ -129,7 +143,54 @@ func cursorFromShape(s *pdu.PointerShape) *Cursor {
 	if hot.Y < 0 || hot.Y >= h {
 		hot.Y = 0
 	}
-	return &Cursor{Image: img, Width: w, Height: h, Hotspot: hot}
+	return &Cursor{
+		Image: img, Width: w, Height: h, Hotspot: hot,
+		XorBpp: s.XorBpp, Xor: s.Xor, And: s.And,
+	}
+}
+
+// colourCursorPixel applies the AND mask to a colour pointer's pixel.
+//
+// This is FreeRDP's rule, and the shape of it is the thing worth keeping: an AND
+// bit of one does not mean transparent, it means the colour decides. Black
+// becomes transparent and white becomes the inverse of the background; every
+// other colour is drawn as it is, alpha included. Reading it as a plain
+// transparency mask erases almost all of a Windows 10 cursor, whose AND mask is
+// mostly set while its shape lives in the alpha channel.
+func colourCursorPixel(px [4]byte, andBit byte, xorBpp int, x, y int) [4]byte {
+	black := px[0] == 0 && px[1] == 0 && px[2] == 0
+	white := px[0] == 0xff && px[1] == 0xff && px[2] == 0xff
+	if andBit == 1 {
+		switch {
+		case xorBpp > 3 && black:
+			// 32bpp states black as exactly black; anything else is a
+			// colour that merely happens to be dark.
+			return [4]byte{}
+		case white:
+			// The inverse of the background, which is not knowable here.
+			return invertedCursorPixel(x, y)
+		case xorBpp <= 3:
+			return [4]byte{} // 24bpp: a colour other than white is a hole
+		}
+		return px // 32bpp: the colour and its own alpha
+	}
+	// An AND bit of zero uses the colour as it is. A 24bpp pointer has no alpha
+	// to use, so the pixel is made opaque.
+	if xorBpp <= 3 {
+		px[3] = 0xff
+	}
+	return px
+}
+
+// invertedCursorPixel is a pixel whose colour is the inverse of whatever is
+// behind it. That cannot be worked out from a shape, so it becomes a black and
+// white checkerboard, which stays visible on any background where a flat colour
+// would not: this is what FreeRDP substitutes, for the same reason.
+func invertedCursorPixel(x, y int) [4]byte {
+	if (x+y)&1 == 0 {
+		return [4]byte{0xff, 0xff, 0xff, 0xff}
+	}
+	return [4]byte{0, 0, 0, 0xff}
 }
 
 // bitAt reads one bit from a mask, in the order the masks are stored: the most
@@ -154,13 +215,7 @@ func monoCursorPixel(andBit, xorBit byte, x, y int) [4]byte {
 	case andBit == 1 && xorBit == 0:
 		return [4]byte{} // transparent
 	default:
-		// The inverse of whatever is behind it, which is not knowable here.
-		// A checkerboard is what FreeRDP substitutes, and it stays visible
-		// on any background, which a flat colour does not.
-		if (x+y)&1 == 0 {
-			return [4]byte{0xff, 0xff, 0xff, 0xff}
-		}
-		return [4]byte{0, 0, 0, 0xff}
+		return invertedCursorPixel(x, y)
 	}
 }
 
