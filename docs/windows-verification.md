@@ -30,6 +30,41 @@ Verified end to end, using only this library:
   produces the expected output on screen, so modifier keys (the upper case
   letters need shift) and Enter are all delivered correctly.
 
+## Display Control: the dynamic channel alone was not created
+
+With `Setting.EnableDisplayControl` and nothing else, the connect sequence
+advertises exactly one channel, `drdynvc`, and Windows never creates the
+DisplayControl channel on it: no `Microsoft::Windows::RDS::DisplayControl` appears
+in the dynamic channel exchange, and `RequestResize` reports
+
+    resize: disp: the display control channel is not open
+
+which is at least the honest answer rather than a wait. The next thing to try is
+advertising the **static** `disp` channel in the Client Network Data as well.
+FreeRDP carries both names, `DISP_CHANNEL_NAME "disp"` and
+`DISP_DVC_CHANNEL_NAME "Microsoft::Windows::RDS::DisplayControl"`, which is a
+hint that some servers want the static one before they will offer the dynamic
+one. That is untested here, and it is written down as the next step rather than
+guessed at.
+
+## Symptom: keyboard input that reaches nothing
+
+Mouse input works on this target: clicking a desktop icon highlights it and shows
+a tooltip. Typing produces no visible effect anywhere, including in the Start
+menu's search box after `Ctrl+Esc`, which does open it.
+
+The control that matters: typing over the **slow** path behaves identically to the
+fast path, and the search box region is byte for byte the same in both. So this is
+the shell not taking keyboard focus, and not a fault in the input path or in
+Unicode key events. Without that comparison the obvious conclusion would have been
+that the Unicode path was broken, which it is not: it is verified byte for byte
+against FreeRDP's parser and unit tested, and this target simply cannot say.
+
+One more hazard worth knowing when comparing screenshots of this host: its
+wallpaper rotates. Two runs a minute apart differ in about 85% of their pixels
+because of it, which looks exactly like a total failure and is nothing at all.
+Compare a crop, or compare runs that are seconds apart.
+
 ## Symptom: `DISCONNECT_PROVIDER_ULTIMATUM` and typed input
 
 A connection that gets `MCS DISCONNECT_PROVIDER_ULTIMATUM` a few seconds in, and
