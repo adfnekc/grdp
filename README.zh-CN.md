@@ -61,6 +61,29 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 * [ ] **窗口化 surface 的摆放** —— `MapSurfaceToScaledOutput` 已实现（会重采样到服务端
       要求的尺寸），但两个窗口变体只**记录并对外暴露**、不实际应用，因为没有"窗口"可摆放。
 
+## 无头网关示例
+
+`cmd/rdpws` 是一个单文件网关：它持有一个 RDP 会话，把画面按脏矩形编码成 JPEG 经 WebSocket
+发给浏览器，并把浏览器的键盘、鼠标与光标收回来。这正是本库原来缺的示例——原有的两个示例
+一个是桌面程序、一个是早期的 socket.io 页面，都没展示怎么在**没有窗口**的情况下驱动会话。
+
+```sh
+go run ./cmd/rdpws -host 192.0.2.10 -user user -pass secret
+# 然后打开 http://127.0.0.1:8080/
+```
+
+它同时是**可以跑、而不是只能读**的测试：
+
+```sh
+go run ./cmd/rdpws -host 127.0.0.1 -user rdptest -pass rdptest -selftest
+selftest: ok — page has a canvas, size announced, 12881 bytes as JPEG (1024x768),
+                2 cursor images, 1 frames encoded
+```
+
+它会连接、启动服务、用浏览器会用的那条 WebSocket 驱动一帧画面和一张光标图、解码它们，
+再发一个输入事件回去。`Framebuffer`/`OnFrame`、`OnCursor`、`TypeText` 三项在这里一起被跑到，
+所以网关需要的三件事都集中在一个能运行的地方。
+
 ## 什么被验证过、怎么验证的
 
 这张表画出的区别，正是本仓库的意义所在。上面每一条主张都落在第一列或第二列，

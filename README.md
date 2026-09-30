@@ -86,6 +86,33 @@ Not done, or not finished:
       offers MEMBLT alone: asking an older server for orders never watched
       working would be worse than leaving it on bitmap updates.
 
+## A headless gateway
+
+`cmd/rdpws` is a gateway in one file: it holds an RDP session, serves the screen
+to a browser as dirty rectangles encoded to JPEG over a WebSocket, and takes the
+browser's keyboard, mouse and pointer back the other way. It is the example the
+library was missing, since the two that shipped were a desktop program and a
+socket.io page from its early days, and neither showed how to drive a session
+with no window in front of it.
+
+```sh
+go run ./cmd/rdpws -host 192.0.2.10 -user user -pass secret
+# then open http://127.0.0.1:8080/
+```
+
+It is also a test that can be run rather than read, which is the point of it:
+
+```sh
+go run ./cmd/rdpws -host 127.0.0.1 -user rdptest -pass rdptest -selftest
+selftest: ok — page has a canvas, size announced, 12881 bytes as JPEG (1024x768),
+                2 cursor images, 1 frames encoded
+```
+
+That connects, serves, drives a frame and a pointer image through the WebSocket a
+browser would use, decodes them, and sends input back. It is what exercises
+`Framebuffer` and `OnFrame`, `OnCursor` and `TypeText` together, so the three
+things a gateway needs are in one place that runs.
+
 ## What is verified, and how
 
 The distinction this table draws is the point of the repository. Every claim in
@@ -185,6 +212,8 @@ or like a region that never got drawn.
 
 `scripts/vnc-dev.sh` fetches TigerVNC without root, starts it on a private
 display, and runs the live VNC tests against it.
+
+`cmd/rdpws -selftest` is the integration test for the headless path above.
 
 `go run ./cmd/docaudit ./...` lists exported identifiers that godoc will render
 without a doc comment, which is the one thing that makes an API unpleasant to

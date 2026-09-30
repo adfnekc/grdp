@@ -68,6 +68,19 @@ func (f *Framebuffer) Pix() []byte {
 	return f.screen.Buffer()
 }
 
+// MergeDirty adds r to a list of changed rectangles, merging it with anything
+// it overlaps or shares an edge with and collapsing to the whole of bounds once
+// the result covers most of it.
+//
+// It is what the dirty regions OnFrame reports were built with, exported for a
+// caller that accumulates them across frames: a gateway pacing its encoding on a
+// timer has to fold each frame's regions into what it has not sent yet, and
+// doing that by simply appending would send the same overlapping rectangles
+// again and again.
+func MergeDirty(dirty []image.Rectangle, r, bounds image.Rectangle) []image.Rectangle {
+	return addDirty(dirty, r, bounds)
+}
+
 // addDirty adds r to the list of changed rectangles, merging it with anything it
 // overlaps or shares an edge with, and collapsing to the whole frame once the
 // result covers most of it.
