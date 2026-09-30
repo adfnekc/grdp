@@ -30,6 +30,28 @@ Verified end to end, using only this library:
   produces the expected output on screen, so modifier keys (the upper case
   letters need shift) and Enter are all delivered correctly.
 
+## Symptom: `DISCONNECT_PROVIDER_ULTIMATUM` and typed input
+
+A connection that gets `MCS DISCONNECT_PROVIDER_ULTIMATUM` a few seconds in, and
+that survives while nothing is typed, is not a protocol fault. Look at the
+screen: on this target it showed
+
+    Another user is signed in. If you continue, they'll be disconnected.
+    Do you want to sign in anyway?          [ Yes ]  [ No ]
+
+The console session was signed in, so every RDP connection met this prompt, whose
+default button is **No**. Typed keys were answering it: any Enter or space
+answered No, and the server then disconnected. Clicking **Yes** at (441, 524) on
+a 1024x768 desktop takes the session, and the desktop appears — a burst of about
+190 bitmap rectangles is what that looks like — but the console reclaims it
+within a few seconds on this target, so anything needing longer than that has to
+wait for a host whose console is signed out.
+
+The lesson generalises: a session that disconnects when you type and not when you
+do not is a session whose input is going somewhere other than where it was meant
+to. Reading the screen answers it in one look, and the answer is worth the look
+because nothing about the protocol is wrong.
+
 ## Symptom: the server rejects the logon, not the protocol
 
 If CredSSP gets through its public key exchange and then the connection is
