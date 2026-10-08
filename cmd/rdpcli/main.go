@@ -305,15 +305,28 @@ func main() {
 
 	var inputPlayed bool
 	var unicodePlayed bool
+	var resizeAsked bool
 	c.OnResize(func(w, h int) {
 		fmt.Printf("desktop resized to %dx%d\n", w, h)
+		// The dump buffer was sized from the flags, which stop being the
+		// desktop's size the moment a resize works. It follows now, so that
+		// -dump and -frame stay comparable.
+		//
+		// This closes over fb, which is created below, so it is only valid to
+		// call once a resize has happened, which is after that point.
+		if *dump != "" {
+			fb = image.NewRGBA(image.Rect(0, 0, w, h))
+		}
 	})
 	c.OnReady(func() {
 		select {
 		case ready <- struct{}{}:
 		default:
 		}
-		if *resize != "" {
+		if *resize != "" && !resizeAsked {
+			// Once: the ready event can arrive more than once, and asking
+			// twice sends two layouts for one intent.
+			resizeAsked = true
 			go func() {
 				var w, h int
 				if _, err := fmt.Sscanf(*resize, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {

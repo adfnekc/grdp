@@ -16,6 +16,12 @@ and the newer graphics channel.
 Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
 
 * [x] Connection, MCS, capability exchange
+* [x] Display Control: the desktop can be resized while the session runs. The
+      channel is asked for by the client, the layout waits for the server's
+      capabilities, `OnResize` reports the size the server actually chose - it
+      rounds to a mode it has, so 720 comes back as 768 - and the framebuffer
+      follows. Verified against a real Windows 10 host, where the desktop
+      resizes and the two composites still agree to 0 of 983040 pixels.
 * [x] TLS and NLA (CredSSP with NTLMv2, including the version 6 public key
       binding)
 * [x] Standard RDP Security, the old path with no TLS: verified against a local
@@ -169,6 +175,7 @@ without having been run against something that did not write the test.
 | Drawing orders | A whole Windows lock screen through the bitmap cache, and the two drawing paths agree to the taskbar clock |
 | VNC | A real TigerVNC server: a frame arrives, and the clipboard works both ways |
 | NSCodec, RemoteFX, ZGFX | Byte for byte against libfreerdp, whose encoder produced the input and whose decoder produced the expected output |
+| Display Control | A real Windows 10 host resizes its desktop on request, and the framebuffer follows to 1280x768 |
 | Cursors on Windows | A real Windows 10 host: 41x39 shapes, hotspots at the arrow's tip, and the AND mask rule that xrdp's two colour cursors never exercise |
 | Robustness | Fuzzing, which found two infinite loops and three panics; the corpus is kept |
 | The shape, glyph, nine grid and multi rectangle orders | FreeRDP's parsers and unit tests only: no reachable server sends them |

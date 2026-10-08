@@ -20,6 +20,10 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 * [x] **Standard RDP Security**（无 TLS 的老路径）—— 已对本地 xrdp 实测通过；
       `scripts/dev-rdp.sh standard` 可把 xrdp 配置成要求它。它在同一目标上的输出与 TLS 路径
       **逐像素相同**，这比"能连上"强得多
+* [x] **Display Control：运行中改分辨率** —— 通道由客户端主动申请，布局要**等服务器的能力值**
+      之后再发（先发会被静默丢弃），`OnResize` 报告服务器**实际**采用的尺寸（它会凑到自己的显示模式：
+      要 720 会得到 768），帧缓冲随之改变。已在**真实 Windows 10** 上验证：桌面真的改了，
+      且两条合成路径在新尺寸下仍然 `0 of 983040` 像素差异。
 * [x] 许可（Licensing）交换
 * [x] 位图更新、RLE、24/32bpp
 * [x] 光标位置，以及把光标形状**解码成可绘制的光标** —— AND/XOR 掩码已应用；
@@ -98,6 +102,7 @@ selftest: ok — page has a canvas, size announced, 12881 bytes as JPEG (1024x76
 | 绘图订单 | 整个 Windows 锁屏经位图缓存送达，两条路径差异仅剩时钟 |
 | VNC | 真实 TigerVNC：帧能收到，剪贴板双向可用 |
 | NSCodec、RemoteFX、ZGFX | 与 libfreerdp **逐字节**比对（输入由其编码器产生，期望输出由其解码器给出）|
+| Display Control | 真实 Windows 10 按请求改了桌面，帧缓冲随之到 1280x768 |
 | Windows 上的光标 | 真实 Windows 10：41×39、热点落在箭头尖端，并暴露了 xrdp 的双色光标永远不会走到的 AND 掩码规则 |
 | 健壮性 | 模糊测试（抓到 2 个死循环、3 个 panic；语料已留存）|
 | 形状/字形/九宫格/多矩形订单 | **仅**依据 FreeRDP 解析器 + 单测：没有可达服务端会发它们 |

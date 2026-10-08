@@ -161,6 +161,10 @@ func TestRequestResizeRoundsWidthDownToEven(t *testing.T) {
 	d := NewDisplayControlClient()
 	d.SetSender(func(id uint32, data []byte) error { sent = data; return nil })
 	d.OnOpen(7)
+	// The resize waits for the server to say what it accepts: a layout sent
+	// before the capabilities is ignored by a real server, which is the whole
+	// bug this ordering was.
+	d.OnData(capsPDU())
 	if err := d.RequestResize(1025, 768); err != nil {
 		t.Fatalf("RequestResize: %v", err)
 	}
@@ -210,7 +214,9 @@ func TestRequestResizeNeedsAChannel(t *testing.T) {
 		t.Errorf("RequestResize with only a static channel: %v", err)
 	}
 
-	// So is the dynamic one, once it opens.
+	// The dynamic one needs the server's capabilities as well as the channel:
+	// opening it is not enough, and sending on it before the caps is what a
+	// real server ignores.
 	d = NewDisplayControlClient()
 	d.channelTimeout = wait
 	d.SetSender(func(uint32, []byte) error { return nil })
@@ -218,8 +224,12 @@ func TestRequestResizeNeedsAChannel(t *testing.T) {
 		t.Error("RequestResize worked before the dynamic channel opened")
 	}
 	d.OnOpen(1)
+	if err := d.RequestResize(1024, 768); err == nil {
+		t.Error("RequestResize worked before the server said what it accepts")
+	}
+	d.OnData(capsPDU())
 	if err := d.RequestResize(1024, 768); err != nil {
-		t.Errorf("RequestResize with an open dynamic channel: %v", err)
+		t.Errorf("RequestResize after the capabilities: %v", err)
 	}
 
 	// Closing the dynamic channel leaves the static one alone, so a client with
@@ -229,6 +239,7 @@ func TestRequestResizeNeedsAChannel(t *testing.T) {
 	d.Sender(fakeStaticSender{})
 	d.SetSender(func(uint32, []byte) error { return nil })
 	d.OnOpen(1)
+	d.OnData(capsPDU())
 	d.OnClose()
 	if err := d.RequestResize(1024, 768); err != nil {
 		t.Errorf("RequestResize after the dynamic channel closed but the static one is up: %v", err)
@@ -285,6 +296,17 @@ func TestOnDataIgnoresShortMessages(t *testing.T) {
 	if fired {
 		t.Error("a message shorter than the header produced caps")
 	}
+}
+
+// capsPDU is the capabilities message a server sends once the channel exists.
+// A layout sent before it is ignored, so this is what a resize waits for.
+func capsPDU() []byte {
+	pdu := appendUint32(nil, pduTypeCaps)
+	pdu = appendUint32(pdu, headerLength+capsBodyLength)
+	pdu = appendUint32(pdu, 16)
+	pdu = appendUint32(pdu, 8192)
+	pdu = appendUint32(pdu, 8192)
+	return pdu
 }
 
 // fakeStaticSender stands in for the static channel's writer.

@@ -95,8 +95,35 @@ id. So after both sides have asked, the client holds two channels called
 DisplayControl, on two ids, and the layout is expected on one of them. Which one
 is what a capture would settle, and it is the last open question here.
 
-What is left. The resize still does not take effect, and the log shows why to
-look at next: after our request, Windows creates a conversation of its own
+**The layout has to wait for the capabilities.** This was the last fault, and it
+is the one that made everything else look like it was not working. A layout sent
+before the server has said what it accepts is ignored in silence; the channel can
+be open, the id can be right, and nothing happens. The log before the fix shows
+the order plainly:
+
+    disp: channel 10 open
+    disp: sending 56 bytes on the dynamic channel id 10
+    disp: server caps monitors=16 area=8192x8192     <- after the send
+
+and after it:
+
+    disp: channel 10 open
+    disp: server caps monitors=16 area=8192x8192
+    disp: sending 56 bytes on the dynamic channel id 10
+    client: desktop is now 1280x768
+
+The desktop resizes, OnResize fires, and the framebuffer follows to 1280x768. The
+two composites agree there as they do at 1024x768: 0 of 983040 pixels differ.
+
+Two more things worth knowing. The server rounds the size it was asked for: 720
+comes back as 768, because the monitor modes it has are its own, so a caller must
+read the size back from OnResize rather than assume it was granted. And the id
+that works is the server's own DisplayControl channel, id 10, not the one the
+client asked for, because the handler's id is replaced when the server opens its
+own channel of that name - which is harmless here and is worth knowing before
+reading more into the two channels.
+
+What was left. The log also shows that Windows creates a conversation of its own
 
     server requests id=10 name="Microsoft::Windows::RDS::Video::Data::v08.01"
     server requests id=11 name="Microsoft::Windows::RDS::Geometry::v08.01"

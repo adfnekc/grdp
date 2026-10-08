@@ -169,7 +169,6 @@ func (c *DisplayControlClient) OnOpen(channelID uint32) {
 	c.channel, c.open = channelID, true
 	c.mu.Unlock()
 	glog.Debugf("disp: channel %d open", channelID)
-	c.markReady()
 	c.Emit("open")
 }
 
@@ -210,6 +209,10 @@ func (c *DisplayControlClient) OnData(data []byte) {
 		}
 		glog.Infof("disp: server caps monitors=%d area=%dx%d",
 			caps.MaxNumMonitors, caps.MaxMonitorAreaFactorA, caps.MaxMonitorAreaFactorB)
+		// The server states what it will accept before a layout is sent to it,
+		// and a layout that arrives before that is sent into a channel that
+		// has not said what it can take.
+		c.markReady()
 		c.Emit("caps", caps)
 	case pduTypeMonitorLayout:
 		// The server does not send layouts; it applies the client's. A message
@@ -356,12 +359,14 @@ func (c *DisplayControlClient) write(pdu []byte) error {
 		c.mu.Lock()
 		c.lastSent = append([]byte(nil), pdu...)
 		c.mu.Unlock()
+		glog.Debugf("disp: sending %d bytes on the dynamic channel id %d", len(pdu), channel)
 		return send(channel, pdu)
 	}
 	if static != nil {
 		c.mu.Lock()
 		c.lastSent = append([]byte(nil), pdu...)
 		c.mu.Unlock()
+		glog.Debugf("disp: sending %d bytes on the static channel %q", len(pdu), ChannelName)
 		if _, err := static.SendToChannel(ChannelName, pdu); err != nil {
 			return fmt.Errorf("disp: send on the static channel: %w", err)
 		}
