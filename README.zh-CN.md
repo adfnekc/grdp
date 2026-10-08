@@ -66,6 +66,33 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 * [ ] **窗口化 surface 的摆放** —— `MapSurfaceToScaledOutput` 已实现（会重采样到服务端
       要求的尺寸），但两个窗口变体只**记录并对外暴露**、不实际应用，因为没有"窗口"可摆放。
 
+## 登录失败长什么样
+
+登录失败是**分类过**的 ✓ —— 因为光看那句报错**分不出是哪种** ✓，而最常见的那一种**最误导人** ✗：
+
+对着要求 NLA 的服务器，**密码错**不会以"认证失败"回来 ✗ —— Windows **不回答**错误的登录 ✓，它直接**断开 TLS** ✓ —— 所以拿到的是 `tls: internal error` ✓，看起来**像证书问题** ✗，会把运维引到完全错误的方向 ✓。
+
+| 发生了什么 | 错误 | 怎么判定 |
+| --- | --- | --- |
+| 密码被拒 | 包装了 `ErrAuthenticationFailed` | `errors.Is(err, client.ErrAuthenticationFailed)` |
+| 没人监听 | 包装了带 `ECONNREFUSED` 的 `*net.OpError` | `errors.Is(err, syscall.ECONNREFUSED)` |
+| 主机/网络不可达 | 同上，带 `EHOSTUNREACH` 或超时 | `errors.Is(err, syscall.EHOSTUNREACH)` |
+| 服务器要求的**安全层不同** | `*x224.NegotiationFailure`（带 code） | `errors.As(err, &x224.NegotiationFailure{})` |
+| **服务器结束了会话**（通常是被别的连接接管） | 包装了 `ErrSessionEndedByServer` | `errors.Is(err, client.ErrSessionEndedByServer)` |
+
+```sh
+$ rdpcli -host host -user user -pass wrong -proto nla
+login failed: client: the server did not accept the credentials: nla: the CredSSP
+              authentication exchange failed: read header: remote error: tls: internal error
+  kind: authentication — the exchange did not complete, which is usually a rejected password
+```
+
+`ErrAuthenticationFailed` 说的是「**交换没完成**」✓，**故意不说「密码错」**✗ —— 因为**交换中途消失的服务器长得一模一样** ✓。它排除的是 **TLS 本身**（证书问题会在这之前失败 ✓）。
+
+最后一行那种**最像故障、其实不是** ✓：被别的连接接管的会话**还在服务器上** ✓（只是被挂起 ✓），**重连就取回** ✓。网络断了**根本不会**发断开通知 ✓ —— 所以「有没有收到通知」本身就是判据 ✓，**这是事实，不是在读字节** ✓。
+
+**唯一完全没有信号的情况** ✗：服务器**接受连接**、然后把失败**画在会话里**（xrdp 就是这样 ✓ —— 它显示一个 `login failed for user` 对话框 ✓，线上什么都不发 ✓）。客户端**没有办法**察觉 ✓ —— 而"去看屏幕"不是这个库会做的事 ✓。
+
 ## 无头网关示例
 
 `cmd/rdpws` 是一个单文件网关：它持有一个 RDP 会话，把画面按脏矩形编码成 JPEG 经 WebSocket
@@ -86,8 +113,9 @@ selftest: ok — page has a canvas, size announced, 12881 bytes as JPEG (1024x76
 ```
 
 它会连接、启动服务、用浏览器会用的那条 WebSocket 驱动一帧画面和一张光标图、解码它们，
-再发一个输入事件回去。`Framebuffer`/`OnFrame`、`OnCursor`、`TypeText` 三项在这里一起被跑到，
-所以网关需要的三件事都集中在一个能运行的地方。
+再发一个输入事件回去。`Framebuffer`/`OnFrame`、`OnCursor`、`TypeText` 这些网关需要的能力都集中在一个能运行的地方，
+而不是分散在几处描述里。加上 `-resize WxH` 它还会**请求服务器改分辨率** ——
+这正是浏览器页面最大化时需要的能力，也正是 Display Control 存在的理由。
 
 ## 什么被验证过、怎么验证的
 
@@ -113,26 +141,46 @@ selftest: ok — page has a canvas, size announced, 12881 bytes as JPEG (1024x76
 ```go
 s := client.NewSetting()
 s.Width, s.Height = 1024, 768
-s.Protocol = "nla"           // "tls" 或 "nla"
+s.Protocol = "nla"           // "tls"、"nla" 或 "rdp"
 
 c := client.NewClient("host:3389", "user", "password", client.TC_RDP, s)
-c.OnBitmap(func(bs []client.Bitmap) { /* 绘制 */ })
+
+// 像素只有一个落点，无论服务端选择哪条绘制路径。
+c.OnFrame(func(dirty []image.Rectangle) { /* 只编码这些区域 */ })
+c.OnCursor(func(cur *client.Cursor) { /* 按 cur.Hotspot 摆放并绘制 cur.Image */ })
+c.OnCursorPos(func(x, y int) { /* 光标放这里 */ })
 c.OnClipboardText(func(text string) { /* 粘贴 */ })
+
 if err := c.Login(); err != nil {
     log.Fatal(err)
 }
-c.KeyDown(0x1c, "")
-c.KeyUp(0x1c, "")
+
+fb := c.Framebuffer()        // BGRA、自上而下，有效期到下一次 OnFrame
+c.MouseMove(400, 300)
+c.MouseDown(0, 400, 300)
+c.MouseUp(0, 400, 300)
+c.TypeText("中文", 8*time.Millisecond)  // 发的是字符，所以输入法能用
 ```
 
-* `Setting.EnableClipboard` —— 打开剪贴板通道。
-* `Setting.EnableEGFX` —— 启用图形通道。**默认关闭**，因为服务端一旦选用它就会
-  **停止发送位图更新**：此时若遇到不支持的编解码器，结果是**黑屏**而不是画质变差。
-  用 `OnSurfaceFrame` 接收 surface，用 `Surface.Origin` 摆放。
-* `Setting.EnableOrders` —— 广告 MEMBLT 并渲染随后的绘图订单，画面进入
-  `Client.Screen` 的帧缓冲，`OnOrdersFrame` 报告变化区域。**默认关闭**，因为一旦
-  广告 MEMBLT，服务端就**完全停止发位图更新**，两条路径**无法混用**。关着时服务端
-  继续走位图更新 —— 正确，只是线上字节更多。
+`OnFrame` 每个更新批次只回调一次 ✓，脏矩形**已经合并并裁剪好** ✓ —— 调用方编码"变了的部分" ✓，
+不需要自己判断 ✓。像素从 `Framebuffer` 取 ✓，无论服务端走的是哪条路径 ✓。
+
+**光标不属于桌面图像** ✓ —— `OnCursor` 给的是**带 alpha 的图像**加上**热点**（用来定位 ✓），
+而且**只在形状变化时**触发 ✓、移动时不触发 ✓。
+
+**按需开启的选项**（默认全关 ✓ —— 因为每一个都会改变协商内容 ✓）：
+
+* `Setting.EnableClipboard` —— 打开剪贴板通道 ✓，文本双向；`Client.Files` 是文件传输接口 ✓
+  （接收文件用 provider ✓，读服务器提供的文件**按区间读** ✓）
+* `Setting.EnableDisplayControl` —— 打开 Display Control ✓，`RequestResize` 可在会话运行中改分辨率 ✓。
+  结果从 `OnResize` 回来 ✓，而且**以结果为准** ✓：服务器会凑到它自己的显示模式 ✓，要 720 可能给 768 ✓
+* `Setting.EnableEGFX` —— 进入图形通道 ✓。开启后不受支持的编解码器意味着**黑屏**而不是降级 ✓，
+  因为选了 EGFX 的服务端**完全停发位图更新** ✓
+* `Setting.EnableOrders` —— 广告 MEMBLT 并渲染随后的绘图订单 ✓。它改变服务端的绘制方式 ✓，
+  两条路径**不能混用** ✓
+
+`OnBitmap`、`Screen`、`OnOrdersFrame`、`OnSurfaceFrame` 仍然可用 ✓（想拿原始更新或订单机制的话 ✓），
+在 `Framebuffer`/`OnFrame` 已取代它们的地方标了 **deprecated** ✓。
 
 ## 试用
 

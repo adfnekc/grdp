@@ -186,30 +186,54 @@ without having been run against something that did not write the test.
 ```go
 s := client.NewSetting()
 s.Width, s.Height = 1024, 768
-s.Protocol = "nla"           // "tls" or "nla"
+s.Protocol = "nla"           // "tls", "nla" or "rdp"
 
 c := client.NewClient("host:3389", "user", "password", client.TC_RDP, s)
-c.OnBitmap(func(bs []client.Bitmap) { /* paint */ })
+
+// Where the pixels are: one place, whichever way the server chooses to draw.
+c.OnFrame(func(dirty []image.Rectangle) { /* encode exactly these regions */ })
+c.OnCursor(func(cur *client.Cursor) { /* draw cur.Image, positioned by cur.Hotspot */ })
+c.OnCursorPos(func(x, y int) { /* and put it here */ })
 c.OnClipboardText(func(text string) { /* paste */ })
+
 if err := c.Login(); err != nil {
     log.Fatal(err)
 }
-c.KeyDown(0x1c, "")
-c.KeyUp(0x1c, "")
+
+fb := c.Framebuffer()        // BGRA, top down, valid until the next OnFrame
+c.MouseMove(400, 300)
+c.MouseDown(0, 400, 300)
+c.MouseUp(0, 400, 300)
+c.TypeText("text", 8*time.Millisecond)  // characters, so an input method works
 ```
 
-`Setting.EnableClipboard` opens the clipboard channel, and
-`Setting.EnableEGFX` opts into the graphics channel described above. EGFX is off
-by default because a server that picks it stops sending bitmap updates: with it
-on, an unsupported codec means a blank screen rather than a degraded one. Use
-`OnSurfaceFrame` to receive the surfaces and `Surface.Origin` to place them.
+`OnFrame` reports each batch of updates once, with the dirty rectangles already
+merged and clipped, so a caller encodes what changed rather than guessing. The
+pixels come from `Framebuffer` whatever path the server used, and the dirty
+rectangles are what changed rather than the whole screen.
 
-`Setting.EnableOrders` advertises MEMBLT and renders the drawing orders that
-follow, into a framebuffer reachable through `Client.Screen`, with
-`OnOrdersFrame` reporting what changed. It is off by default because it changes
-how the server draws and the two paths cannot be mixed: advertising MEMBLT stops
-bitmap updates entirely. With it off the server stays on bitmap updates, which is
-correct, just larger on the wire.
+The pointer is not part of the desktop: `OnCursor` gives it as an image with
+alpha, plus a hotspot to position it by, and it fires on a shape change and not
+on movement.
+
+Opt-ins, all off by default because each changes what is negotiated:
+
+* `Setting.EnableClipboard` opens the clipboard channel, for text both ways.
+  `Client.Files` is the file transfer surface, which takes a provider for the
+  files to share and reads the ones the server offers by range.
+* `Setting.EnableDisplayControl` opens Display Control, so `RequestResize` can
+  change the desktop size while the session runs. The answer arrives on
+  `OnResize`, and it is the answer that counts: the server rounds to a mode it
+  has, so asking for 720 can give 768.
+* `Setting.EnableEGFX` opts into the graphics channel. With it on, an unsupported
+  codec means a blank screen rather than a degraded one, because a server that
+  picks EGFX stops sending bitmap updates entirely.
+* `Setting.EnableOrders` advertises MEMBLT and renders the drawing orders that
+  follow. It changes how the server draws, and the two paths cannot be mixed.
+
+`OnBitmap`, `Screen`, `OnOrdersFrame` and `OnSurfaceFrame` still work for callers
+that want the raw updates or the orders machinery, and are deprecated where
+`Framebuffer` and `OnFrame` supersede them.
 
 ## Trying it out
 
