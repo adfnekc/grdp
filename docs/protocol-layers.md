@@ -38,6 +38,22 @@ explicit about endianness, because the protocol mixes both; `ReadUint16LE` and
 `core` is where a wire value most often becomes an allocation. When adding to it,
 bound first.
 
+### emission and glog
+
+The event emitter and the logger. The emitter is worth reading before writing a
+handler for the protocol layers, because of two things it does.
+
+Listeners run in their own goroutines, all at once, and `Emit` waits for them.
+That means a handler must assume another copy of itself is running, and anything
+it writes that another copy could write needs a lock. A concurrent write to a Go
+map is a `fatal error`, which `recover` does not catch, so it takes the process
+and every session in it down rather than failing the session.
+
+`Once` takes its listener off the list before calling it, so a handler that
+re-arms itself while it runs, which is exactly how the connection sequence waits
+for the next message, ends up registered once. It appends rather than replaces, so
+registering two different handlers for one event gives you both.
+
 ### protocol/tpkt
 
 TPKT framing, and the TLS and CredSSP handshake. Fast path packets have no TPKT

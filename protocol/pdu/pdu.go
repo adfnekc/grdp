@@ -2,6 +2,7 @@ package pdu
 
 import (
 	"bytes"
+	"sync"
 	"encoding/hex"
 	"io"
 
@@ -145,6 +146,13 @@ type Client struct {
 	// and per type fields that delta coordinates refer back to. It belongs to
 	// one connection, which is why it lives here and not in the parser.
 	orders *OrderState
+
+	// capsMu guards serverCapabilities, which used to be a plain map written
+	// from a listener that the emitter could run twice at once. A concurrent
+	// write to a map is a run time fatal error, and recover does not catch
+	// those: it took down the process and every session in it, which is how it
+	// was found.
+	capsMu sync.Mutex
 }
 
 func NewClient(t core.Transport) *Client {
@@ -205,6 +213,23 @@ func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint
 	c.transport.Once("data", c.recvDemandActivePDU)
 }
 
+// ServerCapabilities returns the capability set the server announced in its
+// demand active PDU, keyed by type.
+//
+// It is the server's statement of what it will do, which is what a client's
+// replies and expectations are built around, so it is worth being able to look
+// at. The map is a copy; the values are the parsed structures and must not be
+// modified.
+func (c *Client) ServerCapabilities() map[CapsType]Capability {
+	c.capsMu.Lock()
+	defer c.capsMu.Unlock()
+	out := make(map[CapsType]Capability, len(c.serverCapabilities))
+	for k, v := range c.serverCapabilities {
+		out[k] = v
+	}
+	return out
+}
+
 func (c *Client) recvDemandActivePDU(s []byte) {
 	glog.Trace("PDU recvDemandActivePDU", hex.EncodeToString(s))
 	r := bytes.NewReader(s)
@@ -220,10 +245,12 @@ func (c *Client) recvDemandActivePDU(s []byte) {
 	}
 	c.sharedId = pdu.Message.(*DemandActivePDU).SharedId
 	c.demandActivePDU = pdu.Message.(*DemandActivePDU)
+	c.capsMu.Lock()
 	for _, caps := range c.demandActivePDU.CapabilitySets {
 		glog.Debugf("serverCapabilities<%s>: %+v", caps.Type(), caps)
 		c.serverCapabilities[caps.Type()] = caps
 	}
+	c.capsMu.Unlock()
 
 	c.sendConfirmActivePDU()
 	c.sendClientFinalizeSynchronizePDU()

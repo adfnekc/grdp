@@ -126,6 +126,15 @@ func (emitter *Emitter) Off(event, listener interface{}) *Emitter {
 // in the Emitter's events map. If the reflect Value of the listener
 // does not have a Kind of Func then Once panics. If a RecoveryListener
 // has been set then it is called after recovering from the panic.
+// Once registers a listener that is called at most once, by the next Emit of
+// that event, and is taken off the list before it runs.
+//
+// It appends rather than replaces, so registering the same function twice leaves
+// two entries, and both are called by the next Emit. Callers that re-arm
+// themselves as they run do not need to worry about that, because the list is
+// cleared first: their append lands after the clear, so they end up registered
+// once. Callers registering two different listeners for one event get both, in
+// whatever order the goroutines happen to run.
 func (emitter *Emitter) Once(event, listener interface{}) *Emitter {
 	emitter.Lock()
 	defer emitter.Unlock()
@@ -151,7 +160,13 @@ func (emitter *Emitter) Once(event, listener interface{}) *Emitter {
 
 // Emit attempts to use the reflect package to Call each listener stored
 // in the Emitter's events map with the supplied arguments. Each listener
-// is called within its own go routine. The reflect package will panic if
+// is called within its own go routine, and Emit waits for all of them.
+//
+// Listeners therefore run concurrently with each other and with any delivery in
+// progress, and a listener that is registered twice can run twice at once. The
+// connection sequence registers one handler at a time and expects it to run
+// once, which is what Once guarantees by taking the listener off the list before
+// calling it. The reflect package will panic if
 // the agruments supplied do not align the parameters of a listener function.
 // If a RecoveryListener has been set then it is called after recovering from
 // the panic.
@@ -179,16 +194,29 @@ func (emitter *Emitter) Emit(event interface{}, arguments ...interface{}) *Emitt
 	emitter.callListeners(listeners, event, arguments...)
 
 ONCES:
-	// execute onces
+	// Execute the once listeners. They are taken off the list BEFORE they run,
+	// and not after.
+	//
+	// The difference matters because of what the callers of Once do. The
+	// connection sequence waits for the next message by registering a handler
+	// that re-registers itself when the message turns out not to be the one it
+	// wants, so a listener running under Once is expected to append to this map.
+	// Consuming after the run meant the append landed inside the list being
+	// consumed, and two deliveries arriving close together could both see the
+	// pending listener and both run it. For a handler that writes to a map that
+	// is a fatal error rather than a panic, so it takes the process down.
+	//
+	// Taking the list first makes that impossible: a listener that re-arms adds
+	// to an empty list and ends up registered exactly once, and a second
+	// delivery finds nothing pending rather than firing the same handler again.
 	emitter.Lock()
 	if listeners, ok = emitter.onces[event]; !ok {
 		emitter.Unlock()
 		return emitter
 	}
+	delete(emitter.onces, event)
 	emitter.Unlock()
 	emitter.callListeners(listeners, event, arguments...)
-	// clear executed listeners
-	emitter.onces[event] = emitter.onces[event][len(listeners):]
 	return emitter
 }
 

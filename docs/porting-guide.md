@@ -204,6 +204,17 @@ at a server that disagreed, after unit tests had passed.
   systemPointerType, and the ordering of the Display Control capabilities. The
   prose was ambiguous or silently incomplete about all four.
 
+* **A listener can run twice at once, and that is fatal rather than awkward.**
+  The emitter calls every listener in its own goroutine, so a handler registered
+  twice for one event runs twice concurrently. If both copies write the same Go
+  map, the runtime raises a `fatal error: concurrent map writes`, which is not a
+  panic: `recover` does not catch it, and it takes the process down with every
+  session in it. It happened to a gateway. `Once` is what stops the connection
+  sequence from doing it, by taking the listener off the list before calling it,
+  but a handler registered with `On` twice is still two goroutines. Anything a
+  handler touches that another copy could touch needs a lock, and anything the
+  read loop and another goroutine share needs one too.
+
 * **A comment that describes a mistake is worth keeping.** Several times the fix
   left the old wrong assumption in place as a note, and twice a later reader
   nearly "fixed" working code back to the wrong version because a test asserted
