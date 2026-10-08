@@ -83,11 +83,30 @@ X.224 exchange, selects TLS, and then fails the handshake:
 
     kind: TLS — the handshake failed, so check the certificate before the credentials
 
-`ErrCredSSP` is still not verified. The same stub, made to accept TLS and then say
-nothing, did not reach the exchange in the runs attempted, so what is known is
-that the code path exists and is unit tested, and no more. The recipe is in this
-section so that finishing it is a matter of getting that stub right rather than
-working out how to reach the phase.
+`ErrCredSSP` is verified now, with the same stub making the other choice: complete
+the TLS handshake, then send nothing.
+
+    kind: CredSSP — the exchange failed before the credentials were sent, so it is
+          not the account
+
+Both sentinels took a stub that gets three things right, and all three went wrong
+here first, each producing a result that pointed at the client instead:
+
+  - the confirm has to be a complete 19 byte packet. One byte short and the client
+    waits for a reply that never comes, then fails in X.224.
+  - the RDP_NEG_RSP fields are type, flags, length, then selectedProtocol, and the
+    protocol is the last four bytes little endian. Building it in the other order
+    selects standard RDP security, so no handshake runs at all and the bare
+    transport error that results looks like the client refusing to negotiate.
+  - 0 is standard RDP security, 1 is TLS, 2 is HYBRID. A stub answering a HYBRID
+    request with 1 tests the TLS path, not the CredSSP one, and says so only at
+    debug level.
+
+The client was right in all three cases. That is worth remembering when a test
+harness and the code disagree: this repository's history is that the harness is
+wrong more often than the code, and the way to tell is to capture what a real
+server sends rather than to build it from the specification, which is how the
+confirm above was eventually got right.
 
 ### protocol/nla
 

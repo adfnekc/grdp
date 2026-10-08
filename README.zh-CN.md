@@ -110,7 +110,7 @@ login failed: client: the server did not accept the credentials: nla: the CredSS
 > ✅ `ErrTLSFailure` **曾经到不了调用方** ✗ —— TPKT 在 TLS 握手之前就开始读了 ✓，
 > 于是握手失败由读循环以未分类的传输错误报出来 ✗。**已修** ✓✓，并用一个走到握手再让它失败的 stub
 > **实测验证通过** ✓（`kind: TLS`）✓。
-> ⚠️ `ErrCredSSP` 是同一段代码再往前一步 ✓ —— **有单测但未验证** ✓，配方写在 `docs/protocol-layers.md` ✓。
+> ✅ `ErrCredSSP` 是同一段代码再往前一步 ✓ —— **同样已实测验证** ✓（`kind: CredSSP`）✓。
 
 最后一行那种**最像故障、其实不是** ✓：被别的连接接管的会话**还在服务器上** ✓（只是被挂起 ✓），**重连就取回** ✓。网络断了**根本不会**发断开通知 ✓ —— 所以「有没有收到通知」本身就是判据 ✓，**这是事实，不是在读字节** ✓。
 

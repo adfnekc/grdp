@@ -140,9 +140,8 @@ has not been proven wrong. After they are sent and the server goes quiet, it is
 the TLS handshake existed, so a handshake failure was reported by the read loop as
 a plain transport error while the code that would classify it was still inside its
 own read. That is fixed, and the sentinel was verified with a stub that reaches
-the handshake and fails it. `ErrCredSSP` is the same code path one step further
-along and is unit tested but not verified; docs/protocol-layers.md has the
-recipe.
+the handshake and fails it. `ErrCredSSP`, the same path one step further along, is
+verified the same way.
 
 ```sh
 $ rdpcli -host host -user user -pass wrong -proto nla
