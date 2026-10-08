@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
@@ -58,6 +59,9 @@ const (
 	minMonitorHeight = 200
 	maxMonitorHeight = 8192
 )
+
+// displayChannelTimeout bounds how long a resize waits for a channel to carry it.
+const displayChannelTimeout = 5 * time.Second
 
 // Monitor is one entry of a display layout: where a monitor sits and how big it
 // is, in pixels and in millimetres.
@@ -113,11 +117,34 @@ type DisplayControlClient struct {
 	send     func(channelID uint32, data []byte) error
 	static   core.ChannelSender
 	lastSent []byte
+
+	// ready is closed once a channel can carry a layout, which is either the
+	// dynamic channel opening or the static channel being wired. A caller asks
+	// for a resize as soon as the session is up, which is usually before the
+	// dynamic channel has been negotiated, and sending on whichever channel
+	// happens to exist at that moment is how a request ends up on the static
+	// channel of a server that only listens on the dynamic one.
+	ready chan struct{}
+	once  sync.Once
+
+	// channelTimeout bounds how long a resize waits for a channel to carry it.
+	// A field so that a test can shorten it; five seconds is what a caller
+	// talking to a real server should be prepared to spend.
+	channelTimeout time.Duration
 }
 
 // NewDisplayControlClient returns a client for the channel.
 func NewDisplayControlClient() *DisplayControlClient {
-	return &DisplayControlClient{Emitter: emission.NewEmitter()}
+	return &DisplayControlClient{
+		Emitter:        emission.NewEmitter(),
+		ready:          make(chan struct{}),
+		channelTimeout: displayChannelTimeout,
+	}
+}
+
+// markReady records that a channel is usable. The first one wins.
+func (c *DisplayControlClient) markReady() {
+	c.once.Do(func() { close(c.ready) })
 }
 
 // SetSender installs the callback that writes to the dynamic virtual channel. It
@@ -142,6 +169,7 @@ func (c *DisplayControlClient) OnOpen(channelID uint32) {
 	c.channel, c.open = channelID, true
 	c.mu.Unlock()
 	glog.Debugf("disp: channel %d open", channelID)
+	c.markReady()
 	c.Emit("open")
 }
 
@@ -207,8 +235,12 @@ func (c *DisplayControlClient) GetType() (string, uint32) {
 // actually works there.
 func (c *DisplayControlClient) Sender(f core.ChannelSender) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.static = f
+	c.mu.Unlock()
+	// Deliberately not markReady: the dynamic channel is the protocol and the
+	// static one is the fallback, so a caller waits for the former and only
+	// falls back when it does not arrive. Marking ready here made a resize go
+	// out on the static channel of a server that listens on the dynamic one.
 }
 
 // Process consumes one payload from the static channel.
@@ -297,6 +329,24 @@ func appendUint32(b []byte, v uint32) []byte {
 // static one is the fallback, because a server that set up both would rather
 // have the dynamic one.
 func (c *DisplayControlClient) write(pdu []byte) error {
+	// Wait for a channel rather than sending on whichever one exists, and give
+	// up rather than waiting forever: a server that will not open the channel
+	// has to be reported, not hung on.
+	c.mu.Lock()
+	timeout := c.channelTimeout
+	c.mu.Unlock()
+	select {
+	case <-c.ready:
+		// The dynamic channel is open, which is what the protocol asks for.
+	case <-time.After(timeout):
+		c.mu.Lock()
+		fallback := c.static
+		c.mu.Unlock()
+		if fallback == nil {
+			return fmt.Errorf("disp: no display control channel after %s", timeout)
+		}
+	}
+
 	c.mu.Lock()
 	send, channel, open := c.send, c.channel, c.open
 	static := c.static

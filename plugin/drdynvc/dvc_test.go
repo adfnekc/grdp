@@ -326,8 +326,13 @@ func TestOpenSendsCreateRequest(t *testing.T) {
 	if gotID != id {
 		t.Fatalf("requested id %d, returned %d", gotID, id)
 	}
-	if name := string(chunk[1+int(h.cbChID)+1:]); name != "TestChannel" {
-		t.Fatalf("got channel name %q", name)
+	// The name is NUL terminated, in both directions, and that is not a
+	// detail. This test asserted the name without one and passed, because the
+	// only other client here is a test: against a real Windows server a create
+	// request without the terminator is answered with silence, and adding it
+	// is what made the channel open. See docs/windows-verification.md.
+	if name := string(chunk[1+int(h.cbChID)+1:]); name != "TestChannel\x00" {
+		t.Fatalf("got channel name %q, want it NUL terminated", name)
 	}
 }
 

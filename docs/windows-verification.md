@@ -57,6 +57,45 @@ the server ended the session - and the byte is exposed as it came. Working out
 the encoding is a job for a capture of a client that works, which is the same
 method that settled the questions above it.
 
+## Display Control: the client has to ask, and the id spaces collide
+
+Two faults were fixed here, and the second is the kind that only a server which
+waits to be asked can reveal.
+
+**Nothing ever asked.** A dynamic channel can be created by either side, and this
+client only ever listened: `DvcClient.Open` existed and had no callers, so it
+waited for channels the server opened. EGFX works that way, which is why it
+looked correct. Display Control is a client-to-server feature, so Windows waited
+for a request that never came. With `Open` called once the capability exchange
+finishes, against this host:
+
+    drdynvc: asked for channel id=1 name="Microsoft::Windows::RDS::DisplayControl"
+    disp: channel 10 open
+    disp: server caps monitors=16 area=8192x8192
+
+Those capabilities are the confirmation that the parse is right: 16 monitors and
+8192x8192 are FreeRDP's own defaults, which is where the expected values came
+from, and they were not used to produce this.
+
+**The name needs its NUL terminator.** Without one, the request is answered with
+silence: no refusal, no error, nothing. With one, the channel opens. The unit test
+for `Open` asserted the name without the terminator and passed, because the only
+server it had ever been tested against was a test.
+
+What is left. The resize still does not take effect, and the log shows why to
+look at next: after our request, Windows creates a conversation of its own
+
+    server requests id=10 name="Microsoft::Windows::RDS::Video::Data::v08.01"
+    server requests id=11 name="Microsoft::Windows::RDS::Geometry::v08.01"
+    server requests id=13 name="Microsoft::Windows::RDS::Input"
+    server requests id=10 name="Microsoft::Windows::RDS::DisplayControl"
+
+including Display Control itself, on an id of its choosing, and ids are reused
+across those requests. Two directions each created the same channel on their own
+numbering, so which id the layout should be sent on, and whether the server's own
+DisplayControl channel is the one to use, is the question to settle next. That is
+where a capture of a working client would answer it directly.
+
 ## Display Control: the dynamic channel alone was not created
 
 What is settled. With `Setting.EnableDisplayControl` and nothing else, the

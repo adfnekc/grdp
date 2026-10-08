@@ -183,6 +183,15 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 			c.channels.Register(d)
 			d.SetSender(dvc.SendData)
 			dvc.Register(disp.DVCChannelName, d)
+			// Display Control is a channel the CLIENT asks for. Windows does
+			// not create it: it waits to be asked, so a client that only
+			// listens for channels the server opens never gets one. EGFX is
+			// the other way round, which is why this was easy to miss.
+			dvc.On("ready", func() {
+				if _, err := dvc.Open(disp.DVCChannelName); err != nil {
+					glog.Errorf("client: could not ask for the display control channel: %v", err)
+				}
+			})
 			d.OnCaps(func(caps disp.Caps) {
 				c.pdu.Emit("disp-caps", caps)
 			})

@@ -3,7 +3,9 @@ package disp
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
+	"time"
 )
 
 // The layout PDU's shape is checked byte for byte against FreeRDP's sender,
@@ -182,22 +184,54 @@ func TestRequestResizeRoundsWidthDownToEven(t *testing.T) {
 
 // Sending needs an open channel, and saying so is the difference between a
 // caller that knows why nothing happened and one that waits.
-func TestRequestResizeNeedsAnOpenChannel(t *testing.T) {
+// A resize waits for a channel and then reports if there is none, rather than
+// sending on whichever one happens to exist. The two transports are checked
+// apart, because either is enough on its own and closing one does not close the
+// other.
+func TestRequestResizeNeedsAChannel(t *testing.T) {
+	const wait = 50 * time.Millisecond
+
+	// Nothing at all.
 	d := NewDisplayControlClient()
-	if err := d.RequestResize(1024, 768); err == nil {
+	d.channelTimeout = wait
+	err := d.RequestResize(1024, 768)
+	if err == nil {
 		t.Error("RequestResize worked with no channel")
+	} else if !strings.Contains(err.Error(), "no display control channel") {
+		t.Errorf("the error does not say what was missing: %v", err)
 	}
+
+	// The static channel alone is enough, once the wait for the dynamic one
+	// has passed: the dynamic channel is the protocol and it gets first refusal.
+	d = NewDisplayControlClient()
+	d.channelTimeout = wait
+	d.Sender(fakeStaticSender{})
+	if err := d.RequestResize(1024, 768); err != nil {
+		t.Errorf("RequestResize with only a static channel: %v", err)
+	}
+
+	// So is the dynamic one, once it opens.
+	d = NewDisplayControlClient()
+	d.channelTimeout = wait
 	d.SetSender(func(uint32, []byte) error { return nil })
 	if err := d.RequestResize(1024, 768); err == nil {
-		t.Error("RequestResize worked with no open channel")
+		t.Error("RequestResize worked before the dynamic channel opened")
 	}
 	d.OnOpen(1)
 	if err := d.RequestResize(1024, 768); err != nil {
-		t.Errorf("RequestResize with an open channel: %v", err)
+		t.Errorf("RequestResize with an open dynamic channel: %v", err)
 	}
+
+	// Closing the dynamic channel leaves the static one alone, so a client with
+	// both can still resize.
+	d = NewDisplayControlClient()
+	d.channelTimeout = wait
+	d.Sender(fakeStaticSender{})
+	d.SetSender(func(uint32, []byte) error { return nil })
+	d.OnOpen(1)
 	d.OnClose()
-	if err := d.RequestResize(1024, 768); err == nil {
-		t.Error("RequestResize worked after the channel closed")
+	if err := d.RequestResize(1024, 768); err != nil {
+		t.Errorf("RequestResize after the dynamic channel closed but the static one is up: %v", err)
 	}
 }
 
@@ -252,6 +286,11 @@ func TestOnDataIgnoresShortMessages(t *testing.T) {
 		t.Error("a message shorter than the header produced caps")
 	}
 }
+
+// fakeStaticSender stands in for the static channel's writer.
+type fakeStaticSender struct{}
+
+func (fakeStaticSender) SendToChannel(string, []byte) (int, error) { return 0, nil }
 
 func TestPhysicalForStaysInRange(t *testing.T) {
 	for _, px := range []uint32{0, 1, 200, 1920, 8192, 100000} {

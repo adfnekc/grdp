@@ -79,6 +79,12 @@ type DvcClient struct {
 	byID    map[uint32]*dynChannel
 	nextID  uint32
 	version uint16
+
+	// pending maps a channel id this client asked for to the name it asked
+	// for, until the server answers. It is what tells the server's answer to
+	// our create request apart from a create request of its own: both arrive
+	// as the same command, and only the id says which is which.
+	pending map[uint32]string
 }
 
 // NewDvcClient creates a dynamic virtual channel layer.
@@ -87,6 +93,7 @@ func NewDvcClient() *DvcClient {
 		Emitter: *emission.NewEmitter(),
 		byName:  make(map[string]DynChannel),
 		byID:    make(map[uint32]*dynChannel),
+		pending: make(map[uint32]string),
 		nextID:  1,
 		version: capsVersion3,
 	}
@@ -166,11 +173,23 @@ func (c *DvcClient) Open(name string) (uint32, error) {
 	c.nextID = id + 1
 	c.mu.Unlock()
 
+	c.mu.Lock()
+	c.pending[id] = name
+	c.mu.Unlock()
+
 	h := header{cmd: cmdCreateRequest, cbChID: c.channelIDBytes()}
+	// The name is NUL terminated in both directions: the server's requests
+	// carry one and the parser above trims it, and a request without one is
+	// answered with silence rather than an error.
 	out := append(h.serialize(id), name...)
+	out = append(out, 0)
 	if _, err := c.Send(out); err != nil {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return 0, err
 	}
+	glog.Debugf("drdynvc: asked for channel id=%d name=%q", id, name)
 	return id, nil
 }
 
@@ -345,7 +364,14 @@ func (c *DvcClient) processCapabilities(r *bytes.Reader) error {
 	out := []byte{0x50, 0x00}
 	out = append(out, byte(version), byte(version>>8))
 	_, err = c.Send(out)
-	return err
+	if err != nil {
+		return err
+	}
+	// The exchange is complete, so a channel of our own can be asked for now.
+	// Nothing could before: a client may create a channel, and this one never
+	// did, so a feature the server waits to be asked about never happened.
+	c.Emit("ready")
+	return nil
 }
 
 // processCreateRequest handles a create request from the server and replies
@@ -355,8 +381,22 @@ func (c *DvcClient) processCreateRequest(h *header, r *bytes.Reader) error {
 	if err != nil {
 		return err
 	}
+	body := readAll(r)
+
+	// The same command carries two different messages. A request holds a NUL
+	// terminated channel name; an answer to a request this client made holds a
+	// four byte status instead. Which one this is cannot be told from the
+	// bytes, so it is told from the id: an id we asked for is ours, and
+	// anything else is the server asking.
+	c.mu.Lock()
+	requested, ours := c.pending[id]
+	c.mu.Unlock()
+	if ours {
+		return c.processCreateResponse(id, requested, body)
+	}
+
 	// The name is NUL terminated on the wire.
-	name := strings.TrimRight(string(readAll(r)), "\x00")
+	name := strings.TrimRight(string(body), "\x00")
 	glog.Debugf("drdynvc: server requests channel id=%d name=%q", id, name)
 
 	c.mu.Lock()
@@ -384,6 +424,39 @@ func (c *DvcClient) processCreateRequest(h *header, r *bytes.Reader) error {
 	if ok && handler != nil {
 		handler.OnOpen(id)
 	}
+	return nil
+}
+
+// processCreateResponse handles the server's answer to a channel this client
+// asked for.
+//
+// Nothing did before, because nothing ever asked: the only channels that existed
+// were the ones the server created for itself. Asking and then not reading the
+// answer leaves a channel that is open on the wire and unknown locally, so the
+// handler never hears about it and data for it is discarded.
+func (c *DvcClient) processCreateResponse(id uint32, name string, body []byte) error {
+	c.mu.Lock()
+	delete(c.pending, id)
+	handler := c.byName[name]
+	c.mu.Unlock()
+
+	var status uint32
+	if len(body) >= 4 {
+		status = binary.LittleEndian.Uint32(body[:4])
+	}
+	if status != 0 {
+		glog.Warnf("drdynvc: the server refused channel %q (id %d), status %#08x", name, id, status)
+		return nil
+	}
+	if handler == nil {
+		glog.Warnf("drdynvc: channel %q was created and has no handler", name)
+		return nil
+	}
+	c.mu.Lock()
+	c.byID[id] = &dynChannel{id: id, name: name, handler: handler, want: -1}
+	c.mu.Unlock()
+	glog.Debugf("drdynvc: channel %q is open as id %d", name, id)
+	handler.OnOpen(id)
 	return nil
 }
 
