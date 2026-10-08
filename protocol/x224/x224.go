@@ -364,26 +364,43 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 	// From here on, regular data PDUs are handed to recvData.
 	x.transport.On("data", x.recvData)
 
+	// The transport holds its read loop back from construction, because what
+	// happens next decides what that loop should be reading: TLS, or the
+	// CredSSP exchange over it, or the plain connection. This is the one place
+	// that knows which, so it is the one place that starts it again. Every path
+	// below either resumes or returns an error that closes the connection; a
+	// path that does neither would leave the session silent for ever.
+	tp, _ := x.transport.(*tpkt.TPKT)
+
 	switch x.selectedProtocol {
 	case PROTOCOL_RDP:
 		glog.Info("*** RDP security selected ***")
+		// No handshake at all for standard RDP security, so the connection the
+		// loop was reading is already the final one.
 	case PROTOCOL_SSL:
 		glog.Info("*** SSL security selected ***")
-		if err := x.transport.(*tpkt.TPKT).StartTLS(); err != nil {
+		if err := tp.StartTLS(); err != nil {
 			glog.Error("start tls failed:", err)
 			x.signalConnect(fmt.Errorf("x224: start TLS: %w", err))
+			_ = x.Close()
 			return
 		}
 	case PROTOCOL_HYBRID:
 		glog.Info("*** NLA Security selected ***")
-		if err := x.transport.(*tpkt.TPKT).StartNLA(); err != nil {
+		if err := tp.StartNLA(); err != nil {
 			glog.Error("start NLA failed:", err)
 			x.signalConnect(fmt.Errorf("x224: start NLA: %w", err))
+			_ = x.Close()
 			return
 		}
 	default:
 		x.signalConnect(fmt.Errorf("x224: unknown selected protocol 0x%x", x.selectedProtocol))
+		_ = x.Close()
 		return
+	}
+
+	if tp != nil {
+		tp.ResumeRead()
 	}
 
 	x.Emit("connect", x.selectedProtocol)

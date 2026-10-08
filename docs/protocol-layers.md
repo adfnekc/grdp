@@ -48,8 +48,8 @@ it reports that as three typed errors: `TLSError`, `CredSSPError` and
 `CredentialsError`. Anything above it that wants to tell "the certificate" from
 "the account" relies on that, and nothing above it can work it out for itself.
 
-**As it stands, two of those three never reach a caller, and that is a bug.** TPKT
-starts reading in `New`, which is before TLS exists:
+**Two of those three used to never reach a caller, and that was a bug. One of
+them is fixed.** TPKT armed its first read in `New`, which is before TLS exists:
 
     func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
         ...
@@ -57,27 +57,37 @@ starts reading in `New`, which is before TLS exists:
         ...
     }
 
-The X.224 confirm has to be read before TLS, so reading before the handshake is
-necessary; not handing the socket over cleanly is not. When the handshake fails,
-the read loop is usually the one holding the socket, so the failure is reported
-there, as a plain transport error, while `StartTLS` and `StartNLA` are still
-inside their own reads. The caller then sees
+Reading before the handshake is necessary, because the X.224 reply has to arrive
+first. Not handing the socket over cleanly was not. When the handshake failed the
+read loop was usually the one holding the socket, so it reported the failure as a
+plain transport error while `StartTLS` and `StartNLA` were still inside their own
+reads, and the typed errors were never constructed. It also meant the read loop
+was reading the raw socket while the handshake needed those bytes, a race that had
+been winning by luck.
 
-    read tcp 127.0.0.1:46714->127.0.0.1:14389: read: connection reset by peer
+The loop is now held back from construction and resumed by the one place that
+knows what it should be reading, which is the security exchange in x224. Only the
+read that starts a new message is held back; the reads that make up a single
+message proceed, because a TPKT header arrives over two or three of them.
+`armRead` in TPKT is the single arming point and it refuses to arm while one is
+outstanding, which is what stops a resume during a delivery from starting a second
+reader. Two readers split the stream between them and the session desynchronises,
+which looks like a malformed server rather than a client with two readers.
 
-with no classification at all, and `TLSError` and `CredSSPError` are never
-constructed. It also means the read loop is reading the raw socket while the
-handshake needs those bytes, which is a race that has been winning by luck.
+Verified after the change: xrdp over TLS delivers a full frame, both drawing paths
+composite to the same pixels as the independent composite, and the suite passes
+with and without cgo and under the race detector.
 
-This was found by pointing the client at a stub that completes the X.224
-exchange, which is what it takes to reach the TLS phase, and then fails in one of
-the two ways. Both produced the same unclassified error.
+`ErrTLSFailure` is now reached and was verified with a stub that completes the
+X.224 exchange, selects TLS, and then fails the handshake:
 
-The fix is a handoff rather than an early start: read the X.224 reply, stop, run
-the handshake, and only then resume reading, on whichever transport the handshake
-settled on. That is a change to the most delicate layer here and it is not made
-yet, so `ErrTLSFailure` and `ErrCredSSP` are documented as unverified, and this is
-the reason rather than a shortage of servers to test against.
+    kind: TLS — the handshake failed, so check the certificate before the credentials
+
+`ErrCredSSP` is still not verified. The same stub, made to accept TLS and then say
+nothing, did not reach the exchange in the runs attempted, so what is known is
+that the code path exists and is unit tested, and no more. The recipe is in this
+section so that finishing it is a matter of getting that stub right rather than
+working out how to reach the phase.
 
 ### protocol/nla
 

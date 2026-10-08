@@ -2,6 +2,7 @@ package tpkt
 
 import (
 	"bytes"
+	"sync"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -44,6 +45,21 @@ type TPKT struct {
 	credsspVersion int
 	clientNonce    []byte
 
+	// readMu guards readPaused, which one goroutine sets and the read loop
+	// reads.
+	readMu sync.Mutex
+	// readPaused stops the read loop from arming its next read. It is set
+	// before the first read is armed, and cleared by whoever has finished
+	// putting the transport into its final form.
+	readPaused bool
+	// readArmed is whether a read has been started and not yet completed.
+	// It is what makes arming idempotent. Without it, resuming the loop while a
+	// delivery is in progress arms a second read as well as the one the
+	// delivery arms when it returns, and two readers split the stream between
+	// them: the session desynchronises and every later PDU is read from the
+	// wrong offset, which looks like a malformed server rather than two readers.
+	readArmed bool
+
 	// awaitingVerdict is set once the credentials have been presented and the
 	// server has not yet shown that it accepted them. A failure in that window
 	// is about the credentials; a failure before it is about TLS, and one after
@@ -54,16 +70,102 @@ type TPKT struct {
 
 func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
 	t := &TPKT{
-		Emitter: *emission.NewEmitter(),
-		Conn:    s,
-		secFlag: 0,
-		ntlm:    ntlm}
-	core.StartReadBytes(2, s, t.recvHeader)
+		Emitter:    *emission.NewEmitter(),
+		Conn:       s,
+		secFlag:    0,
+		ntlm:       ntlm,
+		readPaused: true,
+	}
+	t.armReadForced(2, t.recvHeader)
 	return t
 }
 
+// PauseRead stops the read loop from arming its next read.
+//
+// It exists for the handshake. The X.224 reply has to be read before TLS exists,
+// so the loop must be running to reach the security exchange; after that reply
+// the transport is about to be wrapped in TLS or replaced by CredSSP, and while
+// that happens the loop must not be holding the socket. It used to be, which
+// meant a failing handshake was reported by the read loop as a plain transport
+// error while StartTLS and StartNLA were still inside their own reads, and the
+// typed errors those two produce never reached a caller.
+//
+// The loop is paused from construction, so it is already stopped when the reply
+// is delivered: Emit is synchronous, so the handler that decides the security
+// protocol runs before the loop would arm again.
+func (t *TPKT) PauseRead() {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
+	t.readPaused = true
+}
+
+// ResumeRead arms the next read, on whichever transport the connection now has.
+// Every path out of the security exchange must reach it, or the connection stops
+// making progress. It is safe to call while a delivery is in progress: that
+// delivery will find the read already armed and leave it alone.
+func (t *TPKT) ResumeRead() {
+	t.readMu.Lock()
+	wasPaused := t.readPaused
+	t.readPaused = false
+	t.readMu.Unlock()
+	if wasPaused {
+		glog.Debug("tpkt: resuming reads")
+	}
+	t.armRead(2, t.recvHeader)
+}
+
+// armRead starts the next read unless one is already outstanding or the loop is
+// held back.
+func (t *TPKT) armRead(n int, f core.ReadBytesComplete) {
+	t.arm(n, f, false)
+}
+
+// armReadForced starts a read that is part of getting to the end of the message
+// already in progress, or the first read of all. Neither can wait for the loop:
+// the X.224 reply is what decides whether there will be a handshake, and a TPKT
+// header arrives over two or three reads which must all happen before anything
+// is delivered to decide anything.
+//
+// Only the read that starts a NEW message is held back, which is the one in
+// recvData and its fast path equivalent. Getting this the wrong way round is
+// silent: the connection stops after the first two bytes, which is what it did
+// when the pause covered every read.
+func (t *TPKT) armReadForced(n int, f core.ReadBytesComplete) {
+	t.arm(n, f, true)
+}
+
+// arm starts a read, unless one is outstanding or, unless forced, the loop is
+// held back. It clears the outstanding mark when the read completes, and every
+// read in this package goes through it, which is what makes that mark mean
+// something. It is what stops a resume during a delivery from arming a second
+// reader: two readers split the stream between them and the session desynchronises,
+// which looks like a malformed server rather than a client with two readers.
+func (t *TPKT) arm(n int, f core.ReadBytesComplete, force bool) {
+	t.readMu.Lock()
+	if t.readArmed || (!force && t.readPaused) {
+		t.readMu.Unlock()
+		return
+	}
+	t.readArmed = true
+	t.readMu.Unlock()
+
+	core.StartReadBytes(n, t.Conn, func(b []byte, err error) {
+		t.readMu.Lock()
+		t.readArmed = false
+		t.readMu.Unlock()
+		f(b, err)
+	})
+}
+
+// StartTLS upgrades the connection. A failure here is typed, because this is the
+// only place that knows nothing has been sent yet: the two paths that call it,
+// plain TLS and the TLS half of NLA, both need a caller to be able to tell a
+// certificate problem from an account problem.
 func (t *TPKT) StartTLS() error {
-	return t.Conn.StartTLS()
+	if err := t.Conn.StartTLS(); err != nil {
+		return &TLSError{Err: err}
+	}
+	return nil
 }
 
 // SetStrictPubKeyAuth controls whether a mismatch in the CredSSP server public
@@ -132,9 +234,8 @@ func (e *CredentialsError) Unwrap() error { return e.Err }
 func (t *TPKT) StartNLA() error {
 	if err := t.StartTLS(); err != nil {
 		glog.Info("start tls failed", err)
-		// Nothing has been authenticated and nothing has been sent, so this is
-		// about TLS itself.
-		return &TLSError{Err: err}
+		// Already a TLSError: StartTLS types it, and nothing has been sent yet.
+		return err
 	}
 
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
@@ -383,21 +484,21 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 	version, _ := core.ReadUInt8(r)
 	if version == FASTPATH_ACTION_X224 {
 		glog.Debug("tptk recvHeader FASTPATH_ACTION_X224, wait for recvExtendedHeader")
-		core.StartReadBytes(2, t.Conn, t.recvExtendedHeader)
+		t.armReadForced(2, t.recvExtendedHeader)
 		return
 	}
 	t.secFlag = (version >> 6) & 0x3
 	length, _ := core.ReadUInt8(r)
 	t.lastShortLength = int(length)
 	if t.lastShortLength&0x80 != 0 {
-		core.StartReadBytes(1, t.Conn, t.recvExtendedFastPathHeader)
+		t.armReadForced(1, t.recvExtendedFastPathHeader)
 		return
 	}
 	if t.lastShortLength < 2 {
 		t.emitReadError(fmt.Errorf("tpkt: invalid short length %d", t.lastShortLength))
 		return
 	}
-	core.StartReadBytes(t.lastShortLength-2, t.Conn, t.recvFastPath)
+	t.armReadForced(t.lastShortLength-2, t.recvFastPath)
 }
 
 // emitReadError surfaces a terminal read error to the layer above. io.EOF is
@@ -428,7 +529,7 @@ func (t *TPKT) recvExtendedHeader(s []byte, err error) {
 		return
 	}
 	glog.Debug("tpkt wait recvData:", size)
-	core.StartReadBytes(int(size-4), t.Conn, t.recvData)
+	t.armReadForced(int(size-4), t.recvData)
 }
 
 func (t *TPKT) recvData(s []byte, err error) {
@@ -438,7 +539,10 @@ func (t *TPKT) recvData(s []byte, err error) {
 		return
 	}
 	t.Emit("data", s)
-	core.StartReadBytes(2, t.Conn, t.recvHeader)
+	// The transport may be about to change: the security exchange runs inside
+	// this delivery, and it holds the loop back until it has decided what the
+	// loop should be reading. armRead does the right thing either way.
+	t.armRead(2, t.recvHeader)
 }
 
 func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
@@ -460,7 +564,7 @@ func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
 		t.emitReadError(fmt.Errorf("tpkt: invalid fastpath packet size %d", packetSize))
 		return
 	}
-	core.StartReadBytes(packetSize-3, t.Conn, t.recvFastPath)
+	t.armReadForced(packetSize-3, t.recvFastPath)
 }
 
 func (t *TPKT) recvFastPath(s []byte, err error) {
@@ -473,5 +577,5 @@ func (t *TPKT) recvFastPath(s []byte, err error) {
 	if t.fastPathListener != nil {
 		t.fastPathListener.RecvFastPath(t.secFlag, s)
 	}
-	core.StartReadBytes(2, t.Conn, t.recvHeader)
+	t.armRead(2, t.recvHeader)
 }
