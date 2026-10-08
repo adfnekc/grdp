@@ -165,36 +165,19 @@ typedef UINT VCAPITYPE VIRTUALCHANNELWRITEEX(LPVOID pInitHandle, DWORD openHandl
 typedef VIRTUALCHANNELWRITEEX* PVIRTUALCHANNELWRITEEX;
 */
 
-// static channel name
+// Static channel names. Only the ones this library actually speaks are here:
+// a name with nothing behind it invites advertising a channel and then refusing
+// to answer it, which is worse than not asking for it.
 const (
-	CLIPRDR_SVC_CHANNEL_NAME = "cliprdr" //剪切板
-	RDPDR_SVC_CHANNEL_NAME   = "rdpdr"   //设备重定向(打印机，磁盘，端口，智能卡等)
-	RDPSND_SVC_CHANNEL_NAME  = "rdpsnd"  //音频输出
-	RAIL_SVC_CHANNEL_NAME    = "rail"    //远程应用
-	DRDYNVC_SVC_CHANNEL_NAME = "drdynvc" //动态虚拟通道
-	REMDESK_SVC_CHANNEL_NAME = "remdesk" //远程协助
-	DISP_SVC_CHANNEL_NAME    = "disp"    //显示控制
+	CLIPRDR_SVC_CHANNEL_NAME = "cliprdr" // clipboard
+	DRDYNVC_SVC_CHANNEL_NAME = "drdynvc" // dynamic virtual channels
+	DISP_SVC_CHANNEL_NAME    = "disp"    // display control
 )
 
 const (
-	RDPGFX_DVC_CHANNEL_NAME = "Microsoft::Windows::RDS::Graphics" //图形扩展
+	RDPGFX_DVC_CHANNEL_NAME = "Microsoft::Windows::RDS::Graphics" // graphics
 )
 
-var StaticVirtualChannels = map[string]int{
-	CLIPRDR_SVC_CHANNEL_NAME: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP |
-		CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL,
-	RDPDR_SVC_CHANNEL_NAME: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP | CHANNEL_OPTION_COMPRESS_RDP,
-	RDPSND_SVC_CHANNEL_NAME: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP |
-		CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL,
-	RAIL_SVC_CHANNEL_NAME: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP |
-		CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL,
-	// Display Control is carried on a dynamic channel, but it is also named
-	// here as a static one. FreeRDP declares both, and a server that is asked
-	// only for the dynamic channel does not create it: Windows never offered
-	// Microsoft::Windows::RDS::DisplayControl until the static name was added
-	// to the connect sequence beside drdynvc.
-	DISP_SVC_CHANNEL_NAME: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP,
-}
 
 const (
 	CHANNEL_CHUNK_LENGTH       = 1600

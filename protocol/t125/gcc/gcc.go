@@ -280,19 +280,6 @@ type ClientNetworkData struct {
 
 func NewClientNetworkData() *ClientNetworkData {
 	n := &ClientNetworkData{ChannelDefArray: make([]ChannelDef, 0, 100)}
-
-	/*var d1 ChannelDef
-	d1.Name = plugin.RDPDR_SVC_CHANNEL_NAME
-	d1.Options = uint32(CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP |
-		CHANNEL_OPTION_COMPRESS_RDP)
-	n.ChannelDefArray = append(n.ChannelDefArray, d1)
-
-	var d2 ChannelDef
-	d2.Name = plugin.RDPSND_SVC_CHANNEL_NAME
-	d2.Options = uint32(CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP |
-		CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL)
-	n.ChannelDefArray = append(n.ChannelDefArray, d2)*/
-
 	return n
 }
 
