@@ -48,6 +48,37 @@ it reports that as three typed errors: `TLSError`, `CredSSPError` and
 `CredentialsError`. Anything above it that wants to tell "the certificate" from
 "the account" relies on that, and nothing above it can work it out for itself.
 
+**As it stands, two of those three never reach a caller, and that is a bug.** TPKT
+starts reading in `New`, which is before TLS exists:
+
+    func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
+        ...
+        core.StartReadBytes(2, s, t.recvHeader)   // before the handshake
+        ...
+    }
+
+The X.224 confirm has to be read before TLS, so reading before the handshake is
+necessary; not handing the socket over cleanly is not. When the handshake fails,
+the read loop is usually the one holding the socket, so the failure is reported
+there, as a plain transport error, while `StartTLS` and `StartNLA` are still
+inside their own reads. The caller then sees
+
+    read tcp 127.0.0.1:46714->127.0.0.1:14389: read: connection reset by peer
+
+with no classification at all, and `TLSError` and `CredSSPError` are never
+constructed. It also means the read loop is reading the raw socket while the
+handshake needs those bytes, which is a race that has been winning by luck.
+
+This was found by pointing the client at a stub that completes the X.224
+exchange, which is what it takes to reach the TLS phase, and then fails in one of
+the two ways. Both produced the same unclassified error.
+
+The fix is a handoff rather than an early start: read the X.224 reply, stop, run
+the handshake, and only then resume reading, on whichever transport the handshake
+settled on. That is a change to the most delicate layer here and it is not made
+yet, so `ErrTLSFailure` and `ErrCredSSP` are documented as unverified, and this is
+the reason rather than a shortage of servers to test against.
+
 ### protocol/nla
 
 NTLMv2 and CredSSP. The layer above sees a handshake that completes or does not;

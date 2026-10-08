@@ -136,9 +136,14 @@ credentials are sent, a failure is `ErrTLSFailure` or `ErrCredSSP` and the accou
 has not been proven wrong. After they are sent and the server goes quiet, it is
 `ErrAuthenticationFailed`, which is what a refused logon looks like from here.
 
-Two of those have never been seen from a real server. `ErrTLSFailure` and
-`ErrCredSSP` are reachable and unit tested, but no server available here produces
-them, so they are not claimed as verified.
+Two of those do not currently reach a caller at all, which is a bug rather than a
+gap in testing. TPKT starts reading before the TLS handshake, so a handshake
+failure is usually reported by the read loop as a plain transport error while the
+handshake code that would classify it is still inside its own read.
+`ErrTLSFailure` and `ErrCredSSP` are therefore unit tested and unreachable in
+practice; docs/protocol-layers.md has the evidence and what the fix is. They stay
+in the table because they describe what a caller should be able to ask, not what
+they can ask today.
 
 ```sh
 $ rdpcli -host host -user user -pass wrong -proto nla
