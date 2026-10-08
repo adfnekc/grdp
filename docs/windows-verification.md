@@ -82,6 +82,19 @@ silence: no refusal, no error, nothing. With one, the channel opens. The unit te
 for `Open` asserted the name without the terminator and passed, because the only
 server it had ever been tested against was a test.
 
+What FreeRDP's manager says about it, which narrows it a lot. Dynamic channels are
+keyed by id and not by name: `dvcman_create_channel` looks the incoming id up,
+and a duplicate in the running state is refused with
+
+    Protocol error: Duplicated ChannelId %u (%s)!
+    *res = CHANNEL_RC_ALREADY_OPEN;
+
+while a second channel with the **same name** and a different id is created
+without complaint, because nothing checks names. A channel then sends on its own
+id. So after both sides have asked, the client holds two channels called
+DisplayControl, on two ids, and the layout is expected on one of them. Which one
+is what a capture would settle, and it is the last open question here.
+
 What is left. The resize still does not take effect, and the log shows why to
 look at next: after our request, Windows creates a conversation of its own
 
