@@ -26,9 +26,17 @@ func TestClassifyAuthErrorInsideTheWindow(t *testing.T) {
 	alert := errors.New("remote error: tls: internal error")
 	got := tpkt.classifyAuthError(alert, "read header")
 
-	var cred *CredSSPError
+	// CredentialsError and not CredSSPError: the credentials were already sent,
+	// which is what separates "the account may be wrong" from "the exchange
+	// itself broke". A caller told the second when it is the first looks at the
+	// wrong thing.
+	var cred *CredentialsError
 	if !errors.As(got, &cred) {
-		t.Fatalf("a failure while awaiting the verdict was not marked: %v", got)
+		t.Fatalf("a failure while awaiting the verdict was not marked as credentials: %v", got)
+	}
+	var credssp *CredSSPError
+	if errors.As(got, &credssp) {
+		t.Error("a failure after the credentials were sent was marked as a CredSSP fault")
 	}
 	if !errors.Is(got, alert) {
 		t.Errorf("the underlying error was lost: %v", got)
@@ -50,9 +58,9 @@ func TestClassifyAuthErrorOutsideTheWindow(t *testing.T) {
 	if got != alert {
 		t.Errorf("got %v, want the error unchanged", got)
 	}
-	var cred *CredSSPError
+	var cred *CredentialsError
 	if errors.As(got, &cred) {
-		t.Error("a failure outside the window was marked as authentication")
+		t.Error("a failure outside the window was marked as credentials")
 	}
 	if tpkt.classifyAuthError(nil, "read header") != nil {
 		t.Error("a nil error became non-nil")

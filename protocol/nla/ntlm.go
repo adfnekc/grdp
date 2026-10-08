@@ -439,7 +439,16 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_UNICODE != 0 {
 		n.enableUnicode = true
 	}
-	glog.Infof("user: %s, passwd:%s", n.user, n.password)
+	// Never the password, and never anything derived from it. This line used
+	// to read `glog.Infof("user: %s, passwd:%s", n.user, n.password)`, which
+	// wrote the account's password to the log in clear text on every NLA
+	// connection. What is worth logging about this step is what it decided:
+	// the character set and the length of the responses, which is enough to
+	// tell a wrong password from a protocol fault without any of the material
+	// being in the log. A test in this package fails the build if a log call
+	// in this repository is handed a password field again.
+	glog.Debugf("nla: authenticate uses unicode=%v, nt response %d bytes, lm response %d bytes",
+		n.enableUnicode, len(ntChallengeResponse), len(lmChallengeResponse))
 	domain, user, _ := n.GetEncodedCredentials()
 
 	n.authenticateMessage = NewAuthenticateMessage(challengeMsg.NegotiateFlags,

@@ -17,34 +17,71 @@ import (
 // drops the connection rather than answering with an NTLM status. It has to come
 // out as an authentication failure, or an operator reads "tls: internal error"
 // and goes looking at certificates.
+//
+// The shape below is what the transport produces: the credentials were sent, the
+// server went quiet, and the alert arrived on the ordinary read path.
 func TestClassifyErrorMarksAuthentication(t *testing.T) {
-	// This is the shape a real one has: the TLS alert wrapped by the CredSSP
-	// layer, then by x224.
 	inner := errors.New("remote error: tls: internal error")
-	err := fmt.Errorf("x224: start NLA: %w", &tpkt.CredSSPError{Err: fmt.Errorf("read header: %w", inner)})
+	err := fmt.Errorf("x224: start NLA: %w",
+		&tpkt.CredentialsError{Err: fmt.Errorf("read header: %w", inner)})
 
 	got := classifyError(err)
 	if !errors.Is(got, ErrAuthenticationFailed) {
-		t.Errorf("a CredSSP failure is not reported as an authentication failure: %v", got)
+		t.Errorf("a failure while the server was deciding is not reported as authentication: %v", got)
 	}
 	// The cause is kept, because it is the evidence.
 	if !errors.Is(got, inner) {
 		t.Errorf("the underlying error was lost: %v", got)
 	}
-	var cred *tpkt.CredSSPError
-	if !errors.As(got, &cred) {
-		t.Errorf("the CredSSP error is not in the chain: %v", got)
+	// And it is not confused with the two failures it is easy to confuse it
+	// with: a CredSSP fault and a TLS fault.
+	if errors.Is(got, ErrCredSSP) || errors.Is(got, ErrTLSFailure) {
+		t.Errorf("authentication was reported as %v", got)
 	}
 }
 
-// A failure to reach the host keeps its type, so a caller can still tell a
-// closed port from an unreachable network. Formatting rather than wrapping would
-// lose the net.OpError and make every network fault look alike.
-func TestClassifyErrorLeavesNetworkErrorsAlone(t *testing.T) {
-	refused := fmt.Errorf("client: cannot reach the server: %w",
-		&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED})
-	got := classifyError(refused)
+// The exchange failing before the credentials are sent is a CredSSP fault, not an
+// authentication one: nothing has been proven wrong about the account yet, and a
+// caller told to check credentials would be checking the wrong thing.
+func TestClassifyErrorSeparatesCredSSPFromCredentials(t *testing.T) {
+	err := fmt.Errorf("x224: start NLA: %w",
+		&tpkt.CredSSPError{Err: errors.New("nla: DER message would not parse")})
+	got := classifyError(err)
 
+	if !errors.Is(got, ErrCredSSP) {
+		t.Errorf("a CredSSP fault is not reported as one: %v", got)
+	}
+	if errors.Is(got, ErrAuthenticationFailed) {
+		t.Error("a CredSSP fault was reported as an authentication failure")
+	}
+}
+
+// A TLS handshake failure happens before anything is sent at all, so it is about
+// the certificate or the cipher and cannot be caused by the password.
+func TestClassifyErrorMarksTLSFailure(t *testing.T) {
+	err := fmt.Errorf("x224: start NLA: %w",
+		&tpkt.TLSError{Err: errors.New("x509: certificate signed by unknown authority")})
+	got := classifyError(err)
+
+	if !errors.Is(got, ErrTLSFailure) {
+		t.Errorf("a TLS handshake failure is not reported as one: %v", got)
+	}
+	if errors.Is(got, ErrAuthenticationFailed) || errors.Is(got, ErrCredSSP) {
+		t.Error("a TLS failure was reported as an authentication or CredSSP failure")
+	}
+}
+
+// A failure to reach the host keeps both things a caller needs: the sentinel that
+// says "could not connect", and the net.OpError underneath, so that a refused
+// port is still distinguishable from an unreachable host.
+func TestClassifyErrorMarksUnreachable(t *testing.T) {
+	err := fmt.Errorf("client: cannot reach the server: %w",
+		&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED})
+	got := classifyError(err)
+
+	if !errors.Is(got, ErrUnreachable) {
+		t.Errorf("a dial failure is not reported as unreachable: %v", got)
+	}
 	if errors.Is(got, ErrAuthenticationFailed) {
 		t.Error("a refused connection was reported as an authentication failure")
 	}
@@ -54,6 +91,22 @@ func TestClassifyErrorLeavesNetworkErrorsAlone(t *testing.T) {
 	var op *net.OpError
 	if !errors.As(got, &op) {
 		t.Errorf("the net.OpError was lost: %v", got)
+	}
+}
+
+// A TLS alert is also a net.OpError, with an operation of "remote error". Calling
+// that unreachable would be a second answer to a question already answered, and
+// the wrong one: the server was reached.
+func TestClassifyErrorDoesNotCallATLSAlertUnreachable(t *testing.T) {
+	err := fmt.Errorf("x224: start NLA: %w",
+		&tpkt.CredentialsError{Err: &net.OpError{Op: "remote error", Err: errors.New("tls: internal error")}})
+	got := classifyError(err)
+
+	if errors.Is(got, ErrUnreachable) {
+		t.Errorf("a TLS alert from a server that was reached was reported as unreachable: %v", got)
+	}
+	if !errors.Is(got, ErrAuthenticationFailed) {
+		t.Errorf("it should still be an authentication failure: %v", got)
 	}
 }
 

@@ -73,38 +73,68 @@ func (t *TPKT) SetStrictPubKeyAuth(strict bool) {
 	t.strictPubKeyAuth = strict
 }
 
-// CredSSPError is returned when the CredSSP exchange fails once TLS is already
-// up.
+// TLSError is returned when the TLS handshake fails, before anything has been
+// authenticated.
 //
-// The distinction it carries is one of stage, and it is the only one available.
-// A failure in StartTLS is about the certificate or the TLS negotiation, before
-// anything has been authenticated. A failure after that is about the
-// authentication exchange itself, and the commonest cause by far is a rejected
-// password: Windows does not answer a bad logon with an NTLM status, it drops
-// the TLS connection, so what a caller sees is a TLS alert that on its own reads
-// like a negotiation fault.
+// It is separate from the two below because it is about the transport and the
+// certificate: a wrong password cannot cause it, and a caller that sees it should
+// be looking at the server's certificate or at the ciphers, not at credentials.
+type TLSError struct {
+	Err error
+}
+
+func (e *TLSError) Error() string { return "nla: the TLS handshake failed: " + e.Err.Error() }
+
+// Unwrap exposes the underlying error.
+func (e *TLSError) Unwrap() error { return e.Err }
+
+// CredSSPError is returned when the credentials have not been sent yet and the
+// exchange itself has failed: a DER message that will not parse, a version that
+// does not match, or the server closing the connection while it is being asked
+// to negotiate.
 //
-// tpkt does not claim to know the password was wrong, because a server that
-// vanished mid-exchange looks the same. It claims only that the trouble is in the
-// credentials the exchange carried rather than in the TLS beneath it.
+// Nothing here has been proven wrong about the credentials, because at this
+// point they have not been offered. That is what separates it from
+// CredentialsError below, and it is the reason the two are different types: one
+// means fix the credentials, the other means look at the CredSSP exchange.
 type CredSSPError struct {
 	Err error
 }
 
 func (e *CredSSPError) Error() string {
-	return "nla: the CredSSP authentication exchange failed: " + e.Err.Error()
+	return "nla: the CredSSP exchange failed before the credentials were sent: " + e.Err.Error()
 }
 
-// Unwrap exposes the underlying error, which for a refused logon is usually a
-// TLS alert from the server tearing the connection down.
+// Unwrap exposes the underlying error.
 func (e *CredSSPError) Unwrap() error { return e.Err }
+
+// CredentialsError is returned when the credentials have been sent and the server
+// has not answered.
+//
+// This is the shape a refused logon takes: Windows does not reply with an NTLM
+// status, it drops the TLS connection, so the alert arrives a moment later on the
+// ordinary read path and on its own reads like a negotiation fault. Whether the
+// password was actually wrong cannot be known from here, because a server that
+// vanished mid-exchange is indistinguishable from one that refused, which is why
+// the name is about the exchange rather than about the password.
+type CredentialsError struct {
+	Err error
+}
+
+func (e *CredentialsError) Error() string {
+	return "nla: the server did not answer the credentials: " + e.Err.Error()
+}
+
+// Unwrap exposes the underlying error, which for a refused logon is usually the
+// TLS alert the server sent as it tore the connection down.
+func (e *CredentialsError) Unwrap() error { return e.Err }
 
 func (t *TPKT) StartNLA() error {
 	if err := t.StartTLS(); err != nil {
 		glog.Info("start tls failed", err)
-		// Nothing has been authenticated yet, so this is about TLS and not
-		// about credentials.
-		return fmt.Errorf("nla: start TLS: %w", err)
+		// Nothing has been authenticated and nothing has been sent, so this is
+		// about TLS itself.
+		return &TLSError{Err: err}
 	}
 
 	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
@@ -140,7 +170,7 @@ func (t *TPKT) classifyAuthError(err error, what string) error {
 		return err
 	}
 	t.awaitingVerdict = false
-	return &CredSSPError{Err: fmt.Errorf("%s: %w", what, err)}
+	return &CredentialsError{Err: fmt.Errorf("%s: %w", what, err)}
 }
 
 // credSSPMaxMessage bounds a single CredSSP TSRequest to avoid unbounded memory

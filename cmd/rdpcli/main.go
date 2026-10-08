@@ -14,7 +14,6 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -511,22 +510,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
 		// Say which kind of failure it was, because the message alone does
 		// not: a refused logon against an NLA server arrives as a TLS alert.
-		if errors.Is(err, client.ErrAuthenticationFailed) {
-			fmt.Fprintln(os.Stderr, "  kind: authentication — the exchange did not complete, which is usually a rejected password")
+		switch {
+		case errors.Is(err, client.ErrAuthenticationFailed):
+			fmt.Fprintln(os.Stderr, "  kind: authentication — the server did not answer the credentials, which is usually a rejected password")
+		case errors.Is(err, client.ErrCredSSP):
+			fmt.Fprintln(os.Stderr, "  kind: CredSSP — the exchange failed before the credentials were sent, so it is not the account")
+		case errors.Is(err, client.ErrTLSFailure):
+			fmt.Fprintln(os.Stderr, "  kind: TLS — the handshake failed, so check the certificate before the credentials")
+		case errors.Is(err, client.ErrUnreachable):
+			fmt.Fprintln(os.Stderr, "  kind: unreachable — the connection could not be established")
 		}
 		// Only a failure to connect counts as a network fault. A TLS alert is
 		// also a net.OpError, with an operation of "remote error", and calling
 		// that a network problem next to "authentication" would be two answers
 		// to one question.
-		var netErr *net.OpError
-		if errors.As(err, &netErr) && netErr.Op == "dial" {
+		// The sentinel says it could not connect; the errno says why, and that is
+		// worth one more line because the two have different fixes.
+		if errors.Is(err, client.ErrUnreachable) {
 			switch {
 			case errors.Is(err, syscall.ECONNREFUSED):
-				fmt.Fprintln(os.Stderr, "  kind: unreachable — nothing is listening on that address and port")
+				fmt.Fprintln(os.Stderr, "    nothing is listening on that address and port")
 			case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
-				fmt.Fprintln(os.Stderr, "  kind: unreachable — the host or network is not reachable from here")
-			default:
-				fmt.Fprintln(os.Stderr, "  kind: unreachable — the connection could not be established")
+				fmt.Fprintln(os.Stderr, "    the host or network is not reachable from here")
 			}
 		}
 		var neg *x224.NegotiationFailure

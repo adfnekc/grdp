@@ -105,10 +105,22 @@ operator looking in the wrong place.
 | What happened | The error | How to test it |
 | --- | --- | --- |
 | The password was refused | wraps `ErrAuthenticationFailed` | `errors.Is(err, client.ErrAuthenticationFailed)` |
-| Nothing is listening | wraps a `*net.OpError` with `ECONNREFUSED` | `errors.Is(err, syscall.ECONNREFUSED)` |
-| The host is unreachable | the same, with `EHOSTUNREACH` or a timeout | `errors.Is(err, syscall.EHOSTUNREACH)` |
+| The connection could not be established at all | wraps `ErrUnreachable` | `errors.Is(err, client.ErrUnreachable)` |
+| ...and why it could not | the `*net.OpError` is still in the chain | `errors.Is(err, syscall.ECONNREFUSED)` for nothing listening, `EHOSTUNREACH` for the network |
+| The TLS handshake failed, so nothing was sent | wraps `ErrTLSFailure` | `errors.Is(err, client.ErrTLSFailure)` |
+| The CredSSP exchange failed before the credentials were sent | wraps `ErrCredSSP` | `errors.Is(err, client.ErrCredSSP)` |
 | The server wants a different security protocol | `*x224.NegotiationFailure`, with a code | `errors.As(err, &x224.NegotiationFailure{})` |
 | The server ended the session, usually because another connection took it over | wraps `ErrSessionEndedByServer` | `errors.Is(err, client.ErrSessionEndedByServer)` |
+
+The four kinds that involve the account are separated by the stage they happen
+in, because that is the only thing the transport can know for certain. Before the
+credentials are sent, a failure is `ErrTLSFailure` or `ErrCredSSP` and the account
+has not been proven wrong. After they are sent and the server goes quiet, it is
+`ErrAuthenticationFailed`, which is what a refused logon looks like from here.
+
+Two of those have never been seen from a real server. `ErrTLSFailure` and
+`ErrCredSSP` are reachable and unit tested, but no server available here produces
+them, so they are not claimed as verified.
 
 ```sh
 $ rdpcli -host host -user user -pass wrong -proto nla

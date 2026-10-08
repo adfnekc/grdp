@@ -6,6 +6,7 @@ import (
 
 	"context"
 	"errors"
+	"net"
 	"fmt"
 	"github.com/adfnekc/grdp/orders"
 	"log"
@@ -40,7 +41,31 @@ const DefaultLoginTimeout = 30 * time.Second
 // middle of the exchange looks the same, which is why the name is about the
 // exchange rather than about the password. What it does rule out is TLS itself:
 // a certificate problem fails before this point and does not wrap it.
-var ErrAuthenticationFailed = errors.New("client: the server did not accept the credentials")
+var ErrAuthenticationFailed = errors.New("client: the server did not answer the credentials; usually a rejected password")
+
+// ErrUnreachable reports that the connection could not be established at all.
+//
+// The underlying error is still a *net.OpError, wrapped rather than formatted, so
+// errors.Is(err, syscall.ECONNREFUSED) and errors.Is(err, syscall.EHOSTUNREACH)
+// still tell a port with nothing behind it from a host that cannot be reached.
+// This exists so that a caller has one thing to check for "could not connect"
+// without having to know that the answer lives in syscall.
+var ErrUnreachable = errors.New("client: could not reach the server")
+
+// ErrTLSFailure reports that the TLS handshake failed, so nothing was
+// authenticated and no credentials were sent.
+//
+// It is not the same as ErrAuthenticationFailed, and the difference is the point:
+// this means the certificate or the cipher, that means the account.
+var ErrTLSFailure = errors.New("client: the TLS handshake failed")
+
+// ErrCredSSP reports that the CredSSP exchange failed before the credentials were
+// offered: a message that would not parse, a version that did not match, or the
+// server closing the connection while it was being asked to negotiate.
+//
+// Nothing has been proven wrong about the credentials at that point, which is
+// what separates this from ErrAuthenticationFailed.
+var ErrCredSSP = errors.New("client: the CredSSP exchange failed")
 
 // ErrSessionEndedByServer reports that the server sent a disconnect ultimatum:
 // it ended this session, most often because the same account connected from
@@ -233,12 +258,30 @@ func (c *Client) LoginContext(ctx context.Context) error {
 func classifyError(err error) error {
 	// Idempotent: the event path and the return path both classify, and a
 	// second pass must not wrap what the first one already did.
-	if errors.Is(err, ErrAuthenticationFailed) || errors.Is(err, ErrSessionEndedByServer) {
+	if errors.Is(err, ErrAuthenticationFailed) || errors.Is(err, ErrSessionEndedByServer) ||
+		errors.Is(err, ErrCredSSP) || errors.Is(err, ErrTLSFailure) || errors.Is(err, ErrUnreachable) {
 		return err
 	}
-	var cred *tpkt.CredSSPError
-	if errors.As(err, &cred) && cred.Err != nil {
-		return &authenticationError{err: err}
+	// The stage a failure happened in is what says which kind it is, and the
+	// transport records the stage because the caller cannot see it.
+	var credentials *tpkt.CredentialsError
+	if errors.As(err, &credentials) {
+		return &classifiedError{sentinel: ErrAuthenticationFailed, err: err}
+	}
+	var credssp *tpkt.CredSSPError
+	if errors.As(err, &credssp) {
+		return &classifiedError{sentinel: ErrCredSSP, err: err}
+	}
+	var tlsErr *tpkt.TLSError
+	if errors.As(err, &tlsErr) {
+		return &classifiedError{sentinel: ErrTLSFailure, err: err}
+	}
+	// A failure to connect at all. Only a dial operation counts: a TLS alert is
+	// also a net.OpError, with an operation of "remote error", and calling that
+	// unreachable would be a second answer to a question already answered above.
+	var netErr *net.OpError
+	if errors.As(err, &netErr) && netErr.Op == "dial" {
+		return &classifiedError{sentinel: ErrUnreachable, err: err}
 	}
 	// A disconnect ultimatum with the reason a server sends for a session
 	// taken over, or ended at the user's end. Anything else it says is left as
@@ -267,28 +310,24 @@ func (e *serverEndedError) Is(target error) bool { return target == ErrSessionEn
 
 func (e *serverEndedError) Unwrap() error { return e.err }
 
-// authenticationError wraps a failure that happened while the server was
-// deciding whether to accept the credentials.
+// classifiedError attaches one of the sentinels to a lower level failure.
 //
 // It carries both halves of what a caller needs, which is why it is a type and
 // not a wrapped sentinel with the cause formatted into the message: Is answers
-// for the sentinel, so a caller can branch on "was this the password", and
-// Unwrap keeps the original error, so the TLS alert that Windows sends instead
-// of an answer is still in the chain and in the message. Formatting the cause in
-// with %v would lose it, and a single %w cannot point at two errors.
-type authenticationError struct {
-	err error
+// for the sentinel, so a caller can branch on what went wrong, and Unwrap keeps
+// the original error, so the TLS alert that Windows sends instead of an answer is
+// still in the chain and in the message. Formatting the cause in with %v would
+// lose it, and a single %w cannot point at two errors.
+type classifiedError struct {
+	sentinel error
+	err      error
 }
 
-func (e *authenticationError) Error() string {
-	return ErrAuthenticationFailed.Error() + ": " + e.err.Error()
-}
+func (e *classifiedError) Error() string { return e.sentinel.Error() + ": " + e.err.Error() }
 
-func (e *authenticationError) Is(target error) bool {
-	return target == ErrAuthenticationFailed
-}
+func (e *classifiedError) Is(target error) bool { return target == e.sentinel }
 
-func (e *authenticationError) Unwrap() error { return e.err }
+func (e *classifiedError) Unwrap() error { return e.err }
 
 // KeyUp releases the key whose PC set 1 scancode is sc. A value in
 // 0xE000..0xE0FF is sent as an extended key: the low byte is the scancode and

@@ -75,8 +75,10 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 | 发生了什么 | 错误 | 怎么判定 |
 | --- | --- | --- |
 | 密码被拒 | 包装了 `ErrAuthenticationFailed` | `errors.Is(err, client.ErrAuthenticationFailed)` |
-| 没人监听 | 包装了带 `ECONNREFUSED` 的 `*net.OpError` | `errors.Is(err, syscall.ECONNREFUSED)` |
-| 主机/网络不可达 | 同上，带 `EHOSTUNREACH` 或超时 | `errors.Is(err, syscall.EHOSTUNREACH)` |
+| 根本连不上 | 包装了 `ErrUnreachable` | `errors.Is(err, client.ErrUnreachable)` |
+| ……以及原因 | `*net.OpError` 仍在错误链里 | `ECONNREFUSED` = 没人监听；`EHOSTUNREACH` = 网络不通 |
+| TLS 握手失败（凭据还没发出） | 包装了 `ErrTLSFailure` | `errors.Is(err, client.ErrTLSFailure)` |
+| CredSSP 交换失败（凭据还没发出） | 包装了 `ErrCredSSP` | `errors.Is(err, client.ErrCredSSP)` |
 | 服务器要求的**安全层不同** | `*x224.NegotiationFailure`（带 code） | `errors.As(err, &x224.NegotiationFailure{})` |
 | **服务器结束了会话**（通常是被别的连接接管） | 包装了 `ErrSessionEndedByServer` | `errors.Is(err, client.ErrSessionEndedByServer)` |
 
@@ -87,7 +89,14 @@ login failed: client: the server did not accept the credentials: nla: the CredSS
   kind: authentication — the exchange did not complete, which is usually a rejected password
 ```
 
-`ErrAuthenticationFailed` 说的是「**交换没完成**」✓，**故意不说「密码错」**✗ —— 因为**交换中途消失的服务器长得一模一样** ✓。它排除的是 **TLS 本身**（证书问题会在这之前失败 ✓）。
+**涉及账号的四种，是按「失败发生在哪一步」分开的** ✓ —— 因为这是传输层唯一能确定的事 ✓。
+**凭据发出之前**失败 → `ErrTLSFailure` 或 `ErrCredSSP` ✓ —— 此时账号**还没被证伪** ✓；
+**凭据发出之后**服务器沉默 → `ErrAuthenticationFailed` ✓ —— 这就是密码被拒在这里的样子 ✓。
+
+`ErrAuthenticationFailed` 说的是「**服务器没有回应凭据**」✓，**故意不说「密码错」**✗ —— 因为**交换中途消失的服务器长得一模一样** ✓。
+
+> `ErrTLSFailure` 与 `ErrCredSSP` **没有从真实服务器上见到过** ✗ —— 它们有单测、也走得到 ✓，
+> 但手上没有服务器会产生它们 ✓，所以**不声称已验证** ✓。
 
 最后一行那种**最像故障、其实不是** ✓：被别的连接接管的会话**还在服务器上** ✓（只是被挂起 ✓），**重连就取回** ✓。网络断了**根本不会**发断开通知 ✓ —— 所以「有没有收到通知」本身就是判据 ✓，**这是事实，不是在读字节** ✓。
 
