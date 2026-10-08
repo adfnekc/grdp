@@ -1,2 +1,20 @@
+# Editor and OS noise. Project-wide editor settings are not a library's
+# business: what one contributor's VS Code does is not configuration.
 .idea/
+.vscode/
+.DS_Store
+
+# Built binaries. The commands are cmd/rdpcli, cmd/rdpws and cmd/docaudit, so
+# a binary named after one of them is a build artifact and not a source file.
+# This file exists because readmecheck, a 50 KB compiled binary, was committed
+# to the root and sat there being mistaken for something.
+/rdpcli
+/rdpws
+/docaudit
+/readmecheck
 *.exe
+
+# Coverage and profiles.
+*.out
+*.test
+*.prof
