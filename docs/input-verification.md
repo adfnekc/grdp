@@ -12,7 +12,9 @@ looked correct and xrdp reported no errors. The apparent failure had three
 unrelated causes, none of which were in the protocol encoding:
 
 1. the CLI under test played all `-key` events *before* `-type` strings, so the
-   `Enter` was delivered before the text it was supposed to submit;
+   `Enter` was delivered before the text it was supposed to submit (this has
+   since been fixed: the events are replayed in the order they were given, and
+   the list below is what the debugging session found at the time);
 2. the window layout was being read off the framebuffer, which can be stale;
 3. the shell prompt had a coloured background and looked like a window title.
 

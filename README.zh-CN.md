@@ -8,6 +8,18 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
 > 英文版说明见 [README.md](README.md)。真机验证的**方法**与**发现过程**记录在
 > [docs/windows-verification.md](docs/windows-verification.md)，那是本仓库最值得读的一份文档。
 
+## 文档
+
+* [docs/porting-guide.md](docs/porting-guide.md) —— **在这个库上写东西**的人看：从连接到断开的整个会话、
+  每一部分对你有什么要求，以及那些**已经付过一次代价**的坑。
+* [docs/protocol-layers.md](docs/protocol-layers.md) —— **移植或扩展**它的人看的层次图：每个包做什么、
+  不做什么，每层依赖下一层提供什么，以及出问题时**先看哪里**。
+* [docs/windows-verification.md](docs/windows-verification.md) —— 对真实 Windows 主机**检查了什么、怎么检查的**，
+  含那些值得再认一次的症状。
+* [docs/input-verification.md](docs/input-verification.md) —— 如何**证明**输入到达了，而不是靠截图猜。
+
+每个包都有包文档，每个导出标识符都有注释；`go doc ./client` 是个合适的起点。
+
 ## 状态
 
 连接、认证、画面渲染、输入、剪贴板均已实现，并且**已在真实服务器上验证** ——

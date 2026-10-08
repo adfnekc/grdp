@@ -7,6 +7,24 @@ grdp is a pure Go client implementation of Microsoft's Remote Desktop Protocol.
 Forked from [tomatome/grdp](https://github.com/tomatome/grdp), itself forked from
 [icodeface/grdp](https://github.com/icodeface/grdp).
 
+## Documentation
+
+* [docs/porting-guide.md](docs/porting-guide.md) is for building something with
+  this library: the session from connect to disconnect, what each part expects of
+  you, and the traps that have already been paid for once.
+* [docs/protocol-layers.md](docs/protocol-layers.md) is a map of the layers for
+  someone porting or extending it: what each package does and does not do, what
+  each layer relies on the one below it for, and where to look first when
+  something breaks.
+* [docs/windows-verification.md](docs/windows-verification.md) records what was
+  checked against a real Windows host and how, including the symptoms worth
+  recognising again.
+* [docs/input-verification.md](docs/input-verification.md) records how input is
+  proved to have arrived rather than inferred from a screenshot.
+
+Every package has a package doc, and every exported identifier has a doc comment;
+`go doc ./client` is a reasonable place to start.
+
 ## Status
 
 The connection, authentication, rendering, input and clipboard paths are

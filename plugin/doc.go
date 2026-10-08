@@ -13,9 +13,9 @@
 // The exported names here mirror the C virtual channel API that FreeRDP and
 // Windows implement, which is why they keep its capitalisation.
 //
-// Trap: this package imports "C" and uses no C, so cgo is required for no
-// reason, and with it the whole module: the RDP client imports this package,
-// and CGO_ENABLED=0 go build ./... fails with "build constraints exclude all Go
-// files" for plugin. Deleting the stray import in channel.go is what would let
-// the module build without cgo again.
+// This package used to import "C" while using no C, which made cgo a
+// requirement for the whole module for no reason: the RDP client imports this
+// package, so CGO_ENABLED=0 dropped channel.go entirely and the build failed
+// with "undefined: plugin.CHANNEL_OPTION_INITIALIZED". The stray import is gone
+// and the module builds without cgo now, which is what a library should do.
 package plugin

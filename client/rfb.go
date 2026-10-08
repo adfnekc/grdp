@@ -1,16 +1,3 @@
-// Package client implements the RDP client, and carries the RFB (VNC) client
-// this fork inherited from upstream alongside it.
-//
-// The VNC client (VncClient) is exercised against a real server by
-// scripts/vnc-dev.sh, which starts TigerVNC's Xtigervnc and runs the live tests
-// in protocol/rfb. Its clipboard is implemented in both directions: text the
-// server cuts arrives as the "clipboard-text" event, and SetClipboardText
-// publishes with ClientCutText.
-//
-// For an RDP session the pixels are read from Framebuffer, whichever drawing
-// path the server chose. The RFB client keeps its own framebuffer inside
-// protocol/rfb instead, because an RFB server picks the pixel format per
-// connection rather than sending BGRA.
 package client
 
 import (
