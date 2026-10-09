@@ -438,24 +438,32 @@ func (c *RdpClient) MouseWheel(scroll, x, y int) {
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
+// pointerButtonFlag maps a button number to its pointer flag: 0 is the left
+// button, 1 the middle one and 2 the right one, the numbering X11 and most
+// toolkits use. It returns 0 for a number that means nothing, so that a caller
+// cannot ask for a button that does not exist.
+func pointerButtonFlag(button int) uint16 {
+	switch button {
+	case 0:
+		return pdu.PTRFLAGS_BUTTON1
+	case 1:
+		return pdu.PTRFLAGS_BUTTON3
+	case 2:
+		return pdu.PTRFLAGS_BUTTON2
+	}
+	return 0
+}
+
 // MouseUp releases button 0 (left), 1 (middle) or 2 (right) at (x, y).
 func (c *RdpClient) MouseUp(button int, x, y int) {
 	if c == nil || c.pdu == nil {
 		return
 	}
-	p := &pdu.PointerEvent{}
-
-	switch button {
-	case 0:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON1
-	case 2:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON2
-	case 1:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON3
-	default:
-		p.PointerFlags |= pdu.PTRFLAGS_MOVE
+	flag := pointerButtonFlag(button)
+	if flag == 0 {
+		return
 	}
-	p.PointerFlags |= pdu.PTRFLAGS_MOVE
+	p := &pdu.PointerEvent{PointerFlags: flag}
 
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
@@ -467,20 +475,11 @@ func (c *RdpClient) MouseDown(button int, x, y int) {
 	if c == nil || c.pdu == nil {
 		return
 	}
-	p := &pdu.PointerEvent{}
-
-	p.PointerFlags |= pdu.PTRFLAGS_DOWN | pdu.PTRFLAGS_MOVE
-
-	switch button {
-	case 0:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON1
-	case 2:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON2
-	case 1:
-		p.PointerFlags |= pdu.PTRFLAGS_BUTTON3
-	default:
-		p.PointerFlags |= pdu.PTRFLAGS_MOVE
+	flag := pointerButtonFlag(button)
+	if flag == 0 {
+		return
 	}
+	p := &pdu.PointerEvent{PointerFlags: pdu.PTRFLAGS_DOWN | flag}
 
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)

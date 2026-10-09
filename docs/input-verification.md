@@ -188,9 +188,55 @@ released, as the spec says and as the `0x1800` of an ordinary release shows. A
 movement event carries `PTRFLAGS_MOVE` alone and the server keeps the button state
 between events. Both of those changes were reverted.
 
-So the pointer PDUs this client sends are right, on both paths, and the target
-still ignores button presses while accepting movement and keyboard input, which
-leaves the target. The candidates worth naming are that it has Sunlogin and ToDesk
-installed (low level mouse hooks can swallow button messages and pass movement
-through), and that its console session is signed in at the same time. Neither is
-verifiable from this side.
+The encoding was right on both paths, and that was the point: the fault was not in
+how an event is laid out but in **which flags were put in it**.
+
+## The button events carried a movement flag they should not have
+
+`MouseDown` and `MouseUp` both added `PTRFLAGS_MOVE` to their pointer event, so a
+click went out as
+
+```
+down: 04 80 0a 20 | 0098 ...   PTRFLAGS_DOWN | PTRFLAGS_BUTTON1 | PTRFLAGS_MOVE
+up:   04 80 0a 20 | 0018 ...   PTRFLAGS_BUTTON1 | PTRFLAGS_MOVE
+```
+
+`PTRFLAGS_MOVE` does not belong on a button event. MS-RDPBCGR 2.2.8.1.1.3.1.1.3
+lists the pointer flags in separate groups: a movement event carries
+`PTRFLAGS_MOVE`, and a button event carries `PTRFLAGS_DOWN` together with the button
+that was pressed or released. FreeRDP's own client sends exactly that, which
+`client/X11/xf_event.c` shows plainly:
+
+```c
+	else if (flags & (PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3))
+	{
+		if (down)
+			flags |= PTR_FLAGS_DOWN;
+	}
+```
+
+There is no `PTR_FLAGS_MOVE` there, and the motion path sends `PTR_FLAGS_MOVE`
+alone.
+
+This is why it survived every byte level comparison. The comparison the issue made,
+and the one made here, was of the **encoder**: how a given set of flags is packed.
+The encoder is shared and was always correct. The flags themselves are chosen by the
+client's input layer, and that is where the two bits had been added. Nothing that
+looks at encoding could ever have found it.
+
+It is also why xrdp accepted clicks and Windows did not. xrdp only reads the button
+bits and ignores a stray movement bit; Windows validates the event and drops it.
+
+The fix removes `PTRFLAGS_MOVE` from `MouseDown` and `MouseUp` and leaves it on
+`MouseMove`, which is what every other client does.
+
+## Verification
+
+xrdp, which accepted the old form, still accepts the new one, so the change is not
+a regression: `xev` inside the session reported `button 1` press and release, and
+the session's own XI2 log reported `RawButtonPress` and `RawButtonRelease`.
+
+The Windows target that the fault was reproduced against was powered off before the
+fix could be confirmed there, so the confirmation that clicks now work on it is
+outstanding. What is known is that the old form sent a flag no other client sends
+and that Windows ignored it, and that the new form is what mstsc and FreeRDP send.
