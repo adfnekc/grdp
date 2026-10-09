@@ -597,6 +597,39 @@ func fastPathEventCode(msgType uint16) (byte, bool) {
 		return FASTPATH_INPUT_EVENT_MOUSEX, true
 	case INPUT_EVENT_UNICODE:
 		return FASTPATH_INPUT_EVENT_UNICODE, true
+	case INPUT_EVENT_SYNC:
+		return FASTPATH_INPUT_EVENT_SYNC, true
+	}
+	return 0, false
+}
+
+// fastPathEventCodeFor returns the fast path event code for a single event.
+//
+// The code comes from the event's own type rather than from the msgType of the
+// whole PDU, because one PDU may carry a mixture: the input preamble every real
+// client sends when the session becomes ready is a key release, a synchronise
+// and another key release, and the three have different codes. Deriving one code
+// for the whole slice and writing it on every event made that PDU impossible to
+// express.
+//
+// msgType still decides between the two pointer encodings, MOUSE and MOUSEX,
+// since a PointerEvent carries no hint of which one the caller wants, and it is
+// ignored for the other event types because their code is not a matter of choice.
+func fastPathEventCodeFor(e InputEventsInterface, msgType uint16) (byte, bool) {
+	switch e.(type) {
+	case *ScancodeKeyEvent:
+		return FASTPATH_INPUT_EVENT_SCANCODE, true
+	case *UnicodeKeyEvent:
+		return FASTPATH_INPUT_EVENT_UNICODE, true
+	case *SynchronizeEvent:
+		return FASTPATH_INPUT_EVENT_SYNC, true
+	case *PointerEvent:
+		if code, ok := fastPathEventCode(msgType); ok {
+			return code, true
+		}
+		// A pointer event with no pointer msgType is a mouse event; there is no
+		// reading of the call as a request for MOUSEX.
+		return FASTPATH_INPUT_EVENT_MOUSE, true
 	}
 	return 0, false
 }
@@ -607,12 +640,18 @@ func fastPathEventCode(msgType uint16) (byte, bool) {
 // fpInputHeader:  action (2 bits) | numEvents << 2 | encrypted << 6
 // eventHeader:    eventFlags (5 bits) | eventCode << 5
 func (c *Client) sendFastPathInput(msgType uint16, events []InputEventsInterface) {
-	eventCode, ok := fastPathEventCode(msgType)
-	if !ok || len(events) == 0 || len(events) > 15 {
+	if len(events) == 0 || len(events) > 15 {
 		return
 	}
 	buff := &bytes.Buffer{}
 	for _, e := range events {
+		eventCode, ok := fastPathEventCodeFor(e, msgType)
+		if !ok {
+			// One unusable event used to take the whole PDU with it, silently.
+			// Bailing out here rather than mid-PDU is what keeps the events that
+			// came before it from being sent with a wrong count.
+			return
+		}
 		switch ev := e.(type) {
 		case *ScancodeKeyEvent:
 			var flags byte
@@ -644,6 +683,13 @@ func (c *Client) sendFastPathInput(msgType uint16, events []InputEventsInterface
 			core.WriteUInt16LE(ev.PointerFlags, buff)
 			core.WriteUInt16LE(ev.XPos, buff)
 			core.WriteUInt16LE(ev.YPos, buff)
+		case *SynchronizeEvent:
+			// The fast path carries the toggle state in the low five bits of the
+			// event header and has no payload after it, so this event is one
+			// byte. The slow path's SynchronizeEvent is six bytes and its
+			// Serialize is what that path uses; the two shapes are not
+			// interchangeable and this is the fast path's.
+			buff.WriteByte(byte(ev.ToggleFlags&0x1F) | (eventCode << 5))
 		default:
 			return
 		}

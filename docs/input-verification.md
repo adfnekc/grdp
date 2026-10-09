@@ -112,3 +112,54 @@ event log proved it by showing the letters had never been sent at all.
 The lesson generalises: when an interaction seems broken, dump what the other
 side actually received, and read the terminal, before theorising about the
 protocol. `scripts/dev-rdp.sh probe-session` exists for exactly that.
+
+## Mouse buttons against a Windows 10 target
+
+An issue reported that pointer button events reach a Windows 10 build 19041 target
+but have no effect there, while pointer moves and keyboard input work. It was
+reproduced on the target this repository tests against, which turns out to carry
+the same build string: Windows 10 Enterprise LTSC Evaluation, Build
+19041.vb_release.191206-1406.
+
+What holds, measured rather than argued:
+
+| | Result |
+|---|---|
+| Pointer moves | work, and the server draws a fresh tooltip on hover, which is what says the position arrived |
+| Keyboard, including shell hotkeys | work; `Ctrl+Esc` opened the Start menu |
+| Left button, fast path | no effect |
+| Left button, slow path | no effect |
+| Right button | no effect |
+| The input preamble (tab up, synchronise, tab up) | sends, and changes nothing |
+
+The issue's claim that `Ctrl+Esc` fails on this target does not reproduce. The
+Start menu opens, so the shell does process keyboard input, and the session is not
+in a state where input is being dropped wholesale.
+
+The bytes are not the problem. A click at (300, 400) sends
+
+```
+move: 04 80 0a 20 | 0008 2c01 9001   MOVE
+down: 04 80 0a 20 | 0098 2c01 9001   DOWN|BUTTON1|MOVE
+up:   04 80 0a 20 | 0018 2c01 9001   BUTTON1|MOVE
+```
+
+which is what FreeRDP sends, field for field, including the header byte, the
+big-endian length, the event code shift and the little-endian payload. The
+capability that gates fast path input, `INPUT_FLAG_FASTPATH_INPUT`, is advertised.
+The slow path's event layout has no length field, which is correct, and it fails
+the same way.
+
+So the conclusion recorded here is a negative one: nothing in the client's input
+path is wrong that this repository can find, and the target ignores button events
+for a reason outside the PDU. An unverified candidate is worth naming, because it
+is testable: the target has Sunlogin and ToDesk installed, both remote control
+tools, and both install low level mouse hooks, which can swallow button messages
+while letting movement through. Stopping both and retrying would confirm or
+eliminate it, and a hook would affect mstsc and FreeRDP exactly as much as it
+affects this client, which is why the issue's statement that those work on this
+target should be treated as untested rather than as a contrast.
+
+What this repository can do about it, it now does: the input preamble is
+available, and a PDU may mix events of different types, which it could not
+before. Neither is offered as a fix, because neither fixed anything here.

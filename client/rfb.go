@@ -160,6 +160,17 @@ func (c *VncClient) KeyDown(sc int, name string) {
 // there is no way to say which character an input method produced. The call is
 // accepted and logged rather than silently ignored, and Client.TypeText returns
 // an error on a VNC session instead of reaching here.
+// SendSynchronize implements the Control interface. RFB has no such event, so it
+// says so rather than dropping the request silently.
+func (c *VncClient) SendSynchronize(toggleFlags uint32) error {
+	return ErrNoInputPreamble
+}
+
+// SendInputPreamble implements the Control interface. See SendSynchronize.
+func (c *VncClient) SendInputPreamble(toggleFlags uint32) error {
+	return ErrNoInputPreamble
+}
+
 func (c *VncClient) UnicodeKeyDown(r rune) {
 	glog.Warnf("vnc: %U cannot be sent; RFB has no Unicode key event", r)
 }

@@ -218,3 +218,104 @@ func TestSlowPathInputUnicode(t *testing.T) {
 		t.Errorf("slow path data = % X, does not contain % X", tr.buf.Bytes(), want)
 	}
 }
+
+// The synchronise event carries the toggle state in the event header and has no
+// payload, so on the fast path it is a single byte. The slow path's version is
+// six bytes and is not the same thing.
+func TestFastPathInputSync(t *testing.T) {
+	cases := []struct {
+		name   string
+		toggle uint32
+		want   []byte
+	}{
+		{"all off", 0, []byte{0x60}},
+		{"num lock", TS_SYNC_NUM_LOCK, []byte{0x62}},
+		{"caps lock", TS_SYNC_CAPS_LOCK, []byte{0x64}},
+		{"scroll and num", TS_SYNC_SCROLL_LOCK | TS_SYNC_NUM_LOCK, []byte{0x63}},
+		{"kana", TS_SYNC_KANA_LOCK, []byte{0x68}},
+	}
+	for _, c := range cases {
+		fp := &fakeFastPath{}
+		cl := NewClient(newCaptureTransport())
+		cl.SetFastPathSender(fp)
+		cl.SendInputEvents(INPUT_EVENT_SYNC, []InputEventsInterface{
+			&SynchronizeEvent{ToggleFlags: c.toggle},
+		})
+		if fp.numEvents != 1 {
+			t.Errorf("%s: numEvents = %d, want 1", c.name, fp.numEvents)
+		}
+		if !bytes.Equal(fp.data, c.want) {
+			t.Errorf("%s: data = % X, want % X", c.name, fp.data, c.want)
+		}
+	}
+}
+
+// The input preamble is a Tab release, the toggle state and another Tab release,
+// in one PDU. That is what mstsc and FreeRDP send once the session is ready,
+// FreeRDP's comment saying "send a tab up like mstsc.exe".
+//
+// The three events have three different event codes, which is exactly why this
+// could not be sent before: the code used to be worked out once per PDU from the
+// msgType and written on every event, so a PDU like this one was not expressible.
+func TestFastPathInputPreambleIsOneMixedPDU(t *testing.T) {
+	fp := &fakeFastPath{}
+	cl := NewClient(newCaptureTransport())
+	cl.SetFastPathSender(fp)
+
+	tabUp := &ScancodeKeyEvent{KeyboardFlags: KBDFLAGS_RELEASE, KeyCode: 0x0f}
+	cl.SendInputEvents(INPUT_EVENT_SCANCODE, []InputEventsInterface{
+		tabUp,
+		&SynchronizeEvent{ToggleFlags: TS_SYNC_NUM_LOCK},
+		tabUp,
+	})
+
+	if fp.numEvents != 3 {
+		t.Fatalf("numEvents = %d, want 3", fp.numEvents)
+	}
+	// scancode release (0x01) + Tab, sync (3<<5) + num lock, scancode release + Tab
+	want := []byte{0x01, 0x0f, 0x62, 0x01, 0x0f}
+	if !bytes.Equal(fp.data, want) {
+		t.Fatalf("data = % X, want % X", fp.data, want)
+	}
+}
+
+// Events of different types mix in one PDU regardless of the msgType passed for
+// the PDU, because each event now works out its own code.
+func TestFastPathInputMixesEventTypes(t *testing.T) {
+	fp := &fakeFastPath{}
+	cl := NewClient(newCaptureTransport())
+	cl.SetFastPathSender(fp)
+
+	cl.SendInputEvents(INPUT_EVENT_MOUSE, []InputEventsInterface{
+		&PointerEvent{PointerFlags: PTRFLAGS_MOVE, XPos: 10, YPos: 20},
+		&ScancodeKeyEvent{KeyCode: 0x1C},
+		&SynchronizeEvent{},
+	})
+
+	if fp.numEvents != 3 {
+		t.Fatalf("numEvents = %d, want 3", fp.numEvents)
+	}
+	want := []byte{
+		0x20, 0x00, 0x08, 0x0A, 0x00, 0x14, 0x00, // mouse move to 10,20
+		0x00, 0x1C, // enter down
+		0x60, // sync, everything off
+	}
+	if !bytes.Equal(fp.data, want) {
+		t.Fatalf("data = % X, want % X", fp.data, want)
+	}
+}
+
+// A pointer event still picks up MOUSEX from the msgType, since the event itself
+// carries no hint of which of the two encodings the caller wants.
+func TestFastPathInputPointerKeepsMouseX(t *testing.T) {
+	fp := &fakeFastPath{}
+	cl := NewClient(newCaptureTransport())
+	cl.SetFastPathSender(fp)
+	cl.SendInputEvents(INPUT_EVENT_MOUSEX, []InputEventsInterface{
+		&PointerEvent{PointerFlags: PTRFLAGS_MOVE, XPos: 1, YPos: 2},
+	})
+	// MOUSEX is 2, so the header is 0x40 rather than 0x20.
+	if len(fp.data) == 0 || fp.data[0] != 0x40 {
+		t.Fatalf("data = % X, want a MOUSEX header of 0x40", fp.data)
+	}
+}

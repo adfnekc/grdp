@@ -293,6 +293,14 @@ const (
 )
 
 const (
+	// Toggle key states, as they appear in a synchronise event. The fast path
+	// has room for five bits and the slow path for a full word; the four below
+	// mean the same thing in both.
+	TS_SYNC_SCROLL_LOCK = 0x00000001
+	TS_SYNC_NUM_LOCK    = 0x00000002
+	TS_SYNC_CAPS_LOCK   = 0x00000004
+	TS_SYNC_KANA_LOCK   = 0x00000008
+
 	KBDFLAGS_EXTENDED = 0x0100
 	KBDFLAGS_DOWN     = 0x4000
 	KBDFLAGS_RELEASE  = 0x8000

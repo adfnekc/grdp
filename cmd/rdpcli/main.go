@@ -170,6 +170,35 @@ func playInput(c *client.Client, events []string) {
 				time.Sleep(80 * time.Millisecond)
 				c.MouseUp(0, x, y)
 			}
+		case "rclick", "mclick":
+			// Button 1 is the right button and 2 the middle one, which is what
+			// Client.MouseDown takes.
+			xy := strings.SplitN(parts[1], ",", 2)
+			if len(xy) != 2 {
+				continue
+			}
+			x, _ := strconv.Atoi(xy[0])
+			y, _ := strconv.Atoi(xy[1])
+			button := 1
+			if parts[0] == "mclick" {
+				button = 2
+			}
+			c.MouseMove(x, y)
+			time.Sleep(80 * time.Millisecond)
+			c.MouseDown(button, x, y)
+			time.Sleep(80 * time.Millisecond)
+			c.MouseUp(button, x, y)
+		case "wheel":
+			xy := strings.SplitN(parts[1], ",", 3)
+			if len(xy) != 3 {
+				continue
+			}
+			x, _ := strconv.Atoi(xy[0])
+			y, _ := strconv.Atoi(xy[1])
+			d, _ := strconv.Atoi(xy[2])
+			c.MouseMove(x, y)
+			time.Sleep(80 * time.Millisecond)
+			c.MouseWheel(d, x, y)
 		case "mdown":
 			xy := strings.SplitN(parts[1], ",", 2)
 			if len(xy) != 2 {
@@ -210,10 +239,12 @@ func main() {
 	rects := flag.Bool("rects", false, "log each bitmap rectangle's geometry")
 	var actions []inputAction
 	keys := actionSeq{list: &actions, isType: false}
-	flag.Var(keys, "key", "input event, repeatable: press:0x1c | down:0x1c | up:0x1c | move:x,y | click:x,y | wait:300")
+	flag.Var(keys, "key", "input event, repeatable: press:0x1c | down:0x1c | up:0x1c | move:x,y | click:x,y | rclick:x,y | mclick:x,y | wheel:x,y,notches | mdown:x,y | mup:x,y | wait:300")
 	types := actionSeq{list: &actions, isType: true}
 	flag.Var(types, "type", "type an ASCII string into the focused window, repeatable")
 	postInput := flag.Duration("post-input", 3*time.Second, "wait after input playback before dumping")
+	inputPreamble := flag.Bool("input-preamble", false, "send the input preamble before any other input: a Tab release, the toggle state and another Tab release, in one PDU")
+	syncOnly := flag.Bool("sync", false, "send a synchronise input event before any other input (the preamble without the Tab releases)")
 	unicodeText := flag.String("unicode-text", "", "type this string using Unicode key events rather than scancodes")
 	unicodeHold := flag.Duration("unicode-hold", 0, "how long to hold each Unicode key down (0 sends the release immediately)")
 	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
@@ -318,6 +349,22 @@ func main() {
 		}
 	})
 	c.OnReady(func() {
+		// The preamble is the first thing a real client sends, before any other
+		// input, so it goes here rather than in the playback goroutine below.
+		if *inputPreamble {
+			if err := c.SendInputPreamble(0); err != nil {
+				fmt.Fprintln(os.Stderr, "input preamble:", err)
+			} else {
+				fmt.Println("sent the input preamble: tab up, synchronise, tab up, in one PDU")
+			}
+		}
+		if *syncOnly {
+			if err := c.SendSynchronize(0); err != nil {
+				fmt.Fprintln(os.Stderr, "synchronise:", err)
+			} else {
+				fmt.Println("sent a synchronise event with no toggle keys set")
+			}
+		}
 		select {
 		case ready <- struct{}{}:
 		default:

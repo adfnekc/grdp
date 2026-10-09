@@ -204,6 +204,17 @@ at a server that disagreed, after unit tests had passed.
   systemPointerType, and the ordering of the Display Control capabilities. The
   prose was ambiguous or silently incomplete about all four.
 
+* **The input preamble is available and is not held to fix anything.**
+  `SendInputPreamble` sends what mstsc and FreeRDP send when the session becomes
+  ready: a Tab release, the toggle key state, and another Tab release, all three in
+  one PDU. `SendSynchronize` sends only the toggle state. The preamble was worth
+  having because its three events have three different event codes and the fast
+  path used to work the code out once per PDU, so the PDU could not be expressed
+  at all; `SendInputEvents` now takes the code from each event and a PDU may mix
+  types freely. What it is not is a fix for a target that ignores mouse buttons:
+  it was measured against such a target and changed nothing, and the bytes of the
+  button events were already correct. Do not adopt it hoping for that.
+
 * **A listener can run twice at once, and that is fatal rather than awkward.**
   The emitter calls every listener in its own goroutine, so a handler registered
   twice for one event runs twice concurrently. If both copies write the same Go

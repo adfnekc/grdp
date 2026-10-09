@@ -110,6 +110,8 @@ type Control interface {
 	KeyDown(sc int, name string)
 	UnicodeKeyDown(r rune)
 	UnicodeKeyUp(r rune)
+	SendSynchronize(toggleFlags uint32) error
+	SendInputPreamble(toggleFlags uint32) error
 	MouseMove(x, y int)
 	MouseWheel(scroll, x, y int)
 	MouseUp(button int, x, y int)
