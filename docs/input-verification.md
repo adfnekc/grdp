@@ -163,3 +163,34 @@ target should be treated as untested rather than as a contrast.
 What this repository can do about it, it now does: the input preamble is
 available, and a PDU may mix events of different types, which it could not
 before. Neither is offered as a fix, because neither fixed anything here.
+
+## Why the buttons do nothing there: what was ruled out
+
+The same target was used to check every part of the client's pointer path against
+outside references rather than reasoning, because "the bytes look right" had
+already been said once too often.
+
+| Checked | Against | Result |
+|---|---|---|
+| Fast path pointer PDU | FreeRDP `fastpath_send_multiple_input_pdu` and `input_send_fastpath_mouse_event` | identical: header byte `action \| numEvents << 2`, length `0x8000 \| total`, event byte `eventFlags \| eventCode << 5`, then flags, x, y little endian |
+| Same PDU | Microsoft's own annotated capture, MS-RDPBCGR "Annotated Fast-Path Input Event PDU" | identical, including the one and two byte forms of the length field |
+| Slow path input PDU | FreeRDP `rdp_client_input_pdu_init` (which is the shape master builds by default) | identical: share control and share data headers, `numEvents`, `pad2Octets`, then `eventTime`, `messageType`, flags, x, y |
+| Fast path input capability | MS-RDPBCGR `TS_INPUT_CAPABILITYSET` | `INPUT_FLAG_FASTPATH_INPUT` and `INPUT_FLAG_FASTPATH_INPUT2` are both advertised |
+| Session control | the `CTRLACTION_GRANTED_CONTROL` reply | `grantedControlId` is this client's own channel, so no other controller holds the session |
+
+Two things nearly became "fixes" and were not, which is worth writing down because
+this project has done that before. The slow path PDU appeared to carry
+`numEvents = 0`, which would explain everything; it does not, because the share
+data header is twelve bytes and not ten, and the count is `01 00` exactly where it
+should be. And a drag appeared to need the held button repeated on every move;
+it does not, because a button flag without `PTRFLAGS_DOWN` means the button was
+released, as the spec says and as the `0x1800` of an ordinary release shows. A
+movement event carries `PTRFLAGS_MOVE` alone and the server keeps the button state
+between events. Both of those changes were reverted.
+
+So the pointer PDUs this client sends are right, on both paths, and the target
+still ignores button presses while accepting movement and keyboard input, which
+leaves the target. The candidates worth naming are that it has Sunlogin and ToDesk
+installed (low level mouse hooks can swallow button messages and pass movement
+through), and that its console session is signed in at the same time. Neither is
+verifiable from this side.

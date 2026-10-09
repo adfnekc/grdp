@@ -171,17 +171,18 @@ func playInput(c *client.Client, events []string) {
 				c.MouseUp(0, x, y)
 			}
 		case "rclick", "mclick":
-			// Button 1 is the right button and 2 the middle one, which is what
-			// Client.MouseDown takes.
+			// Client.MouseDown numbers the buttons the way X11 and most
+			// toolkits do: 0 left, 1 middle, 2 right. These two verbs had it
+			// backwards, so rclick was sending a middle click.
 			xy := strings.SplitN(parts[1], ",", 2)
 			if len(xy) != 2 {
 				continue
 			}
 			x, _ := strconv.Atoi(xy[0])
 			y, _ := strconv.Atoi(xy[1])
-			button := 1
+			button := 2
 			if parts[0] == "mclick" {
-				button = 2
+				button = 1
 			}
 			c.MouseMove(x, y)
 			time.Sleep(80 * time.Millisecond)
