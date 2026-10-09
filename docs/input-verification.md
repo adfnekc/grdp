@@ -236,7 +236,19 @@ xrdp, which accepted the old form, still accepts the new one, so the change is n
 a regression: `xev` inside the session reported `button 1` press and release, and
 the session's own XI2 log reported `RawButtonPress` and `RawButtonRelease`.
 
-The Windows target that the fault was reproduced against was powered off before the
-fix could be confirmed there, so the confirmation that clicks now work on it is
-outstanding. What is known is that the old form sent a flag no other client sends
-and that Windows ignored it, and that the new form is what mstsc and FreeRDP send.
+It is now confirmed on the target itself, and the confirmation is an A/B rather
+than an impression. On a freshly booted target, with the fix in place:
+
+- clicking a desktop icon selects it and shows its tooltip
+- dragging across the wallpaper draws a selection rectangle whose corners are
+  exactly the coordinates that were sent
+
+With the flags put back the way they were, that same drag draws nothing at all. The
+two screenshots were cropped and compared rather than looked at, because looking at
+them had already produced one wrong answer: a first pass claimed the old flags
+worked too, on the strength of a rectangle that was not there.
+
+So `PTRFLAGS_MOVE` on a button event is what this target rejects, and the removal of
+it is the fix. The issue's own note that removing it made no difference is not
+reproducible; what is reproducible is that it makes all the difference, and that a
+hung shell makes every button look dead regardless of what the client sends.
