@@ -232,23 +232,46 @@ The fix removes `PTRFLAGS_MOVE` from `MouseDown` and `MouseUp` and leaves it on
 
 ## Verification
 
-xrdp, which accepted the old form, still accepts the new one, so the change is not
-a regression: `xev` inside the session reported `button 1` press and release, and
-the session's own XI2 log reported `RawButtonPress` and `RawButtonRelease`.
+Confirmed on the target, with the fix in place, using tests that cannot be produced
+by hovering. Each is a screenshot cropped to the region that matters and looked at
+on its own, rather than an impression of a whole screen:
 
-It is now confirmed on the target itself, and the confirmation is an A/B rather
-than an impression. On a freshly booted target, with the fix in place:
+| Test | Result |
+|---|---|
+| Left click a desktop icon, then move the pointer away | the icon stays selected, so it was a click and not the hover highlight |
+| Left click and drag across the wallpaper | a selection rectangle whose corners are the coordinates that were sent |
+| Right click the desktop | the desktop context menu |
+| Left click the taskbar clock | the calendar flyout |
 
-- clicking a desktop icon selects it and shows its tooltip
-- dragging across the wallpaper draws a selection rectangle whose corners are
-  exactly the coordinates that were sent
+And the same tests against the code as it was, with `PTRFLAGS_MOVE` on the button
+events:
 
-With the flags put back the way they were, that same drag draws nothing at all. The
-two screenshots were cropped and compared rather than looked at, because looking at
-them had already produced one wrong answer: a first pass claimed the old flags
-worked too, on the strength of a rectangle that was not there.
+| Test | Result |
+|---|---|
+| Right click the desktop | nothing |
+| Drag across the wallpaper | nothing |
 
-So `PTRFLAGS_MOVE` on a button event is what this target rejects, and the removal of
-it is the fix. The issue's own note that removing it made no difference is not
-reproducible; what is reproducible is that it makes all the difference, and that a
-hung shell makes every button look dead regardless of what the client sends.
+That A/B is what settles it. `PTRFLAGS_MOVE` on a button event is what this target
+rejects, and removing it is the fix. The issue's note that removing it made no
+difference does not reproduce.
+
+## What made this hard to see, and one test that lies
+
+The Start button does not open the Start menu on this target, with or without the
+fix, and it is worth writing down because it misled the issue report and this file
+for several rounds. Its Start menu is broken: on the one occasion it did open, the
+shell stopped accepting input entirely, including from the keyboard, and stayed that
+way until the machine was rebooted.
+
+So "click the Start button and see whether the menu opens" is not a usable test on
+this machine. It fails for reasons that have nothing to do with the client, and it
+fails in a way that looks exactly like the mouse being ignored. The tests above were
+chosen because they do not touch the Start menu, and because a hover cannot fake
+them: a selection that survives the pointer moving away, a context menu, a flyout, a
+selection rectangle.
+
+Two mistakes were made here and are recorded rather than quietly dropped. The first
+was claiming the buttons shipped in an earlier version still failed, and then the
+opposite, on the strength of a hung shell. The second was reading a selection
+rectangle into a screenshot that did not have one. Both came from looking rather than
+measuring, which this file already warned about.

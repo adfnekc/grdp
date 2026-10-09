@@ -204,6 +204,11 @@ at a server that disagreed, after unit tests had passed.
   systemPointerType, and the ordering of the Display Control capabilities. The
   prose was ambiguous or silently incomplete about all four.
 
+* **A tag means a fix the maintainer has confirmed.** Do not tag a change on the
+  strength of a test that could have passed for another reason, and do not tag
+  documentation or speculative work at all. Several versions were tagged here for
+  changes that were later shown to fix nothing, and the tags had to be deleted.
+
 * **The input preamble is available and is not held to fix anything.**
   `SendInputPreamble` sends what mstsc and FreeRDP send when the session becomes
   ready: a Tab release, the toggle key state, and another Tab release, all three in
