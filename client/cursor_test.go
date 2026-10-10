@@ -103,18 +103,31 @@ func TestCursorColourAndMaskClearsBlack(t *testing.T) {
 // the inverse of the background, and a colour that is neither white nor black is
 // a hole.
 func TestCursor24bppAndMaskIsTheOldRule(t *testing.T) {
-	s := colourShape([3]byte{0xff, 0xff, 0xff}, [3]byte{10, 20, 30})
-	s.And[0] = 0xC0 // both pixels
-	cur := cursorFromShape(s)
-	if got := rgbaAt(cur, 0, 0); got[3] != 0xff {
+	// Four pixels with one of them marked by the AND mask, so the mask is a mask
+	// and not the set almost everywhere case, which
+	// TestColourPointerWithUnusableAndMaskUsesTheXorPicture covers.
+	white := [3]byte{0xff, 0xff, 0xff}
+	colour := [3]byte{10, 20, 30}
+
+	// and=1 on white becomes the inverse of the background, which cannot be
+	// worked out here, so a substitute is drawn instead.
+	s := colourShape(white, colour, colour, colour)
+	s.And[0] = 0x80
+	if got := rgbaAt(cursorFromShape(s), 0, 0); got[3] != 0xff {
 		t.Errorf("and=1 white at 24bpp = %v, want the inverted substitute drawn", got)
 	}
-	if got := rgbaAt(cur, 1, 0); got != [4]byte{0, 0, 0, 0} {
+
+	// and=1 on a colour that is neither white nor black is a hole at 24bpp:
+	// there is no alpha channel to say otherwise.
+	s2 := colourShape(white, colour, colour, colour)
+	s2.And[0] = 0x40
+	if got := rgbaAt(cursorFromShape(s2), 1, 0); got != [4]byte{0, 0, 0, 0} {
 		t.Errorf("and=1 with a colour that is neither white nor black at 24bpp = %v, want transparent", got)
 	}
-	// With the bit clear there is no alpha to use, so the pixel is made opaque.
-	s2 := colourShape([3]byte{10, 20, 30})
-	if got := rgbaAt(cursorFromShape(s2), 0, 0); got != [4]byte{30, 20, 10, 255} {
+
+	// and=0 has no alpha to use, so the pixel is made opaque.
+	s3 := colourShape(colour, colour, colour, colour)
+	if got := rgbaAt(cursorFromShape(s3), 0, 0); got != [4]byte{30, 20, 10, 255} {
 		t.Errorf("and=0 at 24bpp = %v, want opaque", got)
 	}
 }

@@ -97,6 +97,15 @@ func cursorFromShape(s *pdu.PointerShape) *Cursor {
 	if xorRow <= 0 || andRow <= 0 {
 		return nil
 	}
+	// A colour pointer's AND mask says which pixels are see through. Windows 10
+	// also sends colour pointers whose XOR mask is the picture and whose AND
+	// mask is set for essentially every pixel, which cannot say that: applying
+	// it would erase the whole pointer. Its I beam is one of those, and it
+	// arrives as a 24bpp shape whose XOR holds a complete I beam while 96.9% of
+	// its AND is set, so the rule below left four dots where the pointer should
+	// be. Measured against 32bpp shapes on the same target, whose AND masks are
+	// 73% to 87% set, there is a clear gap, and this is where the line is drawn.
+	andIsSet := !mono && andMaskIsSetAlmostEverywhere(s.And, w, h)
 
 	for y := 0; y < h; y++ {
 		// A colour pointer's mask is bottom up. A two colour one is not.
@@ -126,7 +135,11 @@ func cursorFromShape(s *pdu.PointerShape) *Cursor {
 				default:
 					return nil
 				}
-				px = colourCursorPixel(px, andBit, s.XorBpp, x, y)
+				if andIsSet {
+					px = colourCursorFromXor(px, s.XorBpp)
+				} else {
+					px = colourCursorPixel(px, andBit, s.XorBpp, x, y)
+				}
 			}
 			o := y*img.Stride + x*4
 			copy(img.Pix[o:o+4], px[:])
@@ -177,6 +190,46 @@ func colourCursorPixel(px [4]byte, andBit byte, xorBpp int, x, y int) [4]byte {
 	// An AND bit of zero uses the colour as it is. A 24bpp pointer has no alpha
 	// to use, so the pixel is made opaque.
 	if xorBpp <= 3 {
+		px[3] = 0xff
+	}
+	return px
+}
+
+// andMaskIsSetAlmostEverywhere reports whether an AND mask is set for at least
+// nine pixels in ten. Such a mask cannot be describing which pixels are see
+// through, because a pointer is not 90% holes.
+func andMaskIsSetAlmostEverywhere(and []byte, w, h int) bool {
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	row := pdu.AndMaskRowBytes(w)
+	if row <= 0 {
+		return false
+	}
+	set := 0
+	total := w * h
+	for y := 0; y < h; y++ {
+		off := y * row
+		for x := 0; x < w; x++ {
+			if bitAt(and, off, x) == 1 {
+				set++
+			}
+		}
+	}
+	return set*10 >= total*9
+}
+
+// colourCursorFromXor takes a colour pointer's own pixels as the picture, for a
+// shape whose AND mask is not usable. A 32bpp pointer carries its transparency
+// in the alpha channel and is left alone. A 24bpp one has none, and its
+// background is black, so black becomes transparent and everything else is
+// opaque: drawing the black as a colour would put a black square behind the
+// pointer.
+func colourCursorFromXor(px [4]byte, xorBpp int) [4]byte {
+	if xorBpp <= 3 {
+		if px[0] == 0 && px[1] == 0 && px[2] == 0 {
+			return [4]byte{}
+		}
 		px[3] = 0xff
 	}
 	return px
