@@ -199,7 +199,10 @@ func playInput(c *client.Client, events []string) {
 			d, _ := strconv.Atoi(xy[2])
 			c.MouseMove(x, y)
 			time.Sleep(80 * time.Millisecond)
-			c.MouseWheel(d, x, y)
+			// The argument is in notches, and one notch is WheelDelta units.
+			// Passing a notch count straight through sends one unit, which is a
+			// hundred and twentieth of a notch and scrolls nothing.
+			c.MouseWheel(d*client.WheelDelta, x, y)
 		case "mdown":
 			xy := strings.SplitN(parts[1], ",", 2)
 			if len(xy) != 2 {

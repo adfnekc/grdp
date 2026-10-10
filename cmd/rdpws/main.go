@@ -234,7 +234,10 @@ func (g *gateway) handleInput(raw []byte) {
 	case "up":
 		c.MouseUp(in.Button, in.X, in.Y)
 	case "wheel":
-		c.MouseWheel(in.Scroll, in.X, in.Y)
+		// The browser sends one notch per event as a sign, and one notch is
+		// WheelDelta units. Sending the sign straight through sends a single
+		// unit, a hundred and twentieth of a notch, which scrolls nothing.
+		c.MouseWheel(in.Scroll*client.WheelDelta, in.X, in.Y)
 	case "keydown":
 		c.KeyDown(in.Scan, "")
 	case "keyup":

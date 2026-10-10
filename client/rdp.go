@@ -420,19 +420,49 @@ func (c *RdpClient) MouseMove(x, y int) {
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
-// MouseWheel turns the wheel by scroll notches at (x, y); positive is up.
+// WheelDelta is one notch of the wheel in the units the pointer event's rotation
+// field counts in. It is the value Windows calls WHEEL_DELTA, and the value a
+// caller should pass to [Client.MouseWheel] for a single notch.
+const WheelDelta = 120
+
+// The rotation travels in a nine bit signed field, so its range is -256 to 255.
+// A value outside it is clamped rather than wrapped, because wrapping a scroll
+// up into a scroll down is a worse failure than a shorter scroll.
+const (
+	minWheelRotation = -1 << 8
+	maxWheelRotation = 1<<8 - 1
+)
+
+// MouseWheel turns the wheel by scroll units at (x, y); a positive value is up,
+// away from the user, and one notch is [WheelDelta].
+//
+// The rotation is a signed value inside the nine bit WheelRotationMask field, and
+// PTRFLAGS_WHEEL_NEGATIVE is that field's sign bit rather than a flag to set
+// beside a magnitude. MS-RDPBCGR says the value "is negative if the
+// PTRFLAGS_WHEEL_NEGATIVE flag is set" and "MUST be sign-extended before
+// injection at the server", so one notch down is 0x188, the two's complement of
+// -120, and not 0x0100|0x78: the two agree on the sign bit and differ by sixteen
+// units in the value, which the server reads as -136 where -120 was meant.
+// FreeRDP's X11 client sent the second form until 2023 and fixed it for exactly
+// this reason.
+//
+// A wheel event carries the rotation and nothing else, because "all other pointer
+// flags are ignored" in a wheel rotation event. In particular it carries no
+// PTRFLAGS_MOVE, which is the mistake that made Windows drop button events.
 func (c *RdpClient) MouseWheel(scroll, x, y int) {
 	if c == nil || c.pdu == nil {
 		return
 	}
-	p := &pdu.PointerEvent{}
-	p.PointerFlags |= pdu.PTRFLAGS_WHEEL | pdu.PTRFLAGS_MOVE
-	rotation := scroll
-	if rotation < 0 {
-		p.PointerFlags |= pdu.PTRFLAGS_WHEEL_NEGATIVE
-		rotation = -rotation
+	if scroll > maxWheelRotation {
+		scroll = maxWheelRotation
+	} else if scroll < minWheelRotation {
+		scroll = minWheelRotation
 	}
-	p.PointerFlags |= uint16(rotation) & pdu.WheelRotationMask
+	p := &pdu.PointerEvent{}
+	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
+	// Masking the signed value into the field is what produces the two's
+	// complement: -120 is 0xff88, and 0xff88 & 0x01ff is 0x0188.
+	p.PointerFlags |= uint16(scroll) & pdu.WheelRotationMask
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})

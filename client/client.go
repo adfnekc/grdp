@@ -349,8 +349,11 @@ func (c *Client) MouseMove(x, y int) {
 	c.ctl.MouseMove(x, y)
 }
 
-// MouseWheel turns the wheel by scroll notches at (x, y); positive is up (away
-// from the user) and the magnitude is clamped to the protocol's 9 bit field.
+// MouseWheel turns the wheel by scroll units at (x, y); positive is up, away from
+// the user, and one notch is [WheelDelta]. The value is a signed magnitude in the
+// protocol's nine bit rotation field, whose sign bit is PTRFLAGS_WHEEL_NEGATIVE;
+// see [RdpClient.MouseWheel] for what that means for the value sent. A value
+// outside the field's range is clamped rather than wrapped.
 func (c *Client) MouseWheel(scroll, x, y int) {
 	c.ctl.MouseWheel(scroll, x, y)
 }

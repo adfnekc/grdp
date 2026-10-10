@@ -99,3 +99,68 @@ func TestMouseButtonOutOfRangeSendsNothing(t *testing.T) {
 		}
 	}
 }
+
+// The wheel's rotation is a signed value inside a nine bit field, and
+// PTRFLAGS_WHEEL_NEGATIVE is that field's sign bit rather than a flag to set
+// beside a magnitude.
+//
+// MS-RDPBCGR defines PTRFLAGS_WHEEL_NEGATIVE as saying that "the wheel rotation
+// value (contained in the WheelRotationMask bit field) is negative and MUST be
+// sign-extended before injection at the server", so the field carries the
+// negative value itself. A notch down is therefore 0x0188, the two's complement
+// of -120, and not 0x0100|0x78, which a server sign-extends to -136. FreeRDP's
+// X11 client sent the second form until 2023 and changed it to 0x188 for exactly
+// this reason.
+//
+// A wheel event also carries no PTRFLAGS_MOVE: "the only valid flags in a vertical
+// wheel rotation event are PTRFLAGS_WHEEL_NEGATIVE and the WheelRotationMask; all
+// other pointer flags are ignored", and a stray movement bit on an event is what
+// made a Windows target drop button events.
+func TestMouseWheelCarriesASignedRotation(t *testing.T) {
+	cases := []struct {
+		scroll int
+		want   []byte
+	}{
+		{WheelDelta, []byte{0x20, 0x78, 0x02, 0x23, 0x01, 0x56, 0x04}},
+		{-WheelDelta, []byte{0x20, 0x88, 0x03, 0x23, 0x01, 0x56, 0x04}},
+		{1, []byte{0x20, 0x01, 0x02, 0x23, 0x01, 0x56, 0x04}},
+		{-1, []byte{0x20, 0xff, 0x03, 0x23, 0x01, 0x56, 0x04}},
+		{0, []byte{0x20, 0x00, 0x02, 0x23, 0x01, 0x56, 0x04}},
+		// Past the ends of the field: clamped, not wrapped, because wrapping a
+		// scroll up into a scroll down would be worse than a shorter scroll.
+		{1000, []byte{0x20, 0xff, 0x02, 0x23, 0x01, 0x56, 0x04}},
+		{-1000, []byte{0x20, 0x00, 0x03, 0x23, 0x01, 0x56, 0x04}},
+	}
+	for _, tc := range cases {
+		fp := &capFastPath{}
+		c := newInputClient(fp)
+		c.MouseWheel(tc.scroll, 0x0123, 0x0456)
+		if !bytes.Equal(fp.data, tc.want) {
+			t.Errorf("MouseWheel(%d): data = % X, want % X", tc.scroll, fp.data, tc.want)
+		}
+	}
+}
+
+// What a server does with the field, done here: mask it out of the flags and sign
+// extend it. Every value whose two's complement fits must come back as itself.
+func TestMouseWheelRotationSignExtends(t *testing.T) {
+	decode := func(event []byte) int {
+		flags := int(event[1]) | int(event[2])<<8
+		v := flags & pdu.WheelRotationMask
+		if v&pdu.PTRFLAGS_WHEEL_NEGATIVE != 0 {
+			v -= 1 << 9
+		}
+		return v
+	}
+	for _, scroll := range []int{-256, -255, -120, -2, -1, 0, 1, 2, 120, 255} {
+		fp := &capFastPath{}
+		c := newInputClient(fp)
+		c.MouseWheel(scroll, 0, 0)
+		if len(fp.data) != 7 {
+			t.Fatalf("MouseWheel(%d): sent % X, want one wheel event", scroll, fp.data)
+		}
+		if got := decode(fp.data); got != scroll {
+			t.Errorf("MouseWheel(%d): the server reads %d", scroll, got)
+		}
+	}
+}
