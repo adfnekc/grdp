@@ -136,7 +136,7 @@ func cursorFromShape(s *pdu.PointerShape) *Cursor {
 					return nil
 				}
 				if andIsSet {
-					px = colourCursorFromXor(px, s.XorBpp)
+					px = colourCursorFromXor(px, andBit, s.XorBpp)
 				} else {
 					px = colourCursorPixel(px, andBit, s.XorBpp, x, y)
 				}
@@ -220,12 +220,23 @@ func andMaskIsSetAlmostEverywhere(and []byte, w, h int) bool {
 }
 
 // colourCursorFromXor takes a colour pointer's own pixels as the picture, for a
-// shape whose AND mask is not usable. A 32bpp pointer carries its transparency
-// in the alpha channel and is left alone. A 24bpp one has none, and its
-// background is black, so black becomes transparent and everything else is
-// opaque: drawing the black as a colour would put a black square behind the
-// pointer.
-func colourCursorFromXor(px [4]byte, xorBpp int) [4]byte {
+// shape whose AND mask is not usable as a transparency mask.
+//
+// A 32bpp pointer carries its transparency in the alpha channel and is left
+// alone. A 24bpp one has none, and its background is black, so black becomes
+// transparent and everything else is opaque: drawing the black as a colour would
+// put a black square behind the pointer.
+//
+// The AND mask is still read, but the other way round from the rule it usually
+// follows. When it is set for almost every pixel, the few it clears are the
+// pixels that are not part of the pointer rather than the ones that are: on the
+// captured I beam those four clear bytes are a single row holding two near black
+// pixels of a colour the rest of the shape does not use, which drew as a short
+// line below the pointer. The I beam itself sits where the mask is set.
+func colourCursorFromXor(px [4]byte, andBit byte, xorBpp int) [4]byte {
+	if andBit == 0 {
+		return [4]byte{}
+	}
 	if xorBpp <= 3 {
 		if px[0] == 0 && px[1] == 0 && px[2] == 0 {
 			return [4]byte{}

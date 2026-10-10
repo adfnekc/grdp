@@ -48,10 +48,12 @@ func TestColourPointerWithUnusableAndMaskUsesTheXorPicture(t *testing.T) {
 			}
 		}
 	}
-	// The XOR mask has 46 pixels that are not the black background. Under the
-	// AND rule that used to run, this came out as 40, in four dots.
-	if opaque != 46 {
-		t.Errorf("the I beam draws %d opaque pixels, want 46", opaque)
+	// The XOR mask has 46 pixels that are not the black background, but two of
+	// them are a stray pair in the one row the AND mask clears, which are not
+	// part of the pointer. Under the AND rule that used to run this came out as
+	// 40 pixels in four dots.
+	if opaque != 44 {
+		t.Errorf("the I beam draws %d opaque pixels, want 44", opaque)
 	}
 
 	// It has to come out as an I beam: a vertical bar with a cap at each end,
@@ -85,9 +87,9 @@ func TestColourPointerWithUnusableAndMaskUsesTheXorPicture(t *testing.T) {
 	if cap := row(17); cap < 6 {
 		t.Errorf("the bottom cap is %d pixels wide, want a cap", cap)
 	}
-	for _, y := range []int{0, 1} {
+	for _, y := range []int{0, 1, cur.Height - 1} {
 		if n := row(y); n != 0 {
-			t.Errorf("row %d has %d drawn pixels; the top of an I beam is empty", y, n)
+			t.Errorf("row %d has %d drawn pixels; the top of an I beam is empty and nothing is drawn below it", y, n)
 		}
 	}
 }
