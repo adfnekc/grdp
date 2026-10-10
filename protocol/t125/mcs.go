@@ -69,7 +69,7 @@ const (
 // real server sends does not decode as either. Against a local xrdp a takeover
 // arrives as
 //
-//     tpkt recvData 02 f0 80 21 80
+//	tpkt recvData 02 f0 80 21 80
 //
 // where 21 is the option byte naming disconnectProviderUltimatum and 80 is the
 // reason, and 0x80 is not a value a five alternative Reason can hold. Guessing

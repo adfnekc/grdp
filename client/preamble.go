@@ -89,4 +89,3 @@ func (c *RdpClient) SendInputPreamble(toggleFlags uint32) error {
 	})
 	return nil
 }
-

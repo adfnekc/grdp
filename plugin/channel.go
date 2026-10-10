@@ -177,7 +177,6 @@ const (
 	RDPGFX_DVC_CHANNEL_NAME = "Microsoft::Windows::RDS::Graphics" // graphics
 )
 
-
 const (
 	CHANNEL_CHUNK_LENGTH       = 1600
 	CHANNEL_FLAG_FIRST         = 0x01

@@ -2,10 +2,10 @@ package tpkt
 
 import (
 	"bytes"
-	"sync"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"

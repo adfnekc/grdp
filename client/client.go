@@ -5,10 +5,10 @@ import (
 
 	"context"
 	"errors"
-	"net"
 	"fmt"
 	"github.com/adfnekc/grdp/orders"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -305,7 +305,9 @@ type serverEndedError struct {
 	err error
 }
 
-func (e *serverEndedError) Error() string { return ErrSessionEndedByServer.Error() + ": " + e.err.Error() }
+func (e *serverEndedError) Error() string {
+	return ErrSessionEndedByServer.Error() + ": " + e.err.Error()
+}
 
 func (e *serverEndedError) Is(target error) bool { return target == ErrSessionEndedByServer }
 

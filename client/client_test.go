@@ -39,14 +39,14 @@ func (f *fakeCtl) Login(host, user, passwd string, w, h int) error {
 	}
 	return f.loginErr
 }
-func (f *fakeCtl) KeyUp(sc int, name string)     {}
-func (f *fakeCtl) KeyDown(sc int, name string)   {}
-func (f *fakeCtl) UnicodeKeyDown(r rune)         {}
-func (f *fakeCtl) UnicodeKeyUp(r rune)           {}
-func (f *fakeCtl) MouseMove(x, y int)            {}
-func (f *fakeCtl) MouseWheel(scroll, x, y int)   {}
-func (f *fakeCtl) MouseUp(button, x, y int)      {}
-func (f *fakeCtl) MouseDown(button, x, y int)    {}
+func (f *fakeCtl) KeyUp(sc int, name string)                {}
+func (f *fakeCtl) KeyDown(sc int, name string)              {}
+func (f *fakeCtl) UnicodeKeyDown(r rune)                    {}
+func (f *fakeCtl) UnicodeKeyUp(r rune)                      {}
+func (f *fakeCtl) MouseMove(x, y int)                       {}
+func (f *fakeCtl) MouseWheel(scroll, x, y int)              {}
+func (f *fakeCtl) MouseUp(button, x, y int)                 {}
+func (f *fakeCtl) MouseDown(button, x, y int)               {}
 func (f *fakeCtl) SendSynchronize(toggleFlags uint32) error { return nil }
 func (f *fakeCtl) SendInputPreamble(toggleFlags uint32) error {
 	return nil

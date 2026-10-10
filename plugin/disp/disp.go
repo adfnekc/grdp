@@ -17,8 +17,8 @@ import (
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
-	"github.com/adfnekc/grdp/plugin"
 	"github.com/adfnekc/grdp/glog"
+	"github.com/adfnekc/grdp/plugin"
 )
 
 // DVCChannelName is the dynamic virtual channel this package speaks on.

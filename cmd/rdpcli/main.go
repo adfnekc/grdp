@@ -22,10 +22,10 @@ import (
 
 	"github.com/adfnekc/grdp/client"
 	"github.com/adfnekc/grdp/glog"
-	"github.com/adfnekc/grdp/protocol/x224"
 	"github.com/adfnekc/grdp/orders"
 	"github.com/adfnekc/grdp/plugin/rdpgfx"
 	"github.com/adfnekc/grdp/protocol/pdu"
+	"github.com/adfnekc/grdp/protocol/x224"
 )
 
 // keySeq collects repeatable -key input events.

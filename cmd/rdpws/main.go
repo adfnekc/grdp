@@ -30,10 +30,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -58,15 +58,15 @@ const binaryHeader = 10
 
 // gateway is one RDP session and the browsers watching it.
 type gateway struct {
-	client *client.Client
+	client  *client.Client
 	quality int
 
-	mu     sync.Mutex
-	conns  map[*websocket.Conn]bool
-	dirty  []image.Rectangle
+	mu    sync.Mutex
+	conns map[*websocket.Conn]bool
+	dirty []image.Rectangle
 	// frames counts what has been encoded, which is what the selftest asserts
 	// on: a gateway that connected and produced nothing is not working.
-	frames int
+	frames    int
 	lastFrame []byte
 }
 

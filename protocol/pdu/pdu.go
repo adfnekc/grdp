@@ -2,8 +2,8 @@ package pdu
 
 import (
 	"bytes"
-	"sync"
 	"io"
+	"sync"
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
