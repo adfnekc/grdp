@@ -2,7 +2,6 @@ package pdu
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -281,15 +280,25 @@ const (
 )
 
 const (
-	PTRFLAGS_HWHEEL         = 0x0400
-	PTRFLAGS_WHEEL          = 0x0200
+	PTRFLAGS_HWHEEL  = 0x0400
+	PTRFLAGS_WHEEL   = 0x0200
+	PTRFLAGS_MOVE    = 0x0800
+	PTRFLAGS_DOWN    = 0x8000
+	PTRFLAGS_BUTTON1 = 0x1000
+	PTRFLAGS_BUTTON2 = 0x2000
+	PTRFLAGS_BUTTON3 = 0x4000
+
+	// PTRFLAGS_WHEEL_NEGATIVE is the sign bit of the rotation value that travels
+	// in WheelRotationMask, and not a flag to combine with a positive magnitude:
+	// MS-RDPBCGR defines it as saying that the value in that field "is negative
+	// and MUST be sign-extended before injection at the server". One notch down
+	// is therefore 0x0188, which is the two's complement of -120, and not
+	// 0x0100|0x78, which a server reads as -136.
 	PTRFLAGS_WHEEL_NEGATIVE = 0x0100
-	WheelRotationMask       = 0x01FF
-	PTRFLAGS_MOVE           = 0x0800
-	PTRFLAGS_DOWN           = 0x8000
-	PTRFLAGS_BUTTON1        = 0x1000
-	PTRFLAGS_BUTTON2        = 0x2000
-	PTRFLAGS_BUTTON3        = 0x4000
+
+	// WheelRotationMask covers the nine bit signed rotation field, so bit 8 is
+	// the sign. See PTRFLAGS_WHEEL_NEGATIVE.
+	WheelRotationMask = 0x01FF
 )
 
 const (
@@ -889,7 +898,7 @@ func readCapability(r io.Reader) (Capability, error) {
 		return nil, nil
 	}
 	if err := struc.Unpack(capReader, c); err != nil {
-		glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
+		glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), glog.Hex(capBytes))
 		return nil, err
 	}
 	glog.Debugf("Capability<%s>: %+v", c.Type(), c)

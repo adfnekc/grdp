@@ -7,7 +7,6 @@ import (
 	"crypto/rc4"
 	"crypto/rsa"
 	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -309,7 +308,7 @@ func (s *SEC) Close() error {
 }
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) (n int, err error) {
-	glog.Trace("sendFlagged:", hex.EncodeToString(data))
+	glog.Trace("sendFlagged:", glog.Hex(data))
 	b := s.encryt(flag, data)
 	return s.transport.Write(b)
 }
@@ -504,7 +503,7 @@ func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
 	s.encryptRc4.XORKeyStream(plaintext, data)
 	b.Write(sign)
 	b.Write(plaintext)
-	glog.Debug("sign:", hex.EncodeToString(sign), "plaintext:", hex.EncodeToString(plaintext))
+	glog.Debug("sign:", glog.Hex(sign), "plaintext:", glog.Hex(plaintext))
 	return b.Bytes()
 }
 
@@ -767,21 +766,21 @@ func generateKeys(clientRandom, serverRandom []byte, method uint32) ([]byte, []b
 	b.Write(clientRandom[:24])
 	b.Write(serverRandom[:24])
 	preMasterHash := b.Bytes()
-	glog.Debug("preMasterHash:", hex.EncodeToString(preMasterHash))
+	glog.Debug("preMasterHash:", glog.Hex(preMasterHash))
 
 	masterHash := masterSecret(preMasterHash, clientRandom, serverRandom)
-	glog.Debug("masterHash:", hex.EncodeToString(masterHash))
+	glog.Debug("masterHash:", glog.Hex(masterHash))
 
 	sessionKey := sessionKeyBlob(masterHash, clientRandom, serverRandom)
-	glog.Debug("sessionKey:", hex.EncodeToString(sessionKey))
+	glog.Debug("sessionKey:", glog.Hex(sessionKey))
 
 	macKey128 := sessionKey[:16]
 	initialFirstKey128 := finalHash(sessionKey[16:32], clientRandom, serverRandom)
 	initialSecondKey128 := finalHash(sessionKey[32:48], clientRandom, serverRandom)
 
-	glog.Debug("macKey128:", hex.EncodeToString(macKey128))
-	glog.Debug("FirstKey128:", hex.EncodeToString(initialFirstKey128))
-	glog.Debug("SecondKey128:", hex.EncodeToString(initialSecondKey128))
+	glog.Debug("macKey128:", glog.Hex(macKey128))
+	glog.Debug("FirstKey128:", glog.Hex(initialFirstKey128))
+	glog.Debug("SecondKey128:", glog.Hex(initialSecondKey128))
 	//generate valid key
 	if method == gcc.ENCRYPTION_FLAG_40BIT {
 		return gen40bits(macKey128), gen40bits(initialFirstKey128), gen40bits(initialSecondKey128)
@@ -819,7 +818,7 @@ func (c *Client) sendClientRandom() error {
 	glog.Debug("send Client Random")
 
 	clientRandom := core.Random(32)
-	glog.Debug("clientRandom:", hex.EncodeToString(clientRandom))
+	glog.Debug("clientRandom:", glog.Hex(clientRandom))
 
 	ssd := c.ServerSecurityData()
 	if ssd == nil {
@@ -827,7 +826,7 @@ func (c *Client) sendClientRandom() error {
 	}
 
 	serverRandom := ssd.ServerRandom
-	glog.Debug("ServerRandom:", hex.EncodeToString(serverRandom))
+	glog.Debug("ServerRandom:", glog.Hex(serverRandom))
 	if len(serverRandom) != 32 {
 		return fmt.Errorf("sec: server random is %d bytes, want 32", len(serverRandom))
 	}
@@ -894,7 +893,7 @@ func (c *Client) sendInfoPkt() {
 }
 
 func (c *Client) recvLicenceInfo(channel string, s []byte) {
-	glog.Debug("sec recvLicenceInfo", hex.EncodeToString(s))
+	glog.Debug("sec recvLicenceInfo", glog.Hex(s))
 	r := bytes.NewReader(s)
 	h := readSecurityHeader(r)
 	if (h.securityFlag & LICENSE_PKT) == 0 {
@@ -1107,7 +1106,7 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 }
 
 func (c *Client) recvData(channel string, s []byte) {
-	glog.Trace("sec recvData", hex.EncodeToString(s))
+	glog.Trace("sec recvData", glog.Hex(s))
 	glog.Debugf("channel<%s> data len: %d", channel, len(s))
 	data := c.decrytData(s)
 	if channel != t125.GLOBAL_CHANNEL_NAME {
@@ -1134,7 +1133,7 @@ func (c *Client) SetChannelSender(f core.ChannelSender) {
 
 func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	if !c.enableEncryption {
-		glog.Debug("Sec Client write", hex.EncodeToString(b))
+		glog.Debug("Sec Client write", glog.Hex(b))
 		return c.channelSender.SendToChannel(channel, b)
 	}
 	var flag uint16 = ENCRYPT
@@ -1147,6 +1146,6 @@ func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	core.WriteUInt16LE(flag, buff)
 	core.WriteUInt16LE(0, buff)
 	core.WriteBytes(data, buff)
-	glog.Debug("Sec Client write", channel, hex.EncodeToString(buff.Bytes()))
+	glog.Debug("Sec Client write", channel, glog.Hex(buff.Bytes()))
 	return c.channelSender.SendToChannel(channel, buff.Bytes())
 }

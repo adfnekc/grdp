@@ -3,7 +3,6 @@ package pdu
 import (
 	"bytes"
 	"sync"
-	"encoding/hex"
 	"io"
 
 	"github.com/adfnekc/grdp/core"
@@ -124,7 +123,7 @@ func NewPDULayer(t core.Transport) *PDULayer {
 func (p *PDULayer) sendPDU(message PDUMessage) {
 	pdu := NewPDU(p.userId, message)
 	b := pdu.serialize()
-	glog.Trace("pdu send:", hex.EncodeToString(b))
+	glog.Trace("pdu send:", glog.Hex(b))
 	p.transport.Write(b)
 }
 
@@ -231,7 +230,7 @@ func (c *Client) ServerCapabilities() map[CapsType]Capability {
 }
 
 func (c *Client) recvDemandActivePDU(s []byte) {
-	glog.Trace("PDU recvDemandActivePDU", hex.EncodeToString(s))
+	glog.Trace("PDU recvDemandActivePDU", glog.Hex(s))
 	r := bytes.NewReader(s)
 	pdu, err := readPDU(r)
 	if err != nil {
@@ -441,7 +440,7 @@ func (c *Client) recvServerFontMapPDU(s []byte) {
 }
 
 func (c *Client) recvPDU(s []byte) {
-	glog.Trace("PDU recvPDU", hex.EncodeToString(s))
+	glog.Trace("PDU recvPDU", glog.Hex(s))
 	r := bytes.NewReader(s)
 	if r.Len() > 0 {
 		p, err := readPDU(r)
@@ -474,7 +473,7 @@ func (c *Client) recvPDU(s []byte) {
 }
 
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
-	glog.Trace("PDU RecvFastPath", hex.EncodeToString(s))
+	glog.Trace("PDU RecvFastPath", glog.Hex(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
 		updateHeader, err := core.ReadUInt8(r)

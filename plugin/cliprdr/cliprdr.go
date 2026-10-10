@@ -3,7 +3,6 @@ package cliprdr
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -735,7 +734,7 @@ func (c *CliprdrClient) ReadRemoteFile(index uint32, off int64, n int) ([]byte, 
 
 // Send(s []byte) writes a cliprdr PDU on the static channel.
 func (c *CliprdrClient) Send(s []byte) (int, error) {
-	glog.Debug("len:", len(s), "data:", hex.EncodeToString(s))
+	glog.Debug("len:", len(s), "data:", glog.Hex(s))
 	name, _ := c.GetType()
 	return c.w.SendToChannel(name, s)
 }
@@ -753,7 +752,7 @@ func (c *CliprdrClient) GetType() (string, uint32) {
 // Process consumes one channel payload. It may hold several PDUs, so the
 // payload is walked using each PDU's own declared length.
 func (c *CliprdrClient) Process(s []byte) {
-	glog.Debug("recv:", hex.EncodeToString(s))
+	glog.Debug("recv:", glog.Hex(s))
 	r := bytes.NewReader(s)
 
 	// A channel payload can hold several PDUs, and a server may append

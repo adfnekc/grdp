@@ -6,7 +6,6 @@ package drdynvc
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -283,7 +282,7 @@ func readVarLength(r io.Reader, sp uint8) (uint32, error) {
 
 // Process handles one reassembled drdynvc channel payload.
 func (c *DvcClient) Process(s []byte) {
-	glog.Tracef("drdynvc: recv %s", hex.EncodeToString(s))
+	glog.Tracef("drdynvc: recv %s", glog.Hex(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
 		h, err := readHeader(r)

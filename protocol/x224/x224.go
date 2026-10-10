@@ -3,7 +3,6 @@ package x224
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -253,7 +252,7 @@ func (x *X224) Write(b []byte) (n int, err error) {
 	}
 	buff.Write(b)
 
-	glog.Trace("x224 write:", hex.EncodeToString(buff.Bytes()))
+	glog.Trace("x224 write:", glog.Hex(buff.Bytes()))
 	return x.transport.Write(buff.Bytes())
 }
 
@@ -307,7 +306,7 @@ func (x *X224) ConnectContext(ctx context.Context) error {
 	message.ProtocolNeg.Type = TYPE_RDP_NEG_REQ
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)
 
-	glog.Debug("x224 sendConnectionRequest", hex.EncodeToString(message.Serialize()))
+	glog.Debug("x224 sendConnectionRequest", glog.Hex(message.Serialize()))
 	if _, err := x.transport.Write(message.Serialize()); err != nil {
 		return fmt.Errorf("x224: send connection request: %w", err)
 	}
@@ -330,7 +329,7 @@ func (x *X224) signalConnect(err error) {
 }
 
 func (x *X224) recvConnectionConfirm(s []byte) {
-	glog.Debug("x224 recvConnectionConfirm ", hex.EncodeToString(s))
+	glog.Debug("x224 recvConnectionConfirm ", glog.Hex(s))
 	r := bytes.NewReader(s)
 	ln, _ := core.ReadUInt8(r)
 	if ln > 6 {
@@ -408,7 +407,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 }
 
 func (x *X224) recvData(s []byte) {
-	glog.Trace("x224 recvData", hex.EncodeToString(s), "emit data")
+	glog.Trace("x224 recvData", glog.Hex(s), "emit data")
 	// x224 data header takes 3 bytes
 	if len(s) < 3 {
 		glog.Warn("x224 recvData: short data PDU, dropping")

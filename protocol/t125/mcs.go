@@ -2,7 +2,6 @@ package t125
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -375,7 +374,7 @@ func (c *MCSClient) connect(selectedProtocol uint32) {
 }
 
 func (c *MCSClient) recvConnectResponse(s []byte) {
-	glog.Trace("mcs recvConnectResponse", hex.EncodeToString(s))
+	glog.Trace("mcs recvConnectResponse", glog.Hex(s))
 	cResp, err := ReadConnectResponse(bytes.NewReader(s))
 	if err != nil {
 		c.Emit("error", errors.New(fmt.Sprintf("ReadConnectResponse %v", err)))
@@ -428,7 +427,7 @@ func (c *MCSClient) sendAttachUserRequest() {
 }
 
 func (c *MCSClient) recvAttachUserConfirm(s []byte) {
-	glog.Debug("mcs recvAttachUserConfirm", hex.EncodeToString(s))
+	glog.Debug("mcs recvAttachUserConfirm", glog.Hex(s))
 	r := bytes.NewReader(s)
 
 	option, err := core.ReadUInt8(r)
@@ -503,7 +502,7 @@ func (c *MCSClient) sendChannelJoinRequest(channelId uint16) {
 }
 
 func (c *MCSClient) recvData(s []byte) {
-	glog.Trace("msc on data recvData:", hex.EncodeToString(s))
+	glog.Trace("msc on data recvData:", glog.Hex(s))
 
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
@@ -563,7 +562,7 @@ func (c *MCSClient) recvData(s []byte) {
 }
 
 func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
-	glog.Debug("mcs recvChannelJoinConfirm", hex.EncodeToString(s))
+	glog.Debug("mcs recvChannelJoinConfirm", glog.Hex(s))
 	r := bytes.NewReader(s)
 	option, err := core.ReadUInt8(r)
 	if err != nil {
@@ -613,7 +612,7 @@ func (c *MCSClient) Pack(data []byte, channelId uint16) []byte {
 	core.WriteUInt8(0x70, buff)
 	per.WriteLength(len(data), buff)
 	core.WriteBytes(data, buff)
-	glog.Trace("MCSClient write", channelId, ":", hex.EncodeToString(buff.Bytes()))
+	glog.Trace("MCSClient write", channelId, ":", glog.Hex(buff.Bytes()))
 	return buff.Bytes()
 }
 

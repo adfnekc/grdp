@@ -3,7 +3,6 @@ package tpkt
 import (
 	"bytes"
 	"sync"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -323,7 +322,7 @@ func derSequenceLen(b []byte) (int, bool) {
 }
 
 func (t *TPKT) recvChallenge(data []byte) error {
-	glog.Trace("recvChallenge", hex.EncodeToString(data))
+	glog.Trace("recvChallenge", glog.Hex(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
 		return fmt.Errorf("nla: decode challenge: %w", err)
@@ -379,7 +378,7 @@ func (t *TPKT) recvChallenge(data []byte) error {
 }
 
 func (t *TPKT) recvPubKeyInc(data []byte) error {
-	glog.Trace("recvPubKeyInc", hex.EncodeToString(data))
+	glog.Trace("recvPubKeyInc", glog.Hex(data))
 	tsreq, err := nla.DecodeDERTRequest(data)
 	if err != nil {
 		return fmt.Errorf("nla: decode public key confirmation: %w", err)
@@ -429,7 +428,7 @@ func (t *TPKT) Write(data []byte) (n int, err error) {
 	core.WriteUInt8(0, buff)
 	core.WriteUInt16BE(uint16(len(data)+4), buff)
 	buff.Write(data)
-	glog.Trace("tpkt Write", hex.EncodeToString(buff.Bytes()))
+	glog.Trace("tpkt Write", glog.Hex(buff.Bytes()))
 	return t.Conn.Write(buff.Bytes())
 }
 
@@ -446,7 +445,7 @@ func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 	core.WriteUInt8(FASTPATH_ACTION_FASTPATH|((secFlag&0x3)<<6), buff)
 	core.WriteUInt16BE(uint16(len(data)+3)|0x8000, buff)
 	buff.Write(data)
-	glog.Trace("TPTK SendFastPath", hex.EncodeToString(buff.Bytes()))
+	glog.Trace("TPTK SendFastPath", glog.Hex(buff.Bytes()))
 	return t.Conn.Write(buff.Bytes())
 }
 
@@ -463,12 +462,12 @@ func (t *TPKT) SendFastPathInput(numEvents byte, data []byte) (n int, err error)
 	core.WriteUInt8(FASTPATH_ACTION_FASTPATH|((numEvents&0x0F)<<2), buff)
 	core.WriteUInt16BE(uint16(len(data)+3)|0x8000, buff)
 	buff.Write(data)
-	glog.Trace("TPTK SendFastPathInput", hex.EncodeToString(buff.Bytes()))
+	glog.Trace("TPTK SendFastPathInput", glog.Hex(buff.Bytes()))
 	return t.Conn.Write(buff.Bytes())
 }
 
 func (t *TPKT) recvHeader(s []byte, err error) {
-	glog.Trace("tpkt recvHeader", hex.EncodeToString(s), err)
+	glog.Trace("tpkt recvHeader", glog.Hex(s), err)
 	if err != nil {
 		t.emitReadError(t.classifyAuthError(err, "read header"))
 		return
@@ -517,7 +516,7 @@ func (t *TPKT) emitReadError(err error) {
 }
 
 func (t *TPKT) recvExtendedHeader(s []byte, err error) {
-	glog.Trace("tpkt recvExtendedHeader", hex.EncodeToString(s), err)
+	glog.Trace("tpkt recvExtendedHeader", glog.Hex(s), err)
 	if err != nil {
 		t.emitReadError(err)
 		return
@@ -533,7 +532,7 @@ func (t *TPKT) recvExtendedHeader(s []byte, err error) {
 }
 
 func (t *TPKT) recvData(s []byte, err error) {
-	glog.Trace("tpkt recvData", hex.EncodeToString(s), err)
+	glog.Trace("tpkt recvData", glog.Hex(s), err)
 	if err != nil {
 		t.emitReadError(err)
 		return
@@ -546,7 +545,7 @@ func (t *TPKT) recvData(s []byte, err error) {
 }
 
 func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
-	glog.Trace("tpkt recvExtendedFastPathHeader", hex.EncodeToString(s))
+	glog.Trace("tpkt recvExtendedFastPathHeader", glog.Hex(s))
 	if err != nil {
 		t.emitReadError(err)
 		return

@@ -9,7 +9,6 @@ package rfb
 import (
 	"bytes"
 	"crypto/des"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -337,7 +336,7 @@ func fixDesKey(key []byte) []byte {
 }
 
 func (fc *RFBConn) recvVNCChallenge(s []byte, err error) {
-	glog.Debug("RFBConn recvVNCChallenge", hex.EncodeToString(s), len(s), err)
+	glog.Debug("RFBConn recvVNCChallenge", glog.Hex(s), len(s), err)
 	if err != nil {
 		fc.Emit("error", err)
 		return
@@ -587,7 +586,7 @@ func (fc *RFBConn) sendFramebufferUpdateRequest(Incremental uint8,
 	fc.Write(buff.Bytes())
 }
 func (fc *RFBConn) recvServerOrder(s []byte, err error) {
-	glog.Debug("RFBConn recvServerOrder", hex.EncodeToString(s), err)
+	glog.Debug("RFBConn recvServerOrder", glog.Hex(s), err)
 	if err != nil {
 		fc.Emit("error", err)
 		return
@@ -631,7 +630,7 @@ type Rectangles struct {
 }
 
 func (fc *RFBConn) recvFrameBufferUpdateHeader(s []byte, err error) {
-	glog.Debug("RFBConn recvFrameBufferUpdateHeader", hex.EncodeToString(s), err)
+	glog.Debug("RFBConn recvFrameBufferUpdateHeader", glog.Hex(s), err)
 	if err != nil {
 		fc.Emit("error", err)
 		return
@@ -666,7 +665,7 @@ type Rectangle struct {
 }
 
 func (fc *RFBConn) recvRectHeader(s []byte, err error) {
-	glog.Debug("RFBConn recvRectHeader", hex.EncodeToString(s), err)
+	glog.Debug("RFBConn recvRectHeader", glog.Hex(s), err)
 	if err != nil {
 		fc.Emit("error", err)
 		return

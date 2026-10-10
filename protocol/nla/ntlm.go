@@ -5,7 +5,6 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/binary"
-	"encoding/hex"
 	"time"
 
 	"github.com/adfnekc/grdp/core"
@@ -479,10 +478,10 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	md.Write(a)
 	ServerSealingKey := md.Sum(nil)
 
-	glog.Debugf("ClientSigningKey:%s", hex.EncodeToString(ClientSigningKey))
-	glog.Debugf("ServerSigningKey:%s", hex.EncodeToString(ServerSigningKey))
-	glog.Debugf("ClientSealingKey:%s", hex.EncodeToString(ClientSealingKey))
-	glog.Debugf("ServerSealingKey:%s", hex.EncodeToString(ServerSealingKey))
+	glog.Debugf("ClientSigningKey:%s", glog.Hex(ClientSigningKey))
+	glog.Debugf("ServerSigningKey:%s", glog.Hex(ServerSigningKey))
+	glog.Debugf("ClientSealingKey:%s", glog.Hex(ClientSealingKey))
+	glog.Debugf("ServerSealingKey:%s", glog.Hex(ServerSealingKey))
 
 	encryptRC4, _ := rc4.NewCipher(ClientSealingKey)
 	decryptRC4, _ := rc4.NewCipher(ServerSealingKey)
