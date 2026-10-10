@@ -82,13 +82,18 @@ knows where the pointer is and only needs the shape.
 ## Sending input
 
     c.MouseMove(x, y)
-    c.MouseDown(0, x, y)          // 0 left, 1 middle, 2 right
+    c.MouseDown(0, x, y)              // 0 left, 1 middle, 2 right
     c.MouseUp(0, x, y)
-    c.MouseWheel(notches, x, y)   // positive is away from the user
+    c.MouseWheel(client.WheelDelta, x, y)  // 120 units is one notch, up
 
     c.KeyDown(0x1c, "")           // PC set 1 scancodes
     c.KeyUp(0x1c, "")
     c.TypeText("你好", 8*time.Millisecond)
+
+The wheel counts rotation units, not notches: one notch is `client.WheelDelta`,
+which is Windows' `WHEEL_DELTA` of 120. A value is sent as a signed nine bit
+field, so the sign of the argument is what decides the direction; a caller that
+passes 1 for a notch sends a hundred and twentieth of one and scrolls nothing.
 
 Keys go as scancodes, which is what makes shortcuts work: control-c is a scancode
 for a key with a modifier, and no character can express it. Text goes as
@@ -202,7 +207,25 @@ at a server that disagreed, after unit tests had passed.
   specification's prose.** Every time that rule was broken here it cost a bug:
   the pointer mask padding, the fast path's release flag, the width of
   systemPointerType, and the ordering of the Display Control capabilities. The
-  prose was ambiguous or silently incomplete about all four.
+  prose was ambiguous or silently incomplete about all four. The rule has a second
+  half, which is to settle the question rather than to note it: the wheel's
+  rotation was queried as ambiguous here and turned out to be defined, with a
+  `MUST` and a FreeRDP commit behind it, and the code was wrong in two ways.
+
+* **A log line that is not written must not be paid for.** `glog.Hex` exists for
+  this. Putting `hex.EncodeToString(payload)` in a `glog.Trace` call encodes the
+  payload and then discovers that tracing is off, on every packet, at five layers
+  of the stack: measured at 4,194,382 bytes of garbage per 1 MiB received PDU, and
+  16% of a file transfer's CPU profile. The message must not be built before the
+  level is read, which is why the level check is inside `glog` and not at the call
+  site, where a later caller can get it wrong.
+
+* **The wheel's rotation is a signed nine bit value, and a notch is 120 units.**
+  `PTRFLAGS_WHEEL_NEGATIVE` is the sign bit of the rotation field, not a flag to
+  set beside a magnitude, so one notch down is `0x0188` and not `0x0100|0x78`.
+  `WheelDelta` is the 120. Passing a notch count as the argument sends one unit
+  instead of one notch, which scrolls nothing. See docs/input-verification.md for
+  the spec text and the FreeRDP commit that shows both forms side by side.
 
 * **A tag means a fix the maintainer has confirmed.** Do not tag a change on the
   strength of a test that could have passed for another reason, and do not tag
@@ -216,9 +239,10 @@ at a server that disagreed, after unit tests had passed.
   having because its three events have three different event codes and the fast
   path used to work the code out once per PDU, so the PDU could not be expressed
   at all; `SendInputEvents` now takes the code from each event and a PDU may mix
-  types freely. What it is not is a fix for a target that ignores mouse buttons:
-  it was measured against such a target and changed nothing, and the bytes of the
-  button events were already correct. Do not adopt it hoping for that.
+  types freely. It is not a fix for anything, and in particular not for the mouse
+  button faults that turned out to be a movement flag on the button events: the
+  preamble does not touch those, and sending it changed nothing. Do not adopt it
+  hoping for that.
 
 * **A listener can run twice at once, and that is fatal rather than awkward.**
   The emitter calls every listener in its own goroutine, so a handler registered

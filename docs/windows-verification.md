@@ -20,8 +20,7 @@ Verified end to end, using only this library:
 * **NLA / CredSSP** completes, including the version 6 public key binding.
 * **The desktop renders**: a full Windows session, taskbar, wallpaper and a
   `Command Prompt` window running `ipconfig`, decoded from RLE bitmap updates.
-* **Mouse and keyboard input** reach the session. Clicking the console window
-  focuses it, and typing
+* **Keyboard input** reaches the session: typing
 
   ```
   echo HELLO-FROM-GRDP
@@ -29,6 +28,13 @@ Verified end to end, using only this library:
 
   produces the expected output on screen, so modifier keys (the upper case
   letters need shift) and Enter are all delivered correctly.
+
+* **Mouse input** is covered in input-verification.md, and needed a fix that the
+  early rounds recorded in this file could not have found. An earlier version of
+  this list said that clicking the console window focused it; that shows nothing,
+  because the same test opened the window, so it was focused already. Button
+  events were in fact being dropped, and the reason was a `PTRFLAGS_MOVE` bit on
+  them that no other client sends.
 
 ## The disconnect ultimatum's reason byte is not decoded
 
@@ -174,9 +180,14 @@ to start now.
 
 ## Symptom: keyboard input that reaches nothing
 
-Mouse input works on this target: clicking a desktop icon highlights it and shows
-a tooltip. Typing produces no visible effect anywhere, including in the Start
-menu's search box after `Ctrl+Esc`, which does open it.
+Mouse input on this target is covered in input-verification.md, and was measured
+there with tests a hover cannot fake. An earlier note in this file called mouse
+input working because clicking a desktop icon highlighted it and showed a tooltip;
+a highlight and a tooltip appear on hover alone, so that proved nothing, and the
+clicks were in fact being dropped at the time.
+
+What this section is about is typing: it produces no visible effect anywhere,
+including in the Start menu's search box after `Ctrl+Esc`, which does open it.
 
 The control that matters: typing over the **slow** path behaves identically to the
 fast path, and the search box region is byte for byte the same in both. So this is

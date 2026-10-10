@@ -44,7 +44,7 @@ Fork 自 [tomatome/grdp](https://github.com/tomatome/grdp)，后者 fork 自
       已在 xrdp 上验证：它发的是双色光标，取回的热点值是真实光标该有的
       （箭头 `0,0`、工字 `4,8`），而不是垃圾值；并在**真实 Windows 10** 上验证：
       41×39 的箭头与工字分别有 145 到 352 个不透明像素
-* [x] 键盘与鼠标输入，含修饰键
+* [x] 键盘与鼠标输入（含修饰键）。按键事件只带 `PTRFLAGS_DOWN` 与具体按键位，这正是 FreeRDP 与 mstsc 发的东西；额外带上 `PTRFLAGS_MOVE` 会让 Windows 丢弃所有点击，而移动照常
 * [x] 剪贴板文本**双向**
 * [x] NSCodec 与 RemoteFX (RFX) 位图编解码器，**与 libfreerdp 的解码器逐字节比对**
 * [x] ZGFX（EGFX 通道承载消息所用的批量压缩），同样**与 libfreerdp 逐字节比对**，
@@ -147,14 +147,15 @@ selftest: ok — page has a canvas, size announced, 12881 bytes as JPEG (1024x76
 
 | | 依据 |
 | --- | --- |
-| 连接、TLS、NLA、许可、输入、剪贴板、位图更新 | 对 xrdp 0.9.24 与真实 Windows 10 运行过 |
+| 连接、TLS、NLA、许可、剪贴板、位图更新 | 对 xrdp 0.9.24 与真实 Windows 10 运行过 |
+| 鼠标与键盘输入 | 两边都运行过，且挑选**悬停伪造不了**的判据：指针移开后仍保持的选中、右键菜单、浮层、选择框。当初凭"悬停高亮"就断定"点击成功了"，正是这个让一个被丢掉的按键标志位藏了好几个月 |
 | Standard RDP Security | 对要求它的本地 xrdp 运行过，且与同目标 TLS 路径**逐像素相同** |
 | EGFX 渲染 | 整个 Windows 桌面经图形通道送达，并与位图路径对比 |
 | 绘图订单 | 整个 Windows 锁屏经位图缓存送达，两条路径差异仅剩时钟 |
 | VNC | 真实 TigerVNC：帧能收到，剪贴板双向可用 |
 | NSCodec、RemoteFX、ZGFX | 与 libfreerdp **逐字节**比对（输入由其编码器产生，期望输出由其解码器给出）|
 | Display Control | 真实 Windows 10 按请求改了桌面，帧缓冲随之到 1280x768 |
-| Windows 上的光标 | 真实 Windows 10：41×39、热点落在箭头尖端，并暴露了 xrdp 的双色光标永远不会走到的 AND 掩码规则 |
+| Windows 上的光标 | 真实 Windows 10：41×39、热点落在箭头尖端；32bpp 形状依自身 alpha 绘制，而 24bpp 的 AND 掩码几乎全置位、不可能是透明掩码，故依其 XOR 绘制 |
 | 健壮性 | 模糊测试（抓到 2 个死循环、3 个 panic；语料已留存）|
 | 形状/字形/九宫格/多矩形订单 | **仅**依据 FreeRDP 解析器 + 单测：没有可达服务端会发它们 |
 | AVC420 / AVC444 分帧 | **仅**依据 FreeRDP 解析器 + 单测：解码需要本库不自带的解码器 |

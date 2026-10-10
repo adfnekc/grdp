@@ -155,11 +155,6 @@ func (c *VncClient) KeyDown(sc int, name string) {
 	c.vnc.SendKeyEvent(k)
 }
 
-// UnicodeKeyDown implements the Control interface. RFB has no Unicode key
-// event: a KeyEvent carries an X11 keysym or a scancode and nothing else, so
-// there is no way to say which character an input method produced. The call is
-// accepted and logged rather than silently ignored, and Client.TypeText returns
-// an error on a VNC session instead of reaching here.
 // SendSynchronize implements the Control interface. RFB has no such event, so it
 // says so rather than dropping the request silently.
 func (c *VncClient) SendSynchronize(toggleFlags uint32) error {
@@ -171,6 +166,11 @@ func (c *VncClient) SendInputPreamble(toggleFlags uint32) error {
 	return ErrNoInputPreamble
 }
 
+// UnicodeKeyDown implements the Control interface. RFB has no Unicode key event:
+// a KeyEvent carries an X11 keysym or a scancode and nothing else, so there is no
+// way to say which character an input method produced. The call is accepted and
+// logged rather than silently ignored, and Client.TypeText returns an error on a
+// VNC session instead of reaching here.
 func (c *VncClient) UnicodeKeyDown(r rune) {
 	glog.Warnf("vnc: %U cannot be sent; RFB has no Unicode key event", r)
 }

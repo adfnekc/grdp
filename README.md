@@ -54,9 +54,14 @@ Verified against **xrdp 0.9.24** and against a real **Windows 10** host:
       cursors are reported as such, and a gateway gets RGBA with alpha from
       OnCursor. Verified against xrdp, which sends two colour cursors and whose
       shapes come back with the hotspots a real cursor has (arrow at 0,0, I beam
-      at 4,8) rather than garbage, and against a real Windows 10 host, whose
-      41x39 arrows and I beams come back with 145 to 352 opaque pixels each.
-* [x] Keyboard and mouse input, including modifier keys
+      at 4,8) rather than garbage, and against a real Windows 10 host, where a
+      32bpp shape is drawn from its alpha channel and a 24bpp one, whose AND mask
+      is set almost everywhere and so cannot be a transparency mask, is drawn
+      from its XOR.
+* [x] Keyboard and mouse input, including modifier keys. A button event carries
+      `PTRFLAGS_DOWN` and the button and nothing else, which is what FreeRDP and
+      mstsc send; carrying `PTRFLAGS_MOVE` as well made Windows drop every click
+      while accepting movement.
 * [x] Clipboard, text, both directions
 * [x] NSCodec and RemoteFX (RFX) bitmap codecs, checked byte for byte against
       libfreerdp's own decoder
@@ -202,14 +207,15 @@ without having been run against something that did not write the test.
 
 | | How it is known |
 | --- | --- |
-| Connection, TLS, NLA, licensing, input, clipboard, bitmap updates | Run against xrdp 0.9.24 and a real Windows 10 host |
+| Connection, TLS, NLA, licensing, clipboard, bitmap updates | Run against xrdp 0.9.24 and a real Windows 10 host |
+| Mouse and keyboard input | Run against both, with tests chosen so that a hover cannot fake them: a selection that survives the pointer moving away, a context menu, a flyout, a selection rectangle. Saying "the click worked" on the strength of a hover highlight is what hid a dropped button flag for months |
 | Standard RDP Security | Run against a local xrdp requiring it, and pixel-identical to the TLS path on the same target |
 | EGFX rendering | A whole Windows desktop through the graphics channel, compared against the bitmap path |
 | Drawing orders | A whole Windows lock screen through the bitmap cache, and the two drawing paths agree to the taskbar clock |
 | VNC | A real TigerVNC server: a frame arrives, and the clipboard works both ways |
 | NSCodec, RemoteFX, ZGFX | Byte for byte against libfreerdp, whose encoder produced the input and whose decoder produced the expected output |
 | Display Control | A real Windows 10 host resizes its desktop on request, and the framebuffer follows to 1280x768 |
-| Cursors on Windows | A real Windows 10 host: 41x39 shapes, hotspots at the arrow's tip, and the AND mask rule that xrdp's two colour cursors never exercise |
+| Cursors on Windows | A real Windows 10 host: 41x39 shapes, hotspots at the arrow's tip, and the 24bpp I beam whose AND mask is set almost everywhere, which xrdp's two colour cursors never exercise |
 | Robustness | Fuzzing, which found two infinite loops and three panics; the corpus is kept |
 | The shape, glyph, nine grid and multi rectangle orders | FreeRDP's parsers and unit tests only: no reachable server sends them |
 | The AVC420 and AVC444 framing | FreeRDP's parsers and unit tests only: decoding needs a decoder this does not ship |
@@ -300,6 +306,14 @@ several bugs were caught.
 
 ## Development
 
+The checks, all of which pass, and all of which are worth running before a
+commit. `gofmt -l .` printing anything is a failure, and `-race` matters because
+the receive path emits events to listeners in their own goroutines:
+
+	go build ./... && go vet ./... && go test ./... && go test -race ./...
+	CGO_ENABLED=0 go test ./...    // the library is pure Go
+	gofmt -l .
+
 `scripts/dev-rdp.sh` manages a local xrdp target for integration testing:
 `setup` (once, makes the rest passwordless), `up`, `down`, `status`, `probe`,
 `probe-session` (which prepares a session whose X input events are logged so that
@@ -322,9 +336,14 @@ display, and runs the live VNC tests against it.
 
 `cmd/rdpws -selftest` is the integration test for the headless path above.
 
-`go run ./cmd/docaudit ./...` lists exported identifiers that godoc will render
+`go run ./cmd/docaudit .` lists exported identifiers that godoc will render
 without a doc comment, which is the one thing that makes an API unpleasant to
-read from `go doc` alone.
+read from `go doc` alone. It takes directories rather than package patterns, so
+`.` is the whole tree and `./...` silently walks nothing and reports nothing
+missing. What it reports today is 531, almost all of it wire constants and
+structures in the protocol layers; `client`, `core`, `codec`, `orders`,
+`protocol/rfb`, the plugins, `glog` and the commands are at zero, and the number
+goes down rather than being declared.
 
 ## Take ideas from
 

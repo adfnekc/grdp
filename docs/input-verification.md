@@ -150,25 +150,14 @@ capability that gates fast path input, `INPUT_FLAG_FASTPATH_INPUT`, is advertise
 The slow path's event layout has no length field, which is correct, and it fails
 the same way.
 
-So the conclusion recorded here is a negative one: nothing in the client's input
-path is wrong that this repository can find, and the target ignores button events
-for a reason outside the PDU. An unverified candidate is worth naming, because it
-is testable: the target has Sunlogin and ToDesk installed, both remote control
-tools, and both install low level mouse hooks, which can swallow button messages
-while letting movement through. Stopping both and retrying would confirm or
-eliminate it, and a hook would affect mstsc and FreeRDP exactly as much as it
-affects this client, which is why the issue's statement that those work on this
-target should be treated as untested rather than as a contrast.
+None of that is where the fault was. What follows is what was checked before it was
+found, because the checks are the reason it took as long as it did, and because two
+of them produced changes that had to be reverted.
 
-What this repository can do about it, it now does: the input preamble is
-available, and a PDU may mix events of different types, which it could not
-before. Neither is offered as a fix, because neither fixed anything here.
+## What was ruled out first
 
-## Why the buttons do nothing there: what was ruled out
-
-The same target was used to check every part of the client's pointer path against
-outside references rather than reasoning, because "the bytes look right" had
-already been said once too often.
+The pointer path was checked against outside references rather than reasoning,
+because "the bytes look right" had already been said once too often.
 
 | Checked | Against | Result |
 |---|---|---|
@@ -191,7 +180,7 @@ between events. Both of those changes were reverted.
 The encoding was right on both paths, and that was the point: the fault was not in
 how an event is laid out but in **which flags were put in it**.
 
-## The button events carried a movement flag they should not have
+## What it was: a movement flag on the button events
 
 `MouseDown` and `MouseUp` both added `PTRFLAGS_MOVE` to their pointer event, so a
 click went out as
@@ -275,3 +264,54 @@ was claiming the buttons shipped in an earlier version still failed, and then th
 opposite, on the strength of a hung shell. The second was reading a selection
 rectangle into a screenshot that did not have one. Both came from looking rather than
 measuring, which this file already warned about.
+
+## The wheel's rotation is signed, and a notch is 120 units
+
+The wheel was reported as scrolling the wrong distance: counting notches on the
+remote, one direction moved about eight notches over fifty one wheel events and the
+other about four hundred and eighty over three hundred and eighty one, with the
+same distance travelled each way. Both numbers have the same cause, and there were
+three faults behind it.
+
+**The rotation is a signed value in a nine bit field.** MS-RDPBCGR defines
+`WheelRotationMask` as 0x01FF and `PTRFLAGS_WHEEL_NEGATIVE` as 0x0100, which are
+the same bit, and says of the flag that "the wheel rotation value (contained in the
+WheelRotationMask bit field) is negative and MUST be sign-extended before injection
+at the server". The value travels in the field; the flag is its sign bit. The code
+here set the sign bit and then put a positive magnitude beside it, so one notch down
+went out as `0x0100 | 0x78` where it should be `0x0188`: a server sign extends the
+first to -136 and the second to -120. FreeRDP shipped the same mistake in its X11
+client and fixed it in 2023, in
+[FreeRDP#6805](https://github.com/FreeRDP/FreeRDP/pull/6805), with exactly that
+substitution in `client/X11/xf_client.c`:
+
+```c
+-	{ Button5, PTR_FLAGS_WHEEL | PTR_FLAGS_WHEEL_NEGATIVE | 0x78 },
++	{ Button5, PTR_FLAGS_WHEEL | 0x188 },
+```
+
+Masking the signed value into the field is what produces the two's complement, so
+the fix is smaller than the fault was, and the value is now clamped to the field's
+range instead of wrapping: scaling a scroll up into a scroll down is a worse
+outcome than a shorter scroll.
+
+**The event carried `PTRFLAGS_MOVE`, which a wheel event does not have.** The only
+valid flags in a wheel rotation event are the sign bit and the rotation mask, "all
+other pointer flags are ignored", and FreeRDP's wheel entries above carry the
+rotation and nothing else. This is the same fault that made Windows drop button
+events, in the same place, and it is the reason both were looked for together.
+
+**A caller passing notches was sending units.** The field counts rotation units,
+not notches, and one notch is 120 of them, which Windows calls `WHEEL_DELTA`.
+`WheelDelta` is now exported and documented, and the two callers in this repository
+that passed 1 meaning "one notch" multiply by it. That is what explains the reported
+asymmetry: one direction was sent as a single unit, a hundred and twentieth of a
+notch, which scrolls nothing at all, and the other as `0x0100 | 1`, which a server
+sign extends to -255 units, about two notches. Eight notches over fifty events and
+four hundred and eighty over three hundred and eighty are those two errors, with
+the counts this client's own `MouseWheel` produced at the time.
+
+The tests pin the bytes for a notch each way and for the ends of the field, and
+decode the field back the way a server does, sign extending it, so a value that does
+not survive the round trip fails. What they cannot show is the remote scrolling the
+distance it should, which needs a scrollable window on a live target.

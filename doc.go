@@ -115,11 +115,26 @@
 //     and the pointer cache size in particular are contracts: advertise a
 //     pointer cache and the server stops resending shapes, so a client with
 //     nowhere to put them loses the cursor.
+//   - Input and the pointer are checked against a real server with tests a hover
+//     cannot fake. A hover highlight, a tooltip or an already focused window all
+//     look like success while the event is being dropped, which is how a button
+//     flag and a cursor mask each stayed wrong for months.
+//   - Logging a payload on a per packet path means [glog.Hex], never
+//     hex.EncodeToString at the call site. The encoding has to happen after the
+//     level is read, or it happens on every packet whether tracing is on or not.
 //
 // # Working on it
 //
-//	go build ./... && go vet ./... && go test ./...
-//	go run ./cmd/docaudit ./...       // exported identifiers with no doc comment
+//	go build ./... && go vet ./... && go test ./... && go test -race ./...
+//	CGO_ENABLED=0 go test ./...       // the library is pure Go
+//	gofmt -l .                        // must print nothing
+//	go run ./cmd/docaudit .           // exported identifiers with no doc comment
+//
+// docaudit takes directories, not package patterns: "./..." walks nothing and
+// reports nothing missing, which is how this API was believed documented while
+// it was not. The client package, the codecs, the orders, the commands and glog
+// report no gaps; the protocol layers report several hundred, nearly all of them
+// wire constants, and that number is meant to fall.
 //
 // scripts/dev-rdp.sh manages a local xrdp for integration testing and
 // scripts/vnc-dev.sh fetches TigerVNC without root for the RFB side. The
