@@ -128,14 +128,24 @@ type SurfaceCommand struct {
 
 // SurfaceCommandsPDU is the payload of FASTPATH_UPDATETYPE_SURFCMDS
 // (MS-RDPBCGR 2.2.9.2.1). It is a sequence of self describing commands.
+// SurfaceCommandsPDU is a group of surface commands, which is how a server sends
+// bitmap updates on the fast path once the client has advertised surface command
+// support. It is the same body the dynamic channel carries, in a different envelope.
 type SurfaceCommandsPDU struct {
 	Commands []SurfaceCommand
 }
 
+// FastPathUpdateType reports that this is a group of surface commands.
 func (*SurfaceCommandsPDU) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_SURFCMDS
 }
 
+// Unpack reads the surface commands and hands each one to the same handler the dynamic
+// channel uses, so a surface arriving either way is drawn the same.
+//
+// A command whose length does not fit in what is left of the message ends the update
+// rather than being trusted, which is what keeps a corrupt length from becoming an
+// allocation.
 func (f *SurfaceCommandsPDU) Unpack(r io.Reader) error {
 	// The payload is fully consumed by walking the command list, so the loop
 	// is bounded by the reader's remaining length rather than an error.

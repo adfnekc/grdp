@@ -52,6 +52,9 @@ const (
 	CAPSSETTYPE_FRAME_ACKNOWLEDGE             = 0x001E
 )
 
+// String names the capability type, for logs and errors. An unrecognised value is
+// reported as Unknown rather than as a number, which is the common case: a server
+// sends capability sets this client does not know.
 func (c CapsType) String() string {
 	switch c {
 	case CAPSTYPE_GENERAL:

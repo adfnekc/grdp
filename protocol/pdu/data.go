@@ -57,6 +57,8 @@ const (
 	PDUTYPE2_MONITOR_LAYOUT_PDU          = 0x37
 )
 
+// String names the data message type, for logs and errors. An unrecognised value is
+// reported as Unknown rather than as a number.
 func (p PduType2) String() string {
 	switch p {
 	case PDUTYPE2_UPDATE:
@@ -158,6 +160,8 @@ const (
 	FASTPATH_UPDATETYPE_LARGE_POINTER = 0xC
 )
 
+// String names the fast-path update type, for logs and errors. An unrecognised value
+// is reported as Unknown rather than as a number.
 func (t FastPathUpdateType) String() string {
 	switch t {
 	case FASTPATH_UPDATETYPE_ORDERS:
@@ -923,6 +927,7 @@ func (s *SaveSessionInfo) Unpack(r io.Reader) (err error) {
 	return err
 }
 
+// Type2 reports that this is a logon notification.
 func (*SaveSessionInfo) Type2() uint8 {
 	return PDUTYPE2_SAVE_SESSION_INFO
 }
@@ -945,10 +950,14 @@ type PersistKeyPDU struct {
 	Ppad3              uint16 `struc:"little"`
 }
 
+// Type2 reports that this is a persistent bitmap cache key list.
 func (*PersistKeyPDU) Type2() uint8 {
 	return PDUTYPE2_BITMAPCACHE_PERSISTENT_LIST
 }
 
+// UpdateData is the body of an update: the interface every update structure
+// implements, so that a list of them can be walked without knowing in advance what
+// kinds are in it.
 type UpdateData interface {
 	FastPathUpdateType() uint8
 	Unpack(io.Reader) error
@@ -1079,6 +1088,7 @@ func (f *FastPathColorPdu) Unpack(r io.Reader) error {
 type FastPathSurfaceCmds struct {
 }
 
+// FastPathUpdateType reports that this is a group of surface commands.
 func (*FastPathSurfaceCmds) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_SURFCMDS
 }
@@ -1416,6 +1426,7 @@ type PointerDataPDU struct {
 	LengthXorMask uint16
 }
 
+// Type2 reports that this is a pointer update.
 func (*PointerDataPDU) Type2() uint8 { return PDUTYPE2_POINTER }
 
 // Unpack reads a pointer update: the shape, the position, the cached shape reference

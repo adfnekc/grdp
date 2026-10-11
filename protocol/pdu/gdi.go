@@ -281,6 +281,12 @@ const (
 	GDI_GLYPH_ORDER = 0xFFFFFFFF
 )
 
+// Rop3CodeTable names the ROP3 opcodes, which say how a drawing order combines its
+// source, its pattern and the destination: a code is not a flag but an operation, so
+// the same value means something different for each order that carries one.
+//
+// It is used for logging and for the tests that check an opcode was decoded as the
+// protocol says.
 var Rop3CodeTable = map[int]string{
 	GDI_BLACKNESS:   "0",
 	GDI_DPSoon:      "DPSoon",

@@ -154,6 +154,9 @@ func readCacheGlyph(r *bytes.Reader) (Glyph, error) {
 // The fields are FreeRDP's update_read_glyph_index_order. Unlike the drawing
 // orders, none of them are coordinate compressed: every one is read at its full
 // width even when the order carries TS_DELTA_COORDINATES.
+// GlyphIndex is the glyph index, which is the cached glyph data for one font. It is
+// sent once, before the text that refers to it, and the text orders then name glyphs by
+// index rather than carrying them.
 type GlyphIndex struct {
 	CacheID      uint8
 	FlAccel      uint8
@@ -177,6 +180,8 @@ type GlyphIndex struct {
 	Data []byte
 }
 
+// Type reports that this is a glyph index, which is a primary order even though it
+// carries no drawing of its own: it fills the glyph cache the text orders read from.
 func (d *GlyphIndex) Type() int {
 	return ORDER_TYPE_TEXT2
 }
@@ -185,6 +190,11 @@ func (d *GlyphIndex) Type() int {
 // satisfy PrimaryOrder.
 var _ PrimaryOrder = (*GlyphIndex)(nil)
 
+// Unpack reads the glyph index: the cache, the draw flags and colours, and then each
+// glyph with its character, its offset and its bitmap.
+//
+// present is the field flags and decides which of the optional fields are on the wire,
+// the same way it does for every other order.
 func (d *GlyphIndex) Unpack(r io.Reader, present uint32, _ bool) error {
 	if err := d.read(r, present); err != nil {
 		return fmt.Errorf("text2 order: %w", err)

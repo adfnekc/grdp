@@ -148,6 +148,7 @@ func readMissingPresentColour(r io.Reader, present, bit uint32, c *[4]uint8) err
 // FreeRDP's parser is update_read_draw_nine_grid_order. The order is not drawn
 // here, because the nine-grid cache it names is not kept; it is parsed so that
 // its fields do not leave the rest of the batch out of step.
+// DrawNineGrid is a nine grid: a small bitmap stretched by drawing its corners once and its edges and centre repeatedly.
 type DrawNineGrid struct {
 	SrcLeft   int32
 	SrcTop    int32
@@ -156,10 +157,17 @@ type DrawNineGrid struct {
 	BitmapID  uint16
 }
 
+// Type reports that this is a nine grid bitmap.
 func (d *DrawNineGrid) Type() int {
 	return ORDER_TYPE_DRAWNINEGRID
 }
 
+// Unpack reads the source rectangle and the identifier of the nine grid to draw.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *DrawNineGrid) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readMissingPresentCoord(r, present, 0x0001, &d.SrcLeft, delta); err != nil {
 		return fmt.Errorf("draw nine grid: srcLeft: %w", err)
@@ -186,6 +194,7 @@ func (d *DrawNineGrid) Unpack(r io.Reader, present uint32, delta bool) error {
 // The bitmapId is field 5, the count field 6 and the CodedDeltaList field 7, the
 // same shape MultiDstBlt uses, so the rectangle list is read with the shared
 // readMultiRects. It is not drawn for the same reason DrawNineGrid is not.
+// MultiDrawNineGrid is several nine grids in one order, each placed by its own rectangle.
 type MultiDrawNineGrid struct {
 	SrcLeft   int32
 	SrcTop    int32
@@ -197,10 +206,17 @@ type MultiDrawNineGrid struct {
 	Rectangles    []DeltaRect
 }
 
+// Type reports that this is several nine grids in one order.
 func (d *MultiDrawNineGrid) Type() int {
 	return ORDER_TYPE_MULTI_DRAWNINEGRID
 }
 
+// Unpack reads the source rectangle, the identifier, the count and then each rectangle.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *MultiDrawNineGrid) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readMissingPresentCoord(r, present, 0x0001, &d.SrcLeft, delta); err != nil {
 		return fmt.Errorf("multi draw nine grid: srcLeft: %w", err)
@@ -232,6 +248,7 @@ func (d *MultiDrawNineGrid) Unpack(r io.Reader, present uint32, delta bool) erro
 //
 // The order is parsed but not drawn: the task that added it is the parse, and a
 // server that sent it would also fill the cache through a Cache Glyph order.
+// FastGlyph is a glyph drawn from the glyph cache, which is the form text takes once the cache has been filled.
 type FastGlyph struct {
 	CacheID uint8
 	// CharInc is the width increment per character and FlAccel the text
@@ -252,10 +269,17 @@ type FastGlyph struct {
 	Glyph Glyph
 }
 
+// Type reports that this is a glyph drawn from the glyph cache.
 func (d *FastGlyph) Type() int {
 	return ORDER_TYPE_FAST_GLYPH
 }
 
+// Unpack reads the cache slot, the draw flags and colours, and the glyph.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *FastGlyph) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readMissingPresentByte(r, present, 0x0001, &d.CacheID); err != nil {
 		return fmt.Errorf("fast glyph: cacheId: %w", err)

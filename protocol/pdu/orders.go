@@ -12,8 +12,19 @@ import (
 	"github.com/adfnekc/grdp/core"
 )
 
+// ControlFlag is the control flags that open an order, which is where an order header
+// starts. Four of the eight bits are about what kind of order follows and four are
+// about how it is encoded.
 type ControlFlag uint8
 
+// The control flags.
+//
+// TS_STANDARD and TS_SECONDARY say which of the two order spaces the order is in, and
+// TS_BOUNDS says the order carries its own bounds rather than using the previous
+// order's. TS_DELTA_COORDINATES is the one that changes how every coordinate in the
+// order is read, and the two ZERO_FIELD_BYTE flags are what shorten the field flags
+// byte: with either set, a byte is absent from the wire and has to be reconstructed
+// rather than read.
 const (
 	TS_STANDARD             = 0x01
 	TS_SECONDARY            = 0x02
@@ -25,8 +36,17 @@ const (
 	TS_ZERO_FIELD_BYTE_BIT1 = 0x80
 )
 
+// PrimaryOrderType is the type of a primary order: the drawing orders, which are the
+// ones that draw most of a desktop.
+//
+// The commented out entries are orders the specification defines and this client does
+// not execute, and the numbers beside them are the order indexes a client advertises
+// in its order capability. The two are not the same numbering and the difference is
+// easy to miss.
 type PrimaryOrderType uint8
 
+// The primary order types, with the order index the capability set advertises beside
+// each.
 const (
 	ORDER_TYPE_DSTBLT = 0x00 //0
 	ORDER_TYPE_PATBLT = 0x01 //1
@@ -52,8 +72,14 @@ const (
 	ORDER_TYPE_TEXT2      = 0x1B //27
 )
 
+// SecondaryOrderType is the type of a secondary order: the cache orders, which fill
+// the caches that the primary orders then draw from.
+//
+// Unlike the primary types, these are contiguous enough to be read as a sequence, but
+// there is still a gap at 0x06.
 type SecondaryOrderType uint8
 
+// The secondary order types.
 const (
 	ORDER_TYPE_BITMAP_UNCOMPRESSED     = 0x00
 	ORDER_TYPE_CACHE_COLOR_TABLE       = 0x01
@@ -65,6 +91,8 @@ const (
 	ORDER_TYPE_BITMAP_COMPRESSED_V3    = 0x08
 )
 
+// String names the order type, for logs and errors. An unrecognised value is reported
+// as Unknown rather than as a number, so a caller that wants the number has to keep it.
 func (s SecondaryOrderType) String() string {
 	name := "Unknown"
 	switch s {
@@ -106,6 +134,12 @@ const (
 	ORDER_TYPE_FRAME_MARKER            = 0x0D
 )
 
+// The glyph fragment flags and the compression flags of a cached bitmap.
+//
+// The three GLYPH_FRAGMENT values say what a glyph fragment is: a no-op, a fragment
+// that is part of a glyph already sent, or one that adds a whole glyph. The CBR2 values
+// are the revision 2 bitmap cache flags, where NO_BITMAP_COMPRESSION_HDR says the
+// compressed data header is absent and DO_NOT_CACHE says this bitmap is not to be kept.
 const (
 	GLYPH_FRAGMENT_NOP = 0x00
 	GLYPH_FRAGMENT_USE = 0xFE
@@ -117,12 +151,16 @@ const (
 	CBR2_DO_NOT_CACHE              = 0x10
 )
 
+// Which of the order spaces an order is in, as this client's own value rather than a
+// wire value: it is set once the control flags have been read and is what the parser
+// switches on afterwards.
 const (
 	ORDER_PRIMARY = iota
 	ORDER_SECONDARY
 	ORDER_ALTSEC
 )
 
+// OrderPdu is one order inside an orders update: the control flags, the primary or secondary order or the alternate form, and the state the next order's delta coordinates refer to.
 type OrderPdu struct {
 	ControlFlags uint8
 	Type         int
@@ -134,13 +172,18 @@ type OrderPdu struct {
 	state *OrderState
 }
 
+// HasBounds reports whether the order carried bounds of its own. An order without them
+// is drawn to the bounds of the order before it, so this is not a detail: an order
+// that has bounds and is drawn without them lands in the wrong place.
 func (o *OrderPdu) HasBounds() bool {
 	return o.ControlFlags&TS_BOUNDS != 0
 }
 
+// Altsec is an alternate secondary order, which is a different encoding from the primary orders: a separate type space, with sizes rather than field flags.
 type Altsec struct {
 }
 
+// Secondary is a secondary order: the cache orders, which fill the caches the primary orders then draw from.
 type Secondary struct {
 	// CacheBitmap is set by the cache orders, which are how the server fills
 	// its bitmap cache. MEMBLT then blits those entries to the screen, so
@@ -239,11 +282,18 @@ func cachePixels(data []byte, width, height, bitsPerPixel int, compressed bool) 
 	return pixels
 }
 
+// Primary is a primary order: the common drawing orders, which are the ones that draw most of a desktop.
 type Primary struct {
 	Bounds Bounds
 	Data   PrimaryOrder
 }
 
+// FastPathOrdersPDU is an orders update on the fast path: a state to parse the orders
+// against, the number of orders, and the orders themselves.
+//
+// The state is passed in rather than made here because it survives between updates:
+// an order can carry coordinates relative to the previous order, and that previous
+// order may have been in an earlier PDU.
 type FastPathOrdersPDU struct {
 	// State is the connection's order parsing state. It has to be the same one
 	// for every update on a connection, since delta coordinates refer back to
@@ -254,10 +304,17 @@ type FastPathOrdersPDU struct {
 	OrderPdus    []OrderPdu
 }
 
+// FastPathUpdateType reports that this is an orders update.
 func (*FastPathOrdersPDU) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_ORDERS
 }
 
+// Unpack reads the orders update: the count, then each order, parsed against the state
+// that survives between updates.
+//
+// A failure names which order failed and how many there were, because an order that
+// will not parse leaves the stream at an unknown offset, and the count is the only
+// thing that says how far the parser got.
 func (f *FastPathOrdersPDU) Unpack(r io.Reader) error {
 	f.NumberOrders, _ = core.ReadUint16LE(r)
 	//glog.Info("NumberOrders:", f.NumberOrders)
@@ -388,6 +445,7 @@ func (b *Bounds) updateBounds(r io.Reader) {
 	}
 }
 
+// PrimaryOrder is the fields every primary order can carry, which are a subset of the whole and are read according to the field flags.
 type PrimaryOrder interface {
 	Type() int
 	Unpack(io.Reader, uint32, bool) error
@@ -606,6 +664,7 @@ func readOrderCoord(r io.Reader, coord *int32, delta bool) {
 	}
 }
 
+// Dstblt is a destination blit: a rectangle copied within the screen, with no source bitmap.
 type Dstblt struct {
 	X      int32
 	Y      int32
@@ -614,9 +673,17 @@ type Dstblt struct {
 	Opcode uint8
 }
 
+// Type reports that this is a destination blit.
 func (d *Dstblt) Type() int {
 	return ORDER_TYPE_DSTBLT
 }
+
+// Unpack reads the destination, then the columns and rows to copy.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *Dstblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("Dstblt Order")
 	if present&0x01 != 0 {
@@ -637,6 +704,7 @@ func (d *Dstblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// Patblt is a pattern blit: a rectangle filled with a pattern built from a brush and two colours.
 type Patblt struct {
 	X        int32
 	Y        int32
@@ -648,9 +716,17 @@ type Patblt struct {
 	Brush    Brush
 }
 
+// Type reports that this is a pattern blit.
 func (d *Patblt) Type() int {
 	return ORDER_TYPE_PATBLT
 }
+
+// Unpack reads the destination, then the background and foreground colours and the brush that makes the pattern.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *Patblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("Patblt Order")
 	if present&0x01 != 0 {
@@ -681,6 +757,7 @@ func (d *Patblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// Brush is a brush: its origin, its style and either a hatch pattern or a bitmap, which is what fills a pattern blit or a polygon.
 type Brush struct {
 	X     uint8
 	Y     uint8
@@ -714,6 +791,7 @@ func (b *Brush) updateBrush(r io.Reader, present uint32) {
 	}
 }
 
+// Scrblt is a screen blit: a rectangle copied from elsewhere on the screen.
 type Scrblt struct {
 	X      int32
 	Y      int32
@@ -724,6 +802,7 @@ type Scrblt struct {
 	Srcy   int32
 }
 
+// Type reports that this is a screen blit.
 func (d *Scrblt) Type() int {
 	return ORDER_TYPE_SCRBLT
 }
@@ -732,6 +811,12 @@ func (d *Scrblt) Type() int {
 // variable and then copy that over the receiver, which meant two connections in
 // one process shared the last SCRBLT either of them saw, and overrode the per
 // connection carry over of the fields an order leaves out.
+// Unpack reads the destination, then the source point and the size.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *Scrblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("Scrblt Order")
 	if present&0x0001 != 0 {
@@ -758,6 +843,7 @@ func (d *Scrblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// LineTo is a line from the current position to the point it carries, drawn with a pen or with a mix mode.
 type LineTo struct {
 	Mixmode  uint16
 	Startx   int32
@@ -769,9 +855,17 @@ type LineTo struct {
 	Pen      Pen
 }
 
+// Type reports that this is a line.
 func (d *LineTo) Type() int {
 	return ORDER_TYPE_LINETO
 }
+
+// Unpack reads the mix mode, the end point, the background colour and the pen.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *LineTo) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("LineTo Order")
 	if present&0x0001 != 0 {
@@ -802,6 +896,7 @@ func (d *LineTo) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// Pen is a pen: its style, its width and its colour, which a line or a polygon is drawn with.
 type Pen struct {
 	Style  uint8
 	Width  uint8
@@ -823,6 +918,7 @@ func (d *Pen) updatePen(r io.Reader, present uint32) {
 	}
 }
 
+// OpaqueRect is a filled rectangle, which is the most common order on a screen that is being scrolled or cleared.
 type OpaqueRect struct {
 	X      int32
 	Y      int32
@@ -831,9 +927,17 @@ type OpaqueRect struct {
 	Colour [4]uint8
 }
 
+// Type reports that this is an opaque rectangle.
 func (d *OpaqueRect) Type() int {
 	return ORDER_TYPE_OPAQUERECT
 }
+
+// Unpack reads the rectangle and the colour.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *OpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error {
 	glog.Infof("OpaqueRect Order")
 	if present&0x0001 != 0 {
@@ -863,6 +967,7 @@ func (d *OpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// SaveBitmap is a saved bitmap: a region copied into a cache slot, or one put back from a slot. The action says which of the two.
 type SaveBitmap struct {
 	Offset uint32
 	Left   int32
@@ -872,9 +977,17 @@ type SaveBitmap struct {
 	action uint8
 }
 
+// Type reports that this is a saved bitmap.
 func (d *SaveBitmap) Type() int {
 	return ORDER_TYPE_SAVEBITMAP
 }
+
+// Unpack reads the cache slot and the region, and the action says which way round.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *SaveBitmap) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0001 != 0 {
 		d.Offset, _ = core.ReadUInt32LE(r)
@@ -897,6 +1010,7 @@ func (d *SaveBitmap) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// Memblt is a copy from a cached bitmap into the screen, with the source pixels taken from a cache slot.
 type Memblt struct {
 	CacheId     uint8
 	ColourTable uint8
@@ -913,9 +1027,17 @@ type Memblt struct {
 	CacheIdx    uint16
 }
 
+// Type reports that this is a copy from the bitmap cache into the screen.
 func (d *Memblt) Type() int {
 	return ORDER_TYPE_MEMBLT
 }
+
+// Unpack reads the cache slot, the destination, the source point and the colour table index.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *Memblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0001 != 0 {
 		d.CacheId, _ = core.ReadUInt8(r)
@@ -948,6 +1070,7 @@ func (d *Memblt) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// Mem3blt is a copy from a cached bitmap through a pattern, which is Memblt with the brush the mask is drawn through.
 type Mem3blt struct {
 	ColourTable uint8
 	CacheId     uint8
@@ -964,9 +1087,17 @@ type Mem3blt struct {
 	CacheIdx    uint16
 }
 
+// Type reports that this is a copy from the bitmap cache with a pattern.
 func (d *Mem3blt) Type() int {
 	return ORDER_TYPE_MEM3BLT
 }
+
+// Unpack reads the same fields as Memblt plus a brush and the colours the pattern is built from.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *Mem3blt) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x000001 != 0 {
 		d.CacheId, _ = core.ReadUInt8(r)
@@ -1012,6 +1143,7 @@ func (d *Mem3blt) Unpack(r io.Reader, present uint32, delta bool) error {
 	return nil
 }
 
+// PolygonSc is a polygon in the scaling or colour form, which carries the fill colour rather than a brush.
 type PolygonSc struct {
 	X        int32
 	Y        int32
@@ -1022,14 +1154,23 @@ type PolygonSc struct {
 	Points   []Point
 }
 
+// Point is a point on the screen, used by the orders that carry their own coordinates.
 type Point struct {
 	X int32
 	Y int32
 }
 
+// Type reports that this is a polygon in the scaling or colour form.
 func (d *PolygonSc) Type() int {
 	return ORDER_TYPE_POLYGON_SC
 }
+
+// Unpack reads the point count, the points, and the fill mode and colour.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *PolygonSc) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
@@ -1115,6 +1256,7 @@ func parseDelta(r io.Reader) (v int32) {
 }
 
 // PolygonCb is a polygon filled with a colour brush.
+// PolygonCb is a polygon in the coordinate or brush form, which carries the brush it is filled with.
 type PolygonCb struct {
 	X, Y     int32
 	Opcode   uint8
@@ -1126,6 +1268,7 @@ type PolygonCb struct {
 	Points   []Point
 }
 
+// Type reports that this is a polygon in the coordinate or brush form.
 func (d *PolygonCb) Type() int {
 	return ORDER_TYPE_POLYGON_CB
 }
@@ -1133,6 +1276,12 @@ func (d *PolygonCb) Type() int {
 // Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.17 lays it out, which is
 // taken from FreeRDP's parser rather than from the wording of the specification.
 // The point count sits in a later field than the rest, hence the twelfth.
+// Unpack reads the point count, the points, and the brush and colours the polygon is drawn with.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *PolygonCb) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
@@ -1171,6 +1320,7 @@ func (d *PolygonCb) Unpack(r io.Reader, present uint32, delta bool) error {
 }
 
 // Polyline is a sequence of line segments.
+// Polyline is a sequence of connected lines as one order, which is cheaper than the equivalent LineTo orders.
 type Polyline struct {
 	X, Y   int32
 	Opcode uint8
@@ -1181,11 +1331,18 @@ type Polyline struct {
 	Points  []Point
 }
 
+// Type reports that this is a sequence of connected lines.
 func (d *Polyline) Type() int {
 	return ORDER_TYPE_POLYLINE
 }
 
 // Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.16 lays it out.
+// Unpack reads the point count and the points, and the colour the lines are drawn in.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *Polyline) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
@@ -1216,6 +1373,7 @@ func (d *Polyline) Unpack(r io.Reader, present uint32, delta bool) error {
 }
 
 // EllipeSc is an ellipse drawn in an outline.
+// EllipeSc is an ellipse in the scaling or colour form, which carries the fill colour.
 type EllipeSc struct {
 	Left, Top, Right, Bottom int32
 	Opcode                   uint8
@@ -1223,11 +1381,18 @@ type EllipeSc struct {
 	Colour                   [4]uint8
 }
 
+// Type reports that this is an ellipse in the scaling or colour form.
 func (d *EllipeSc) Type() int {
 	return ORDER_TYPE_ELLIPSE_SC
 }
 
 // Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.20 lays it out.
+// Unpack reads the bounding rectangle, the fill mode and the colour.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *EllipeSc) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.Left, delta)
@@ -1255,6 +1420,7 @@ func (d *EllipeSc) Unpack(r io.Reader, present uint32, delta bool) error {
 }
 
 // EllipeCb is an ellipse filled with a colour brush.
+// EllipeCb is an ellipse in the coordinate or brush form, which carries the brush it is filled with.
 type EllipeCb struct {
 	Left, Top, Right, Bottom int32
 	Opcode                   uint8
@@ -1264,11 +1430,18 @@ type EllipeCb struct {
 	Brush                    Brush
 }
 
+// Type reports that this is an ellipse in the coordinate or brush form.
 func (d *EllipeCb) Type() int {
 	return ORDER_TYPE_ELLIPSE_CB
 }
 
 // Unpack reads the order as MS-RDPEGDI 2.2.2.2.1.1.2.21 lays it out.
+// Unpack reads the bounding rectangle and the brush it is filled with.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *EllipeCb) Unpack(r io.Reader, present uint32, delta bool) error {
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.Left, delta)
@@ -1346,6 +1519,7 @@ func (s *Secondary) updateCacheBitmapOrder(r io.Reader, compressed bool, flags u
 	return nil
 }
 
+// CacheBitmapOrder is a bitmap put into the revision 1 bitmap cache, which is how a server avoids sending the same bitmap twice.
 type CacheBitmapOrder struct {
 	cacheId          uint8
 	bitmapBpp        uint8
@@ -1399,6 +1573,7 @@ func getCbV2Bpp(bpp uint32) (b uint32) {
 	return
 }
 
+// CacheBitmapV2Order is a bitmap put into the revision 2 bitmap cache, which adds flags and two cache keys to the first revision.
 type CacheBitmapV2Order struct {
 	cacheId            uint32
 	flags              uint32
@@ -1477,6 +1652,7 @@ func (s *Secondary) updateCacheBitmapV2Order(r io.Reader, compressed bool, flags
 	}
 }
 
+// CacheBitmapV3Order is a bitmap put into the revision 3 bitmap cache, which adds a codec identifier so that a bitmap can arrive compressed.
 type CacheBitmapV3Order struct {
 	cacheId    uint32
 	bpp        uint32
@@ -1544,6 +1720,7 @@ func (s *Secondary) updateCacheBitmapV3Order(r io.Reader, flags uint16) {
 	}
 }
 
+// CacheColorTableOrder is a colour table put into the palette cache, which a later bitmap can refer to instead of carrying its own colours.
 type CacheColorTableOrder struct {
 	cacheIndex   uint8
 	numberColors uint16
@@ -1613,11 +1790,14 @@ func updateReadColorRef(r io.Reader) (uint8, uint8, uint8, uint8) {
 	return blue, green, red, 255
 }
 
+// CacheGlyphOrder is glyphs put into the glyph cache, which is what lets a text order name glyphs rather than carry them.
 type CacheGlyphOrder struct {
 	cacheId uint8
 	nglyphs uint8
 	glyphs  []CacheGlyph
 }
+
+// CacheGlyph is one glyph in a cache glyph order: the character it draws, its position within the font, and its bitmap.
 type CacheGlyph struct {
 	character uint16
 	offset    uint16
@@ -1628,6 +1808,7 @@ type CacheGlyph struct {
 	data      []uint8
 }
 
+// CacheBrushOrder is a brush put into the brush cache, which a later order refers to by index.
 type CacheBrushOrder struct {
 	index  uint8
 	bpp    uint8
@@ -1731,6 +1912,7 @@ func (b Bounds) Rect() (int, int, int, int) {
 	return int(b.Left), int(b.Top), int(b.Right), int(b.Bottom)
 }
 
+// OrderInfo is the header of an order: its flags, its type, and the flags saying which optional fields follow. It is what the parsing state is updated from before the order itself is read.
 type OrderInfo struct {
 	controlFlags     uint32
 	orderType        uint32

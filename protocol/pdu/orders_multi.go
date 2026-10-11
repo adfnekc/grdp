@@ -80,6 +80,7 @@ type DeltaRect struct {
 
 // MultiDstBlt paints a set of rectangles with a destination-only raster
 // operation. FreeRDP's parser is update_read_multi_dstblt_order.
+// MultiDstBlt is several destination blits in one order, which is how a screen is cleared in one message.
 type MultiDstBlt struct {
 	// X, Y, Cx, Cy are the order's destination rectangle, which FreeRDP's
 	// renderer ignores: it draws the rectangles below.
@@ -90,10 +91,17 @@ type MultiDstBlt struct {
 	Rectangles    []DeltaRect
 }
 
+// Type reports that this is several destination blits in one order.
 func (d *MultiDstBlt) Type() int {
 	return ORDER_TYPE_MULTIDSTBLT
 }
 
+// Unpack reads the count and then each rectangle.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *MultiDstBlt) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
@@ -120,6 +128,7 @@ func (d *MultiDstBlt) Unpack(r io.Reader, present uint32, delta bool) error {
 
 // MultiPatBlt paints a set of rectangles from a brush. FreeRDP's parser is
 // update_read_multi_patblt_order.
+// MultiPatBlt is several pattern blits in one order, sharing one brush and one pair of colours.
 type MultiPatBlt struct {
 	X, Y, Cx, Cy int32
 	Opcode       uint8
@@ -131,10 +140,17 @@ type MultiPatBlt struct {
 	Rectangles    []DeltaRect
 }
 
+// Type reports that this is several pattern blits in one order.
 func (d *MultiPatBlt) Type() int {
 	return ORDER_TYPE_MULTIPATBLT
 }
 
+// Unpack reads the count, the brush and colours, and then each rectangle.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *MultiPatBlt) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
@@ -177,6 +193,7 @@ func (d *MultiPatBlt) Unpack(r io.Reader, present uint32, delta bool) error {
 
 // MultiScrBlt copies a set of rectangles within the screen. FreeRDP's parser is
 // update_read_multi_scrblt_order.
+// MultiScrBlt is several screen blits in one order, sharing one source offset.
 type MultiScrBlt struct {
 	X, Y, Cx, Cy int32
 	Opcode       uint8
@@ -186,10 +203,17 @@ type MultiScrBlt struct {
 	Rectangles    []DeltaRect
 }
 
+// Type reports that this is several screen blits in one order.
 func (d *MultiScrBlt) Type() int {
 	return ORDER_TYPE_MULTISCRBLT
 }
 
+// Unpack reads the count, the source offset, and then each rectangle.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *MultiScrBlt) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
@@ -223,6 +247,7 @@ func (d *MultiScrBlt) Unpack(r io.Reader, present uint32, delta bool) error {
 // MultiOpaqueRect fills a set of rectangles with one colour. FreeRDP's parser is
 // update_read_multi_opaque_rect_order, and it is the only one of the four that
 // FreeRDP also renders.
+// MultiOpaqueRect is several filled rectangles in one order, sharing one colour.
 type MultiOpaqueRect struct {
 	X, Y, Cx, Cy int32
 	Colour       [4]uint8
@@ -231,10 +256,17 @@ type MultiOpaqueRect struct {
 	Rectangles    []DeltaRect
 }
 
+// Type reports that this is several opaque rectangles in one order.
 func (d *MultiOpaqueRect) Type() int {
 	return ORDER_TYPE_MULTIOPAQUERECT
 }
 
+// Unpack reads the count, the colour, and then each rectangle.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *MultiOpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readPresentCoord(r, present, 0x0001, delta, &d.X); err != nil {
 		return err
@@ -274,6 +306,7 @@ func (d *MultiOpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error 
 // equivalent here. It is parsed because leaving its fields unread leaves the
 // stream out of step, but there is nothing to draw it with, because the glyph
 // cache it names is not kept (the TEXT2 order has the same problem).
+// FastIndex is a colour index remap, which tells the client to draw with a shifted palette rather than sending a new bitmap.
 type FastIndex struct {
 	CacheId uint8
 	// CharInc is the width increment per character and FlAccel the text
@@ -289,10 +322,17 @@ type FastIndex struct {
 	Data []byte
 }
 
+// Type reports that this is a colour index remapping.
 func (d *FastIndex) Type() int {
 	return ORDER_TYPE_FAST_INDEX
 }
 
+// Unpack reads the cache slot, the draw flags and colours, and the remapping data.
+//
+// present is the field flags, which say which of these fields are on the wire: a
+// field whose flag is clear is not sent at all, and its value is carried over from the
+// previous order of the same type rather than read. delta says the coordinates in it are
+// relative to the previous order's bounds.
 func (d *FastIndex) Unpack(r io.Reader, present uint32, delta bool) error {
 	if err := readPresentByte(r, present, 0x0001, &d.CacheId); err != nil {
 		return err
