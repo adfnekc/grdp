@@ -71,3 +71,55 @@ func BenchmarkEmitInterfaceListener(b *testing.B) {
 		b.Fatal("listener did not run")
 	}
 }
+
+// The shapes the receive path actually registers, each of which must be bound so
+// that delivering an event is an ordinary call. If one of these ever falls out of
+// the binding table, delivery for that event silently goes back to reflection and
+// the cost comes back per packet.
+func TestReceivePathShapesAreBound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   interface{}
+	}{
+		{"func([]byte) for data", func(b []byte) {}},
+		{"func(error) for error", func(e error) {}},
+		{"func() for close and ready", func() {}},
+		{"func(string, []byte) for channel", func(s string, b []byte) {}},
+		{"func(interface{}) for orders and pointer", func(d interface{}) {}},
+	} {
+		if _, ok := bind(tc.fn); !ok {
+			t.Errorf("%s is not bound, so delivery goes through reflection", tc.name)
+		}
+	}
+}
+
+// A shape that is not in the table falls back to reflection. That is deliberate:
+// the table covers what is delivered per packet, and the rest fire once a session
+// or once a frame.
+func TestUnboundShapesFallBackToReflection(t *testing.T) {
+	type thing struct{ x int }
+	if _, ok := bind(func(v *thing) {}); ok {
+		t.Error("a shape that is not in the table was reported as bound")
+	}
+	if _, ok := bind(func(a int, b string, c float64) {}); ok {
+		t.Error("a three argument shape was reported as bound")
+	}
+}
+
+// What an unbound listener costs, for comparison with the bound ones above. This is
+// the price of the fallback, paid by events that are not on a per packet path.
+func BenchmarkEmitUnboundListener(b *testing.B) {
+	e := NewEmitter()
+	type thing struct{ x int }
+	var got *thing
+	e.On("bitmap", func(v *thing) { got = v })
+	v := &thing{x: 1}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		e.Emit("bitmap", v)
+	}
+	if got == nil {
+		b.Fatal("listener did not run")
+	}
+}
