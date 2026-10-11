@@ -9,6 +9,7 @@ package main
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/doc"
 	"go/parser"
 	"go/token"
@@ -18,6 +19,21 @@ import (
 	"strings"
 )
 
+// inBuild reports whether a file is part of the build for the current context,
+// which is what decides whether godoc renders the identifiers in it at all.
+//
+// It matters here because the alternative is counting declarations in a file
+// excluded by a build tag: this repository has one, a Windows-only port that is
+// switched off with //go:build ignore, and its eleven identifiers were being
+// reported as documentation debt for code that is not compiled.
+func inBuild(dir, name string, ctx *build.Context) bool {
+	if strings.HasSuffix(name, "_test.go") {
+		return false
+	}
+	ok, err := ctx.MatchFile(dir, name)
+	return err == nil && ok
+}
+
 func main() {
 	counts := map[string]int{}
 	for _, dir := range os.Args[1:] {
@@ -26,8 +42,9 @@ func main() {
 				return nil
 			}
 			fset := token.NewFileSet()
+			ctx := build.Default
 			pkgs, err := parser.ParseDir(fset, path, func(fi os.FileInfo) bool {
-				return !strings.HasSuffix(fi.Name(), "_test.go")
+				return inBuild(path, fi.Name(), &ctx)
 			}, parser.ParseComments)
 			if err != nil || len(pkgs) == 0 {
 				return nil
