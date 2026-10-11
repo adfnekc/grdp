@@ -11,6 +11,14 @@ import (
 	"github.com/adfnekc/grdp/protocol/t125/gcc"
 )
 
+// PDULayer is the RDP protocol layer above MCS: it reads and writes the slow-path
+// PDUs, which are the share control and share data headers and whatever follows
+// them.
+//
+// It holds both sides of the capability exchange, because the server's capabilities
+// are what decide how the rest of the session is read, and the client's are kept
+// beside them so that a parser can tell what it was that made the server send
+// something.
 type PDULayer struct {
 	emission.Emitter
 	transport          core.Transport
@@ -23,6 +31,9 @@ type PDULayer struct {
 	demandActivePDU    *DemandActivePDU
 }
 
+// NewPDULayer returns a protocol layer over a transport. The connection sequence
+// starts when the transport emits "connect", not here, so a caller can configure
+// what will be asked for first.
 func NewPDULayer(t core.Transport) *PDULayer {
 	p := &PDULayer{
 		Emitter:   *emission.NewEmitter(),
@@ -132,10 +143,20 @@ func (p *PDULayer) sendDataPDU(message DataPDUData) {
 	p.sendPDU(dataPdu)
 }
 
+// SetFastPathSender sets the writer used for fast-path PDUs. Without it, everything
+// goes out on the slow path, which a server accepts but which no current client
+// uses: fast path is the shorter framing and the one input is expected on.
 func (p *PDULayer) SetFastPathSender(f core.FastPathSender) {
 	p.fastPathSender = f
 }
 
+// Client is the client end of the protocol layer, which owns the connection sequence
+// and the session state that goes with it.
+//
+// Two pieces of that state are worth knowing about before reading the code:
+// the drawing order state, which survives between orders because delta coordinates
+// refer back to it, and the capability map's lock, because capabilities arrive on the
+// receive path while another goroutine may be reading them.
 type Client struct {
 	*PDULayer
 	clientCoreData *gcc.ClientCoreData
@@ -154,6 +175,12 @@ type Client struct {
 	capsMu sync.Mutex
 }
 
+// NewClient returns a client over a transport, with its drawing order state ready and
+// no fast-path sender set.
+//
+// The connection sequence is registered as a once listener on the transport, so it
+// runs exactly once whichever layer signals the connection first, and a second signal
+// does not start it again.
 func NewClient(t core.Transport) *Client {
 	c := &Client{
 		PDULayer: NewPDULayer(t),
@@ -472,6 +499,14 @@ func (c *Client) recvPDU(s []byte) {
 	}
 }
 
+// RecvFastPath reads a fast-path PDU, which is what carries updates and pointer
+// traffic once the session is up.
+//
+// A fast-path PDU can be split across several fragments, and it can hold several
+// updates: the header carries an action, an update count and fragment flags, so this
+// loops until the buffer is used up rather than assuming one update. secFlag is the
+// security flags from the TPKT layer rather than from the PDU, since the fast-path
+// header does not carry them.
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 	glog.Trace("PDU RecvFastPath", glog.Hex(s))
 	r := bytes.NewReader(s)
@@ -566,6 +601,13 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 	}
 }
 
+// InputEventsInterface is one input event that can be put on the wire, in whichever
+// form the caller built: keyboard, pointer or synchronise.
+//
+// Having the events serialize themselves is what lets one PDU carry events of
+// different types, which the input preamble needs: it is a key release, then a toggle
+// state, then another key release, and those are three different event codes in one
+// message.
 type InputEventsInterface interface {
 	Serialize() []byte
 }
@@ -698,6 +740,13 @@ func (c *Client) sendFastPathInput(msgType uint16, events []InputEventsInterface
 	}
 }
 
+// SendInputEvents sends input events, on the fast path when a sender is set and on
+// the slow path otherwise.
+//
+// msgType is only the fallback for events whose code cannot be derived from the event
+// itself: the mouse and the extended mouse share one type and are told apart by the
+// pointer flags, while a keyboard event names its own code. Events of different types
+// may be mixed in one call, and on the fast path they travel in one PDU.
 func (c *Client) SendInputEvents(msgType uint16, events []InputEventsInterface) {
 	// Prefer fast-path input (what modern servers/clients use); fall back to the
 	// slow-path T.128 input PDU when no fast-path sender is configured.
