@@ -23,15 +23,25 @@ import (
 
 // Multiple Channel Service layer
 
+// MCSMessage is the octet that names a T.125 connect PDU, which is the first
+// field of the message inside the GCC user data.
 type MCSMessage uint8
 
+// The two connect messages. A client sends the initial and reads the response;
+// everything after the connection is a domain PDU instead.
 const (
 	MCS_TYPE_CONNECT_INITIAL  MCSMessage = 0x65
 	MCS_TYPE_CONNECT_RESPONSE            = 0x66
 )
 
+// MCSDomainPDU is the opcode of a T.125 domain PDU: what the request or
+// indication is. It shares one byte with the option bits that follow it, which
+// is why it is shifted into place rather than written on its own.
 type MCSDomainPDU uint16
 
+// The domain PDU opcodes. A client sends the three requests and reads their
+// confirmations, then reads and sends data: sendOpCode is the data opcode for the
+// direction, which is why MCS is told one for receiving and one for sending.
 const (
 	ERECT_DOMAIN_REQUEST          MCSDomainPDU = 1
 	DISCONNECT_PROVIDER_ULTIMATUM              = 8
@@ -82,33 +92,46 @@ type DisconnectError struct {
 	Reason uint8
 }
 
+// Error reports the ultimatum and passes the reason byte through unread, because
+// what it means is not established; see the type's comment.
+// Error reports that the server ended the session.
 func (e *DisconnectError) Error() string {
 	return fmt.Sprintf("mcs: the server ended the session (disconnect ultimatum, reason byte 0x%02x)", e.Reason)
 }
 
+// Channel numbering. The global channel is 1003 and a client's own channel is
+// the base plus its user id, so the first user id a client can have is 1002.
+// Static virtual channels are allocated upwards from the user channel, and the
+// ids a server confirms must be used rather than the ones requested.
 const (
 	MCS_GLOBAL_CHANNEL_ID uint16 = 1003
 	MCS_USERCHANNEL_BASE         = 1001
 )
 
+// GLOBAL_CHANNEL_NAME is the name of channel 1003, which carries the share data
+// header, input and the core PDUs. It is the channel everything the static
+// virtual channels do not carry goes through.
 const (
 	GLOBAL_CHANNEL_NAME = "global"
 )
 
-/**
- * Format MCS PDULayer header packet
- * @param mcsPdu {integer}
- * @param options {integer}
- * @returns {type.UInt8} headers
- */
+// writeMCSPDUHeader writes the one byte that opens every domain PDU: the opcode
+// in the high six bits and the option bits below it.
 func writeMCSPDUHeader(mcsPdu MCSDomainPDU, options uint8, w io.Writer) {
 	core.WriteUInt8((uint8(mcsPdu)<<2)|options, w)
 }
 
+// readMCSPDUHeader reports whether an option byte names the given opcode.
 func readMCSPDUHeader(options uint8, mcsPdu MCSDomainPDU) bool {
 	return (options >> 2) == uint8(mcsPdu)
 }
 
+// DomainParameters is the T.125 DomainParameters structure, which appears three
+// times in a Connect-Initial: as the target the client wants, and as the minimum
+// and maximum it will accept. The server answers with one set.
+//
+// MinThoughput is misspelt, and exported, so it is left alone rather than renamed
+// under the caller. It is the minimum throughput the sender requires.
 type DomainParameters struct {
 	MaxChannelIds   int
 	MaxUserIds      int
@@ -124,6 +147,13 @@ type DomainParameters struct {
  * @see http://www.itu.int/rec/T-REC-T.125-199802-I/en page 25
  * @returns {asn1.univ.Sequence}
  */
+// NewDomainParameters returns a set of domain parameters.
+//
+// The values a client sends are fixed by what other clients send rather than by
+// anything in the specification, so the three sets are built by NewConnectInitial
+// and this is not usually called directly.
+//
+// See http://www.itu.int/rec/T-REC-T.125-199802-I/en page 25.
 func NewDomainParameters(
 	maxChannelIds int,
 	maxUserIds int,
@@ -137,6 +167,14 @@ func NewDomainParameters(
 		numPriorities, minThoughput, maxHeight, maxMCSPDUsize, protocolVersion}
 }
 
+// BER returns the structure as eight BER integers.
+//
+// Four of the eight fields are written as fixed values and not from the struct:
+// the number of priorities is always 1, the minimum throughput always 0, the
+// maximum height always 1 and the protocol version always 2. The values a real
+// client sends are the same for every session, so the fields exist to be parsed
+// rather than to be set, and a caller that changes them will not see the change on
+// the wire.
 func (d *DomainParameters) BER() []byte {
 	buff := &bytes.Buffer{}
 	ber.WriteInteger(d.MaxChannelIds, buff)
@@ -150,6 +188,9 @@ func (d *DomainParameters) BER() []byte {
 	return buff.Bytes()
 }
 
+// ReadDomainParameters reads a DomainParameters structure, skipping the four
+// fields whose values are fixed rather than learned: they are read so the stream
+// advances, and then discarded.
 func ReadDomainParameters(r io.Reader) (*DomainParameters, error) {
 	if !ber.ReadUniversalTag(ber.TAG_SEQUENCE, true, r) {
 		return nil, errors.New("bad BER tags")
@@ -168,11 +209,15 @@ func ReadDomainParameters(r io.Reader) (*DomainParameters, error) {
 	return d, nil
 }
 
-/**
- * @see http://www.itu.int/rec/T-REC-T.125-199802-I/en page 25
- * @param userData {Buffer}
- * @returns {asn1.univ.Sequence}
- */
+// ConnectInitial is the T.125 Connect-Initial, which is the first thing sent on a
+// connection and carries the GCC user data with the client's core, network and
+// security capabilities in it.
+//
+// It holds three sets of domain parameters rather than one because T.125
+// negotiates by range: what the client wants, and the least and most it will
+// accept.
+//
+// See http://www.itu.int/rec/T-REC-T.125-199802-I/en page 25.
 type ConnectInitial struct {
 	CallingDomainSelector []byte
 	CalledDomainSelector  []byte
@@ -183,6 +228,9 @@ type ConnectInitial struct {
 	UserData              []byte
 }
 
+// NewConnectInitial returns a Connect-Initial carrying the given GCC user data,
+// with the three sets of domain parameters filled in with the values this client
+// asks for.
 func NewConnectInitial(userData []byte) ConnectInitial {
 	return ConnectInitial{[]byte{0x1},
 		[]byte{0x1},
@@ -193,6 +241,9 @@ func NewConnectInitial(userData []byte) ConnectInitial {
 		userData}
 }
 
+// BER returns the Connect-Initial as the sequence of fields T.125 defines: the two
+// domain selectors, the upward flag, the three parameter sets, and the GCC user
+// data as an octet string.
 func (c *ConnectInitial) BER() []byte {
 	buff := &bytes.Buffer{}
 	ber.WriteOctetstring(string(c.CallingDomainSelector), buff)
@@ -205,11 +256,15 @@ func (c *ConnectInitial) BER() []byte {
 	return buff.Bytes()
 }
 
-/**
- * @see http://www.itu.int/rec/T-REC-T.125-199802-I/en page 25
- * @returns {asn1.univ.Sequence}
- */
-
+// ConnectResponse is the server's answer to a Connect-Initial, which is what says
+// the connection was accepted and carries the GCC data the server chose.
+//
+// Every field is unexported, so a caller can read the result of the exchange but
+// not its contents: what the client needs from it is read during the connect
+// sequence, and nothing outside needs the rest. The GCC data is what the
+// capability exchange reads, and it goes to that layer as bytes.
+//
+// See http://www.itu.int/rec/T-REC-T.125-199802-I/en page 25.
 type ConnectResponse struct {
 	result           uint8
 	calledConnectId  int
@@ -217,6 +272,10 @@ type ConnectResponse struct {
 	userData         []byte
 }
 
+// NewConnectResponse returns a Connect-Response with the given GCC user data.
+//
+// A client never sends one: this exists for tests that need the server's side of
+// the exchange, and the parameters it holds are the ones a server would choose.
 func NewConnectResponse(userData []byte) *ConnectResponse {
 	return &ConnectResponse{0,
 		0,
@@ -224,6 +283,10 @@ func NewConnectResponse(userData []byte) *ConnectResponse {
 		userData}
 }
 
+// ReadConnectResponse reads a Connect-Response, starting at its application tag.
+// The result code, the called connect id, the server's domain parameters and the
+// GCC user data are all read; the result is what says whether the connection was
+// accepted.
 func ReadConnectResponse(r io.Reader) (*ConnectResponse, error) {
 	c := &ConnectResponse{}
 	var err error
@@ -249,11 +312,21 @@ func ReadConnectResponse(r io.Reader) (*ConnectResponse, error) {
 	return c, err
 }
 
+// MCSChannelInfo is a channel as the client knows it: the id the server assigned
+// and the name it was asked for under. The list of these is what SendToChannel
+// searches, so a channel that was never connected is not in it.
 type MCSChannelInfo struct {
 	ID   uint16
 	Name string
 }
 
+// MCS is the T.125 layer below the RDP protocol: it delivers the payload of each
+// data PDU and passes writes down to the transport.
+//
+// It is told one opcode for receiving and one for sending because the data opcodes
+// are directional: a server sends indications and a client sends requests, and the
+// same layer on the other side is looking for the other one. Both ends therefore
+// check the opcode they expect rather than accepting either.
 type MCS struct {
 	emission.Emitter
 	transport  core.Transport
@@ -262,6 +335,12 @@ type MCS struct {
 	channels   []MCSChannelInfo
 }
 
+// NewMCS returns an MCS layer over a transport, with the global channel already in
+// its channel list. The global channel is not joined and is not confirmed by the
+// server: it exists from the start, which is why it is in the list before any
+// exchange has happened.
+//
+// The transport's close and error events are forwarded.
 func NewMCS(t core.Transport, recvOpCode MCSDomainPDU, sendOpCode MCSDomainPDU) *MCS {
 	m := &MCS{
 		*emission.NewEmitter(),
@@ -279,18 +358,33 @@ func NewMCS(t core.Transport, recvOpCode MCSDomainPDU, sendOpCode MCSDomainPDU) 
 	return m
 }
 
+// Read reads from the transport with the T.125 framing left in place. It is not
+// how a PDU arrives: the receive path strips the header and emits the payload, and
+// a channel's data is delivered on the channel rather than here.
 func (x *MCS) Read(b []byte) (n int, err error) {
 	return x.transport.Read(b)
 }
 
+// Write writes to the transport with no T.125 framing. Use MCSClient.Write or
+// SendToChannel to send something that a server will understand.
 func (x *MCS) Write(b []byte) (n int, err error) {
 	return x.transport.Write(b)
 }
 
+// Close closes the transport. It does not stop the receive path, which notices and
+// emits "close".
 func (m *MCS) Close() error {
 	return m.transport.Close()
 }
 
+// MCSClient is the client end of the T.125 layer, and it owns the connect
+// sequence: erect domain, attach user, then join each static channel in turn,
+// each one waiting for the server's confirmation before the next is requested.
+//
+// It also builds the GCC data the Connect-Initial carries, which is why the
+// capability setters below live here rather than on a layer of their own: they add
+// to the client core, network and security structures that go out with the
+// connect.
 type MCSClient struct {
 	*MCS
 	clientCoreData     *gcc.ClientCoreData
@@ -306,6 +400,15 @@ type MCSClient struct {
 	nbChannelRequested int
 }
 
+// NewMCSClient returns a client over a transport, with its GCC data ready and its
+// user id chosen.
+//
+// The user id is one above the base, which is the first id a client can have, and
+// the channel it belongs to is the one a server expects to attach: attaching a
+// different id is what a takeover looks like.
+//
+// The connect sequence starts when the transport emits "connect", not here, so a
+// client can be built and configured before anything is sent.
 func NewMCSClient(t core.Transport) *MCSClient {
 	c := &MCSClient{
 		MCS:                NewMCS(t, SEND_DATA_INDICATION, SEND_DATA_REQUEST),
@@ -318,11 +421,20 @@ func NewMCSClient(t core.Transport) *MCSClient {
 	return c
 }
 
+// SetClientDesktop sets the desktop size the client advertises in its core data.
+// It is what the server uses until Display Control changes the size later, so a
+// client that never resizes still has to set it here.
 func (c *MCSClient) SetClientDesktop(width, height uint16) {
 	c.clientCoreData.DesktopWidth = width
 	c.clientCoreData.DesktopHeight = height
 }
 
+// SetClientDynvcProtocol asks for the dynamic channel protocol, which is what the
+// graphics channel and Display Control travel inside, and sets the capability flag
+// that tells the server so.
+//
+// Both halves are needed: the flag without the channel gets no dynamic channel, and
+// the channel without the flag is not created.
 func (c *MCSClient) SetClientDynvcProtocol() {
 	c.clientCoreData.EarlyCapabilityFlags = gcc.RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL
 	c.clientNetworkData.AddVirtualChannel(drdynvc.ChannelName, drdynvc.ChannelOption)
@@ -339,6 +451,7 @@ func (c *MCSClient) SetClientDisplayControl() {
 	c.clientNetworkData.AddVirtualChannel(disp.ChannelName, disp.ChannelOption)
 }
 
+// SetClientCliprdr asks for the clipboard channel.
 func (c *MCSClient) SetClientCliprdr() {
 	c.clientNetworkData.AddVirtualChannel(cliprdr.ChannelName, cliprdr.ChannelOption)
 }
@@ -604,6 +717,12 @@ func (c *MCSClient) recvChannelJoinConfirm(s []byte) {
 	c.connectChannels()
 }
 
+// Pack builds a data PDU: the opcode header, the user id relative to the base, the
+// channel, the fixed 0x70 data header, and a PER length in front of the data.
+//
+// The user id goes out relative to the base because that is what the field counts.
+// The length is a PER length and not the BER length used at the connect, which is
+// the sort of difference that makes a data PDU unreadable if it is got wrong.
 func (c *MCSClient) Pack(data []byte, channelId uint16) []byte {
 	buff := &bytes.Buffer{}
 	writeMCSPDUHeader(c.sendOpCode, 0, buff)
@@ -616,11 +735,19 @@ func (c *MCSClient) Pack(data []byte, channelId uint16) []byte {
 	return buff.Bytes()
 }
 
+// Write sends data on the global channel, which is first in the channel list.
 func (c *MCSClient) Write(data []byte) (n int, err error) {
 	data = c.Pack(data, c.channels[0].ID)
 	return c.transport.Write(data)
 }
 
+// SendToChannel sends data on the named static channel, looking the name up in the
+// list of channels the server confirmed.
+//
+// A name that is not in the list is not an error: the data goes to the global
+// channel instead. That is what makes a send to a channel that was never connected
+// look like it worked, so a caller that needs to know should check the name it is
+// using rather than the error this returns.
 func (c *MCSClient) SendToChannel(channel string, data []byte) (n int, err error) {
 	channelId := c.channels[0].ID
 	for _, ch := range c.channels {
