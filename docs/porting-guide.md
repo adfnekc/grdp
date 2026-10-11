@@ -262,9 +262,98 @@ at a server that disagreed, after unit tests had passed.
 
 ## Upgrading from 0.8 to 0.9
 
-0.9.0 is a breaking release. Nothing in it changes how a session is established
-or drawn, but several exported functions changed what they say and a few were
-removed, so a caller that compiled against 0.8 has to be checked.
+0.9.0 is a breaking release. The list below was not written from memory: the
+exported API of v0.8.6 and of v0.9.0 was extracted from both trees by parsing
+them and the two lists were diffed, so it is the whole of what changed.
+
+If you import `client` and nothing below it, **your build does not break**. That
+package's exported API is purely additive in this release. What you have to check
+is behaviour, and there is one change that matters.
+
+| Package imported | Breaks the build | Changes behaviour |
+| --- | --- | --- |
+| `client` | no, additive only | yes: `MouseWheel` counts units, not notches |
+| `glog` | no, additive only | no, but see the note on `glog.Hex` |
+| `plugin` | no | yes: `Channels.SendToChannel` |
+| `protocol/t125/per` | yes | yes |
+| `protocol/t125/gcc` | yes | yes |
+| `protocol/t125`, `protocol/nla`, `protocol/lic` | yes, removals | yes |
+| everything else | no | no |
+
+The full diff, for completeness:
+
+    removed
+    lic.NewLicenseBinaryBlob
+    nla.NewChallengeMessage
+    t125.NewConnectResponse
+    gcc.MakeConferenceCreateResponse
+    gcc.NewServerCoreData
+    gcc.NewServerNetworkData
+    gcc.ServerCoreData.Serialize
+    gcc.ProprietaryServerCertificate.Encrypt
+    gcc.X509CertificateChain.Encrypt
+
+    signature changed
+    gcc.CertData.Verify            bool -> error
+    gcc.ProprietaryServerCertificate.Verify   bool -> error
+    gcc.X509CertificateChain.Verify           bool -> error
+    per.ReadExcept                 no result -> error
+    per.MacthOctetStream           renamed to MatchOctetStream
+
+    added
+    client.WheelDelta
+    client.Setting.RequireVerifiedCertificate
+    sec.Client.SetRequireVerifiedCertificate
+    glog.Hex
+
+Two other things changed in this release that were pushed after v0.8.6 and are
+therefore part of v0.9.0 rather than of v0.8.6: the wheel encoding and the
+logging cost. A caller that jumped from v0.8.6 to v0.9.0 gets both, and the wheel
+one needs a code change.
+
+### The one code change a gateway needs: MouseWheel
+
+The rotation field counts rotation units, not notches, and one notch is 120 of
+them. 0.8.6 sent a caller's argument through as units, and sent a negative one
+wrongly, so a gateway that passed `1` for a notch was sending a hundred and
+twentieth of one in one direction and about two notches in the other. Both are
+fixed, which means a caller that passed notches must now say so:
+
+    // before, which scrolled nothing up and about two notches down
+    c.MouseWheel(1, x, y)
+
+    // after
+    c.MouseWheel(client.WheelDelta, x, y)     // one notch up
+    c.MouseWheel(-client.WheelDelta, x, y)    // one notch down
+
+A browser wheel event carries a direction rather than a distance, so the usual
+shape is:
+
+    scroll := 1
+    if ev.DeltaY > 0 {
+        scroll = -1
+    }
+    c.MouseWheel(scroll*client.WheelDelta, x, y)
+
+Anything larger than 255 or smaller than -256 is clamped rather than wrapped,
+because the field is nine bits and signed and a scroll up that becomes a scroll
+down is worse than a shorter scroll.
+
+### glog: nothing breaks, but stop encoding payloads at the call site
+
+`glog` is compatible: the level functions and the level constants are unchanged.
+What changed is when work happens. The level is now read before a message is
+built, so a discarded line costs almost nothing, and `glog.Hex` defers the
+encoding of a byte dump to the same moment.
+
+A caller that adds its own per-packet TRACE line should use it. The pattern it
+replaces encoded every received PDU into a string whether tracing was on or not,
+which measured at four megabytes of garbage for each megabyte transferred:
+
+    glog.Trace("recvData", hex.EncodeToString(payload))   // encodes always
+    glog.Trace("recvData", glog.Hex(payload))             // encodes if written
+
+Nothing breaks if this is left alone. It just stays slow.
 
 ### The server certificate is now actually checked
 
@@ -339,7 +428,7 @@ not being there:
     gcc.ServerCoreData.Serialize             // returned an empty slice
     gcc.NewServerCoreData                    // for a server side that does not exist
     gcc.NewServerNetworkData                 // as above
-    gcc.NewConnectResponse                   // as above
+    t125.NewConnectResponse                  // as above
     nla.NewChallengeMessage                  // as above
     gcc.ProprietaryServerCertificate.Encrypt // returned nil
     gcc.X509CertificateChain.Encrypt         // returned nil
