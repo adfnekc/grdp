@@ -259,3 +259,102 @@ at a server that disagreed, after unit tests had passed.
   left the old wrong assumption in place as a note, and twice a later reader
   nearly "fixed" working code back to the wrong version because a test asserted
   the old behaviour. When you correct a belief, correct the test with it.
+
+## Upgrading from 0.8 to 0.9
+
+0.9.0 is a breaking release. Nothing in it changes how a session is established
+or drawn, but several exported functions changed what they say and a few were
+removed, so a caller that compiled against 0.8 has to be checked.
+
+### The server certificate is now actually checked
+
+`gcc.CertData.Verify` returned `true` for every certificate. It was called on the
+Standard RDP Security path, before the client random was encrypted to the
+certificate's key, so a certificate that nobody trusts was reported as trusted and
+the session keys were agreed with whoever presented it.
+
+It now returns an `error` and does the work:
+
+    Verify() error        // was: Verify() bool
+
+* `gcc.X509CertificateChain.Verify` verifies the leaf against the system roots,
+  using the other blobs as intermediates. A chain issued by a public certificate
+  authority passes; a self-signed one does not, because there is nothing in the
+  roots to anchor it. The server's name is not checked, because this structure
+  carries no name; TLS checks names, this cannot.
+* `gcc.ProprietaryServerCertificate.Verify` always returns an error, and says why:
+  a version 1 certificate is a bare public key and a signature blob with no
+  issuer, no validity period and no trust anchor, so there is nothing to verify it
+  against. It is not a check that failed, it is a check that cannot exist.
+
+The default is to report the result and continue, which is the same default the
+TLS layer already used (`InsecureSkipVerify`), and it is why most sessions do not
+change: an RDP server normally presents a self-signed certificate, so requiring
+verification by default would refuse most servers, including a local xrdp.
+
+To require it:
+
+    s := client.NewSetting()
+    s.RequireVerifiedCertificate = true    // Standard RDP Security only
+
+or on the layers below, `sec.Client.SetRequireVerifiedCertificate(true)`. A
+version 1 certificate then refuses the login, which is what that setting means.
+
+Over TLS or CredSSP this has no effect: there the certificate belongs to the TLS
+layer.
+
+### A send that failed no longer looks like one that worked
+
+`plugin.Channels.SendToChannel` returned a count that was always zero, because it
+returned the variable its loop counted down, and it discarded the error from the
+channel sender. It now returns the number of payload bytes sent and propagates the
+error, so a caller that checked `n == 0` to mean "nothing was sent" must be
+checked: zero now means zero, and a partial chunked send returns the part that
+went.
+
+### Names
+
+    per.MacthOctetStream        ->  per.MatchOctetStream
+
+It was a misspelling of the same function, exported, so the rename is breaking.
+
+### Functions that reported rather than did
+
+    per.ReadExcept(b byte, r io.Reader)   // panicked on a mismatch
+    per.ReadExcept(b byte, r io.Reader)   // returns an error
+
+It parses bytes that arrived over a network. A parser that can end the process on
+hostile input is not one this library should have. The byte is still consumed
+either way, so a caller must treat the error as fatal to the message rather than
+skipping past it.
+
+### Deleted
+
+These were exported, unimplemented and called from nowhere. An exported function
+that returns `nil` or an empty slice says it does something, which is worse than
+not being there:
+
+    lic.NewLicenseBinaryBlob                 // ignored its only argument
+    gcc.MakeConferenceCreateResponse         // returned nil
+    gcc.ServerCoreData.Serialize             // returned an empty slice
+    gcc.NewServerCoreData                    // for a server side that does not exist
+    gcc.NewServerNetworkData                 // as above
+    gcc.NewConnectResponse                   // as above
+    nla.NewChallengeMessage                  // as above
+    gcc.ProprietaryServerCertificate.Encrypt // returned nil
+    gcc.X509CertificateChain.Encrypt         // returned nil
+
+`gcc.NewServerSecurityData` is kept, because a test uses it.
+
+### One encoding corrected
+
+`per.WriteObjectIdentifier` combined the first two OID components with a bitwise
+AND where the encoding calls for `oid[0]*40+oid[1]`. The two agree only when both
+are zero, which is true of 0.0.20.127.0.0.1, the identifier MCS actually sends, so
+the bytes on the wire do not change for it. For any other identifier they do, and
+now they are right.
+
+`ber.WriteInteger` wrote a negative value's low byte as though it were positive,
+because the comparison that chose the width was a comparison on an `int`. Negative
+values are now written as four bytes of two's complement, which is what a BER
+reader sign extends. Positive values are unchanged, byte for byte.

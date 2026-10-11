@@ -119,6 +119,11 @@
 //     cannot fake. A hover highlight, a tooltip or an already focused window all
 //     look like success while the event is being dropped, which is how a button
 //     flag and a cursor mask each stayed wrong for months.
+//   - The server certificate is verified on the Standard RDP Security path and
+//     the result is reported rather than enforced, because an RDP server normally
+//     presents a self-signed certificate and refusing those by default refuses most
+//     servers. [client.Setting].RequireVerifiedCertificate turns it into a failed
+//     login. A version 1 certificate never verifies: it has no chain to check.
 //   - Logging a payload on a per packet path means [glog.Hex], never
 //     hex.EncodeToString at the call site. The encoding has to happen after the
 //     level is read, or it happens on every packet whether tracing is on or not.

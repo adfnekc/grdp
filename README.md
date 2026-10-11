@@ -209,7 +209,7 @@ without having been run against something that did not write the test.
 | --- | --- |
 | Connection, TLS, NLA, licensing, clipboard, bitmap updates | Run against xrdp 0.9.24 and a real Windows 10 host |
 | Mouse and keyboard input | Run against both, with tests chosen so that a hover cannot fake them: a selection that survives the pointer moving away, a context menu, a flyout, a selection rectangle. Saying "the click worked" on the strength of a hover highlight is what hid a dropped button flag for months |
-| Standard RDP Security | Run against a local xrdp requiring it, and pixel-identical to the TLS path on the same target |
+| Standard RDP Security | Run against a local xrdp requiring it, and pixel-identical to the TLS path on the same target. Its server certificate is now verified rather than assumed good, and a local xrdp presents a version 1 certificate that by construction cannot be verified, which is why the default reports the result instead of refusing it |
 | EGFX rendering | A whole Windows desktop through the graphics channel, compared against the bitmap path |
 | Drawing orders | A whole Windows lock screen through the bitmap cache, and the two drawing paths agree to the taskbar clock |
 | VNC | A real TigerVNC server: a frame arrives, and the clipboard works both ways |
