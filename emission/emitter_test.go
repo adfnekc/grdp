@@ -150,3 +150,40 @@ func TestEmitWithNoListeners(t *testing.T) {
 	e.Emit("other-event")
 	e.Emit("registered")
 }
+
+// The listeners of one event used to be called in a goroutine each, so two of them
+// could be inside a handler at the same time. That was the mechanism behind a
+// process-killing bug: a handler registered once could run twice at once, and two
+// concurrent writers to one map are a fatal error rather than a panic.
+//
+// This pins the replacement. The two handlers overlap only if the emitter runs them
+// concurrently, and the sleep is long enough that it certainly does.
+func TestListenersOfOneEventDoNotRunConcurrently(t *testing.T) {
+	e := NewEmitter()
+
+	var mu sync.Mutex
+	inFlight, mostInFlight := 0, 0
+	handler := func() {
+		mu.Lock()
+		inFlight++
+		if inFlight > mostInFlight {
+			mostInFlight = inFlight
+		}
+		mu.Unlock()
+
+		time.Sleep(2 * time.Millisecond)
+
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}
+	e.On("work", handler)
+	e.On("work", handler)
+	e.Emit("work")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if mostInFlight != 1 {
+		t.Errorf("%d listeners of one event were running at once, want at most 1", mostInFlight)
+	}
+}

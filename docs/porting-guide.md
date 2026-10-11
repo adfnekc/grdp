@@ -244,16 +244,30 @@ at a server that disagreed, after unit tests had passed.
   preamble does not touch those, and sending it changed nothing. Do not adopt it
   hoping for that.
 
-* **A listener can run twice at once, and that is fatal rather than awkward.**
-  The emitter calls every listener in its own goroutine, so a handler registered
-  twice for one event runs twice concurrently. If both copies write the same Go
-  map, the runtime raises a `fatal error: concurrent map writes`, which is not a
-  panic: `recover` does not catch it, and it takes the process down with every
-  session in it. It happened to a gateway. `Once` is what stops the connection
-  sequence from doing it, by taking the listener off the list before calling it,
-  but a handler registered with `On` twice is still two goroutines. Anything a
-  handler touches that another copy could touch needs a lock, and anything the
-  read loop and another goroutine share needs one too.
+* **A listener that writes a map the read loop also writes needs a lock, and
+  `Once` is what makes the connection sequence safe.** Two concurrent `Emit` calls
+  still run concurrently with each other, so a handler can still be entered twice
+  at once by two deliveries, and two concurrent writers to one Go map are a
+  `fatal error: concurrent map writes` rather than a panic: `recover` does not
+  catch it and it takes the process down with every session in it. It happened to
+  a gateway. `Once` is what stops the connection sequence from doing it, by taking
+  the listener off the list before calling it.
+
+  This entry used to say more than that, and the rest is no longer true. The
+  emitter used to call every listener in its own goroutine, so two listeners for
+  one event ran concurrently too, and the reflection and the goroutines together
+  cost about 1.5 microseconds per delivery on a path that delivers once per PDU at
+  every layer. Listeners are now called in order on the emitting goroutine, which
+  is five to fifty times faster and removes that class of bug: two listeners of
+  one event cannot overlap, and the test that pins it fails on the old code.
+
+* **A per-delivery cost is a per-packet cost, and the packet rate is what you
+  notice.** The emitter was 1.5 microseconds and six allocations per delivery,
+  which does not sound like much until it is multiplied by five layers and every
+  PDU of a file transfer. Delivering a 1460 byte channel message went from 2486
+  nanoseconds to 469, and the smaller the message the larger the gain, because the
+  cost was fixed rather than proportional. When something looks expensive, check
+  whether it is on a per-packet path before deciding it is too small to matter.
 
 * **A comment that describes a mistake is worth keeping.** Several times the fix
   left the old wrong assumption in place as a note, and twice a later reader
@@ -262,7 +276,30 @@ at a server that disagreed, after unit tests had passed.
 
 ## Upgrading from 0.8 to 0.9
 
-0.9.0 is a breaking release. The list below was not written from memory: the
+### Since the v0.9.0 tag: listeners are called in order, on the calling goroutine
+
+One change landed after v0.9.0 and is not in that tag. `emission.Emitter` used to
+call every listener in its own goroutine, through `reflect.Value.Call`, with the
+emit waiting for all of them. It now calls them in registration order, directly,
+on the goroutine that emitted.
+
+That is a semantic change for a caller that relied on two listeners of one event
+running concurrently, and it removes a class of bug rather than adding one: the
+`fatal error: concurrent map writes` in the traps below came from exactly that
+concurrency, and it is now impossible for one emit. Two concurrent emits still run
+concurrently with each other, so a handler that another delivery can enter still
+needs its own lock, and `Once` is still what protects the connection sequence.
+
+It is also the fix for the per-PDU delivery cost: 1.5 microseconds and six
+allocations per delivery became 67 nanoseconds and two, and delivering a 1460 byte
+channel message went from 2486 to 469 nanoseconds. The smaller the message, the
+larger the gain, because the cost was fixed.
+
+## Upgrading from 0.8 to 0.9
+
+0.9.0 was already tagged when the reflection and the goroutines were removed, so a
+caller moving from 0.8 to a later tag gets both this and the list below. 0.9.0 is a
+breaking release. The list below was not written from memory: the
 exported API of v0.8.6 and of v0.9.0 was extracted from both trees by parsing
 them and the two lists were diffed, so it is the whole of what changed.
 
