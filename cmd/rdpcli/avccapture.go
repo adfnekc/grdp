@@ -56,7 +56,7 @@ const (
 // version this client actually implements.
 func (a *avcCapture) SupportsAVCCodec(codecID uint16) bool {
 	switch codecID {
-	case codecIDAVC420:
+	case codecIDAVC420, codecIDAVC444, codecIDAVC444v2:
 		return true
 	default:
 		return false

@@ -213,6 +213,19 @@ The tooling is here for whenever a server that does send AVC is available: an
 `-egfx -capture-avc DIR`, plus `client.Client.Gfx()` and an earlier graphics client
 so that a decoder can be installed before the capabilities go out.
 
+## The fix was verified against the target
+
+`master` now carries the fix, and the tool on this branch was used to check it,
+because the tool is what offers a decoder that claims AVC444 in the first place.
+
+| | Before | After |
+| --- | --- | --- |
+| A decoder claims AVC444 | the connection is reset as soon as the advertisement goes out | the session runs for the full twenty seconds |
+| Log | nothing | a warning that the decoder claims AVC444 and that this client will not offer it, with the reason |
+
+Still no access unit is captured, which is expected and is the other finding of
+this exploration: this target has no H.264 encoder to produce one with.
+
 ## Deliberately not decided
 
 Nothing here has been implemented. No dependency has been added. The branch exists
