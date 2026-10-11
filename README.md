@@ -339,11 +339,14 @@ display, and runs the live VNC tests against it.
 `go run ./cmd/docaudit .` lists exported identifiers that godoc will render
 without a doc comment, which is the one thing that makes an API unpleasant to
 read from `go doc` alone. It takes directories rather than package patterns, so
-`.` is the whole tree and `./...` silently walks nothing and reports nothing
-missing. What it reports today is 531, almost all of it wire constants and
-structures in the protocol layers; `client`, `core`, `codec`, `orders`,
-`protocol/rfb`, the plugins, `glog` and the commands are at zero, and the number
-goes down rather than being declared.
+`.` is the whole tree: `./...` is not a directory, so it walks nothing and
+finds nothing missing, silently.
+
+That is how this API was believed fully documented while 531 identifiers were
+not, nearly all of them wire constants and structures in the protocol layers.
+Every one of them has a comment now and the command reports nothing, for any
+package. Run it rather than trusting this paragraph, which is the mistake the
+number itself came from.
 
 ## Take ideas from
 

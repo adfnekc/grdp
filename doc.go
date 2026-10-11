@@ -132,9 +132,9 @@
 //
 // docaudit takes directories, not package patterns: "./..." walks nothing and
 // reports nothing missing, which is how this API was believed documented while
-// it was not. The client package, the codecs, the orders, the commands and glog
-// report no gaps; the protocol layers report several hundred, nearly all of them
-// wire constants, and that number is meant to fall.
+// 531 identifiers were not. It reports nothing now, and it checks the build
+// constraints, so it counts what godoc would render rather than what happens to
+// be in the directory.
 //
 // scripts/dev-rdp.sh manages a local xrdp for integration testing and
 // scripts/vnc-dev.sh fetches TigerVNC without root for the RFB side. The
