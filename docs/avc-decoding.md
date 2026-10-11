@@ -161,6 +161,58 @@ reference for what a working client sends, and then sending exactly that. The
 first grep for it did not find the code, so this is where the next attempt starts
 rather than something already answered.
 
+## Why this target cannot exercise any of it
+
+The target's display adapters, asked for on the machine:
+
+```
+Name                 DriverVersion AdapterRAM
+----                 ------------- ----------
+OrayIddDriver Device 17.1.58.818
+VMware SVGA 3D       9.17.4.1      4293918720
+```
+
+A VMware SVGA 3D adapter is a paravirtualised display with no hardware H.264
+encoder. Windows generates its AVC streams with one, and the FreeRDP report that
+started this line of enquiry is a server that had H.264 hardware encoding left
+unconfigured for exactly that reason: it was a virtual machine. So this server has
+nothing to encode AVC with, which is consistent with what was measured, an
+advertisement accepted and no access unit ever sent.
+
+That settles the exploration for this target. A decoder cannot be validated
+against a server that never sends a bitstream, and no amount of client work
+changes that.
+
+The second adapter is worth writing down as an environment fact rather than as an
+explanation: an Oray (Sunlogin) indirect display driver is installed. An IDD can
+create virtual displays, and one being present is a reason to be careful about
+conclusions drawn from what this machine renders. It is not evidence for anything
+on its own, and it is not offered as the reason nothing was captured.
+
+## What this exploration is worth, given it cannot be finished here
+
+One real fault, found by measurement, which is on the branch that produced it:
+
+* **Advertising AVC444 resets the connection on this server**, because it adds a
+  version 10.0 capability set and advertising a version promises to process what
+  that version implies. This is not limited to an exploration: any caller that
+  installs a decoder claiming AVC444 gets a connection that dies at the capability
+  exchange. Fixing it means either implementing what 10.0 requires or not offering
+  it, and the capture tool takes the second route by claiming AVC420 alone.
+
+And two things settled that cost a search each rather than a guess:
+
+* **Which decoder.** `oops1/go.264`, BSD-2-Clause, pure Go, complete High profile
+  with CABAC and in-loop deblocking. The two other candidates decode keyframes
+  only, which an RDP stream is not.
+* **That the AVC444 merge is ours to write**, because no general decoder combines
+  two independent sub-streams that were never meant to be decoded together.
+
+The tooling is here for whenever a server that does send AVC is available: an
+`AVCDecoder` that captures access units instead of decoding them, reached with
+`-egfx -capture-avc DIR`, plus `client.Client.Gfx()` and an earlier graphics client
+so that a decoder can be installed before the capabilities go out.
+
 ## Deliberately not decided
 
 Nothing here has been implemented. No dependency has been added. The branch exists
