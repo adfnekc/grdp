@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"os"
@@ -459,21 +460,19 @@ func (p *ProprietaryServerCertificate) GetPublicKey() (*rsa.PublicKey, error) {
 	return &rsa.PublicKey{N: b, E: int(e.Int64())}, nil
 }
 
-// Verify reports whether the certificate is trusted, and it always reports true.
+// Verify reports that this certificate cannot be verified, which is the truth
+// rather than a failure of this implementation.
 //
-// Nothing is checked: the signature is parsed and never verified, and no
-// certificate authority is consulted. It exists to satisfy CertData. A caller that
-// needs the server to be authenticated needs TLS or CredSSP to be the thing that
-// establishes it, and this cannot be used as evidence of anything.
-func (p *ProprietaryServerCertificate) Verify() bool {
-	return true
-}
-
-// Encrypt returns nil. It is unimplemented; a server certificate is never
-// encrypted, and nothing calls this.
-func (p *ProprietaryServerCertificate) Encrypt() []byte {
-	//todo
-	return nil
+// A version 1 certificate is a bare RSA public key with a signature blob and no
+// chain: there is no issuer, no validity period and no trust anchor, so there is
+// nothing to check it against. The signature blob is not verified either, because a
+// signature with no issuer to name is not a statement about anything.
+//
+// A caller that needs the server authenticated should use TLS or CredSSP, which
+// have a trust model. This returns an error so that it cannot be mistaken for a
+// check that passed.
+func (p *ProprietaryServerCertificate) Verify() error {
+	return errors.New("gcc: a version 1 server certificate is a bare public key with no chain to verify against")
 }
 
 // Unpack reads the certificate. The lengths in it count eight bytes of padding
@@ -550,20 +549,40 @@ func (x *X509CertificateChain) GetPublicKey() (*rsa.PublicKey, error) {
 	return rsaPublicKey, nil
 }
 
-// Verify reports whether the chain is trusted, and it always reports true.
+// Verify verifies the chain against the system's certificate authorities and reports
+// whether the server's own certificate is trusted.
 //
-// Nothing is checked: no signature is verified and no certificate authority is
-// consulted, and the chain's own signatures are not walked. It exists to satisfy
-// CertData. Server authentication has to come from TLS or CredSSP, which is where
-// this library gets it; this method is not evidence of anything.
-func (x *X509CertificateChain) Verify() bool {
-	return true
-}
-
-// Encrypt returns nil. It is unimplemented; a server certificate is never
-// encrypted, and nothing calls this.
-func (x *X509CertificateChain) Encrypt() []byte {
-	//todo
+// The last blob is the server's certificate and the ones before it are the
+// intermediates that signed it, which is the order the wire format uses and the
+// order GetPublicKey relies on. The leaf is verified with the system roots and those
+// intermediates, so a chain signed by a public certificate authority passes and a
+// self-signed one does not, since there is nothing in the roots to anchor it.
+//
+// The server's name is not checked, because there is nothing here to check it
+// against: this structure carries no name and RDP servers commonly present a
+// certificate issued for a host that the client did not dial. A caller that needs
+// the name checked should use TLS, which does it.
+func (x *X509CertificateChain) Verify() error {
+	if len(x.CertBlobArray) == 0 {
+		return errors.New("gcc: the server certificate chain is empty")
+	}
+	leaf, err := x509.ParseCertificate(x.CertBlobArray[len(x.CertBlobArray)-1].AbCert)
+	if err != nil {
+		return fmt.Errorf("gcc: parse the server certificate: %w", err)
+	}
+	opts := x509.VerifyOptions{Intermediates: x509.NewCertPool()}
+	for _, blob := range x.CertBlobArray[:len(x.CertBlobArray)-1] {
+		cert, err := x509.ParseCertificate(blob.AbCert)
+		if err != nil {
+			// A chain with an unreadable intermediate cannot be verified through
+			// it, and dropping it is the same as not having it.
+			continue
+		}
+		opts.Intermediates.AddCert(cert)
+	}
+	if _, err := leaf.Verify(opts); err != nil {
+		return fmt.Errorf("gcc: server certificate is not trusted: %w", err)
+	}
 	return nil
 }
 
@@ -580,19 +599,6 @@ type ServerCoreData struct {
 	RdpVersion              VERSION `struc:"uint32,little"`
 	ClientRequestedProtocol uint32  `struc:"little"`
 	EarlyCapabilityFlags    uint32  `struc:"little"`
-}
-
-// NewServerCoreData returns core data for a server to send. A client reads one
-// rather than making one, so this exists for tests.
-func NewServerCoreData() *ServerCoreData {
-	return &ServerCoreData{
-		RDP_VERSION_5_PLUS, 0, 0}
-}
-
-// Serialize returns an empty slice. It is unimplemented, and a server frame is
-// what the protocol says the server sends; nothing calls this.
-func (d *ServerCoreData) Serialize() []byte {
-	return []byte{}
 }
 
 // ScType reports which conference message this is, so that a reader can dispatch
@@ -622,12 +628,6 @@ type ServerNetworkData struct {
 	ChannelIdArray []uint16 `struc:"little"`
 }
 
-// NewServerNetworkData returns empty network data. A client reads one rather than
-// making one, so this exists for tests.
-func NewServerNetworkData() *ServerNetworkData {
-	return &ServerNetworkData{}
-}
-
 // ScType reports which conference message this is.
 func (d *ServerNetworkData) ScType() Message {
 	return SC_NET
@@ -641,11 +641,19 @@ func (d *ServerNetworkData) Unpack(r io.Reader) error {
 
 // CertData is a server certificate, in whichever of the two forms it arrived.
 //
-// Verify is part of the interface and both implementations return true without
-// checking anything, so it cannot be relied on. See the implementations.
+// Verify reports whether the certificate can be trusted for this connection, and
+// every implementation now says something true: a version 2 chain is verified
+// against the system roots, and a version 1 certificate is a bare public key with
+// no chain, which cannot be verified at all and says so. Nothing here returns true
+// without having checked something.
+//
+// An error means the certificate is not trusted, and carries the reason. The
+// default in the security layer is to report it and continue, because an RDP
+// server normally presents a self-signed certificate and refusing those by default
+// would refuse most servers; see sec.Client.SetRequireVerifiedCertificate.
 type CertData interface {
 	GetPublicKey() (*rsa.PublicKey, error)
-	Verify() bool
+	Verify() error
 	Unpack(io.Reader) error
 }
 
@@ -783,22 +791,39 @@ func ReadConferenceCreateRequest(data []byte) ([]interface{}, error) {
 	}()
 	r := bytes.NewReader(data)
 
-	per.ReadExcept(0x00, r)                                                   // 00
-	oidMatch := per.MatchObjectIdentifier(r, t124_02_98_oid)                  // 05:00:14:7c:00:01
-	_, err1 := per.ReadLength(r)                                              //length
-	per.ReadExcept(0x00, r)                                                   // 00
-	per.ReadExcept(0x08, r)                                                   // 08
-	per.ReadNumericString(per.MinSimpleNumericStringLen, r)                   // 00 10
-	per.ReadExcept(0x00, r)                                                   // 00
-	per.ReadExcept(0x01, r)                                                   // 01
-	per.ReadExcept(0xC0, r)                                                   // c0
-	per.MacthOctetStream(r, h221_cs_key, per.MinH221NonStandardIdentifierLen) // 00 44:75:63:61
-
-	if !oidMatch {
-		return nil, errors.New("t124_02_98_oid not match")
+	// Each fixed byte is checked rather than skipped: the value is what the
+	// protocol says it is, and a wrong one means everything after it was read from
+	// the wrong offset. The value is still consumed either way, which is why a
+	// failure ends the message rather than being retried at another position.
+	if err := per.ReadExcept(0x00, r); err != nil { // 00 choice
+		return nil, fmt.Errorf("gcc: conference create request: %w", err)
 	}
-	if err1 != nil {
-		return nil, err1
+	// The identifier is read before the length in a request and after it in a
+	// response, which is the one place the two readers differ in field order.
+	oidMatch := per.MatchObjectIdentifier(r, t124_02_98_oid)
+	if _, err := per.ReadLength(r); err != nil {
+		return nil, fmt.Errorf("gcc: conference create request length: %w", err)
+	}
+	for _, want := range []struct {
+		b   byte
+		why string
+	}{
+		{0x00, "choice"},
+		{0x08, "selection"},
+		{0x00, "padding"},
+		{0x01, "number of set"},
+		{0xC0, "choice"},
+	} {
+		if err := per.ReadExcept(want.b, r); err != nil {
+			return nil, fmt.Errorf("gcc: conference create request: %s: %w", want.why, err)
+		}
+	}
+	per.ReadNumericString(per.MinSimpleNumericStringLen, r) // 00 10
+	if !per.MatchOctetStream(r, h221_cs_key, per.MinH221NonStandardIdentifierLen) {
+		return nil, errors.New("gcc: conference create request does not carry the H.221 client key")
+	}
+	if !oidMatch {
+		return nil, errors.New("gcc: conference create request does not carry the T.124 identifier")
 	}
 
 	ret := make([]interface{}, 0, 3)
@@ -841,14 +866,6 @@ type ScData interface {
 	Unpack(io.Reader) error
 }
 
-// MakeConferenceCreateResponse returns nil. It is unimplemented, which is not a
-// gap for this library: a client reads the server's response rather than writing
-// one, and ReadConferenceCreateResponse is what is used.
-func MakeConferenceCreateResponse(userData []byte) []byte {
-	// TODO MakeConferenceCreateResponse
-	return nil
-}
-
 // ReadConferenceCreateResponse reads a Conference Create Response, which is what
 // carries the server's user data back.
 //
@@ -873,7 +890,7 @@ func ReadConferenceCreateResponse(data []byte) []interface{} {
 	per.ReadNumberOfSet(r)
 	per.ReadChoice(r)
 
-	if !per.MacthOctetStream(r, h221_sc_key, 4) {
+	if !per.MatchOctetStream(r, h221_sc_key, 4) {
 		glog.Error("NODE_RDP_PROTOCOL_T125_GCC_BAD_H221_SC_KEY")
 		return ret
 	}

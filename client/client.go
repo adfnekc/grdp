@@ -738,6 +738,20 @@ type Setting struct {
 	// going to resize anything should not have its negotiation altered.
 	EnableDisplayControl bool
 
+	// RequireVerifiedCertificate turns an unverified server certificate into a
+	// failed login instead of a warning, on Standard RDP Security only.
+	//
+	// It is off by default, and the reason is not convenience: an RDP server
+	// normally presents a self-signed certificate, so requiring verification
+	// would refuse most servers, including a local xrdp. The same default is used
+	// for TLS, where the certificate is verified by the TLS layer only if the
+	// caller supplies a configuration that asks for it.
+	//
+	// A version 1 certificate, which the older proprietary form is, can never
+	// verify whatever it contains: it is a bare public key with no chain. With
+	// this set, a server that presents one is refused.
+	RequireVerifiedCertificate bool
+
 	// EnableOrders advertises support for the MEMBLT drawing order and renders
 	// the drawing orders that follow, into a framebuffer reachable through
 	// Client.Screen.

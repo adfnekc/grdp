@@ -649,6 +649,13 @@ type Client struct {
 
 	fastPathListener core.FastPathListener
 	channelSender    core.ChannelSender
+
+	// requireVerifiedCertificate turns an unverified server certificate from a
+	// warning into a failure. It is off by default because a self-signed
+	// certificate is what an RDP server normally presents, and it only has an
+	// effect on Standard RDP Security: over TLS the certificate is the TLS
+	// layer's business and is verified there.
+	requireVerifiedCertificate bool
 }
 
 // NewClient returns a client over a transport. The connection sequence starts when
@@ -995,9 +1002,17 @@ func (c *Client) sendClientRandom() error {
 		return errors.New("sec: server certificate chain is empty")
 	}
 
-	//verify certificate
-	if !ssd.ServerCertificate.CertData.Verify() {
-		glog.Warn("Cannot verify server identity")
+	// The certificate is what the client random is encrypted to, so a certificate
+	// that is not the server's means the session keys are agreed with someone
+	// else. Verifying it is worth doing, and an RDP server normally presents a
+	// self-signed certificate, so by default the result is reported and the
+	// session continues. That is the same default the TLS layer uses; see
+	// SetRequireVerifiedCertificate for the other one.
+	if err := ssd.ServerCertificate.CertData.Verify(); err != nil {
+		if c.requireVerifiedCertificate {
+			return fmt.Errorf("sec: server certificate not verified: %w", err)
+		}
+		glog.Warn("sec: server certificate not verified, continuing:", err)
 	}
 
 	serverPubKey, err := ssd.ServerCertificate.CertData.GetPublicKey()
@@ -1281,6 +1296,25 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		data = c.readEncryptedPayload(s, secFlag&FASTPATH_OUTPUT_SECURE_CHECKSUM != 0)
 	}
 	c.fastPathListener.RecvFastPath(secFlag, data)
+}
+
+// SetRequireVerifiedCertificate decides whether an unverified server certificate
+// ends the connection.
+//
+// It applies to Standard RDP Security, where the server's certificate is what the
+// client random is encrypted to and there is no other trust model. There the
+// default is to report the result and continue, because a self-signed certificate
+// is what an RDP server normally presents and refusing those by default would
+// refuse most servers.
+//
+// With it set, a certificate that does not verify is an error and the connection
+// is abandoned. A version 1 certificate never verifies, whatever it contains; see
+// gcc.ProprietaryServerCertificate.Verify.
+//
+// It has no effect over TLS or CredSSP, where the certificate belongs to the TLS
+// layer and is verified there.
+func (c *Client) SetRequireVerifiedCertificate(require bool) {
+	c.requireVerifiedCertificate = require
 }
 
 // SetChannelSender sets what SendToChannel writes through. It is called by the

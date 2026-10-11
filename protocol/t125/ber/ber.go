@@ -167,22 +167,33 @@ func ReadInteger(r io.Reader) (int, error) {
 	}
 }
 
-// WriteInteger writes an INTEGER, choosing the shortest of one, two and four
-// bytes that holds the value.
+// WriteInteger writes an INTEGER, choosing one, two or four bytes by the size of
+// the value.
 //
-// Negative values are not handled: the comparison that picks the size is a
-// comparison on an int, so a negative number takes the one byte branch and is
-// written as its low byte. CredSSP has no negative integer to send, and a caller
-// that finds one should not be using this.
+// A negative value is written as its four byte two's complement, which is what an
+// INTEGER means in BER: the encoding is signed and a reader sign extends it. That
+// is why a negative value takes four bytes rather than the one byte its magnitude
+// would: the negative numbers that fit in one byte are not the ones a caller sends.
+//
+// The width is chosen by value rather than being the shortest encoding of the
+// value, so this is not minimal DER: a positive value at or above 0x80 is written
+// without the leading zero byte that DER requires to keep it positive, and a value
+// at or above 0x100 is written in two bytes even though that is the minimum. What
+// it produces is what the RDP connection sequence reads, and changing it to be
+// minimal would change the bytes on the wire for every domain parameter.
 func WriteInteger(n int, w io.Writer) {
 	WriteUniversalTag(TAG_INTEGER, false, w)
-	if n <= 0xff {
+	switch {
+	case n < 0:
+		WriteLength(4, w)
+		core.WriteUInt32BE(uint32(int32(n)), w)
+	case n <= 0xff:
 		WriteLength(1, w)
 		core.WriteUInt8(uint8(n), w)
-	} else if n <= 0xffff {
+	case n <= 0xffff:
 		WriteLength(2, w)
 		core.WriteUInt16BE(uint16(n), w)
-	} else {
+	default:
 		WriteLength(4, w)
 		core.WriteUInt32BE(uint32(n), w)
 	}

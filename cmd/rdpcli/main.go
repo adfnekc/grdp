@@ -262,6 +262,7 @@ func main() {
 	setClip := flag.String("set-clipboard", "", "publish this text on the shared clipboard once ready")
 	clipReq := flag.Duration("request-clipboard-after", 0, "ask the server for its clipboard text this long after ready (0 disables)")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
+	requireCert := flag.Bool("require-verified-cert", false, "fail the login if the server certificate is not verified (Standard RDP Security only)")
 	flag.Parse()
 
 	s := client.NewSetting()
@@ -270,6 +271,7 @@ func main() {
 	s.Protocol = *proto
 	s.LogLevel = glog.LEVEL(*logLevel)
 	s.NoFastPathInput = *slowInput
+	s.RequireVerifiedCertificate = *requireCert
 	s.EnableEGFX = *egfx
 	s.EnableOrders = *ordersFlag
 	s.EnableDisplayControl = *dispFlag || *resize != ""

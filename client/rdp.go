@@ -294,6 +294,9 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	c.sec.SetUser(user)
 	c.sec.SetPwd(pwd)
 	c.sec.SetDomain(domain)
+	if c.setting != nil {
+		c.sec.SetRequireVerifiedCertificate(c.setting.RequireVerifiedCertificate)
+	}
 
 	c.tpkt.SetFastPathListener(c.sec)
 	c.sec.SetFastPathListener(c.pdu)

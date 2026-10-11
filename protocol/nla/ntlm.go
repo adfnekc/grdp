@@ -206,15 +206,6 @@ func (m *ChallengeMessage) Serialize() []byte {
 	return buff.Bytes()
 }
 
-// NewChallengeMessage returns a challenge message with the signature and message
-// type set. A client reads one rather than making one, so this exists for tests.
-func NewChallengeMessage() *ChallengeMessage {
-	return &ChallengeMessage{
-		Signature:   []byte{'N', 'T', 'L', 'M', 'S', 'S', 'P', 0x00},
-		MessageType: 0x00000002,
-	}
-}
-
 // total len - payload len
 // BaseLen returns the length of the message up to its payload, which is what an
 // offset in the message is measured against.

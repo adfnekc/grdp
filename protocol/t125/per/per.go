@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/adfnekc/grdp/glog"
-	"github.com/pkg/errors"
 
 	"github.com/adfnekc/grdp/core"
 )
@@ -100,18 +99,22 @@ func ReadLength(r io.Reader) (uint16, error) {
  * @param oid {array} oid to write
  * @returns {type.Component} per encoded object identifier
  */
-// WriteObjectIdentifier writes the one object identifier MCS connects with,
+// WriteObjectIdentifier writes the object identifier MCS connects with,
 // 0.0.20.127.0.0.1, which is encoded as five bytes of content behind a length of
 // five.
 //
-// The first byte is meant to be the first two components combined as
-// oid[0]*40+oid[1], and what is here is a bitwise AND of the two instead. The two
-// agree only because both components are zero, which is true of this identifier
-// and would not be true of another, so this is not a general encoder. The other
-// five bytes go out as they are, one octet per component.
+// The first byte is the first two components combined as oid[0]*40+oid[1], and the
+// bytes after it are one octet per component. Only identifiers whose first two
+// components are both below 40 encode this way, which is every identifier this
+// library writes and not every identifier there is: a larger component needs the
+// multi-byte base-128 form, which is not implemented here.
+//
+// This used to combine the two components with a bitwise AND, which agrees with
+// the arithmetic only when both are zero. That is true of this identifier, which
+// is why it worked, and it is why the fault was invisible.
 func WriteObjectIdentifier(oid []byte, w io.Writer) {
 	core.WriteUInt8(5, w)
-	core.WriteByte((oid[0]<<4)&(oid[1]&0x0f), w)
+	core.WriteByte(byte(oid[0]*40+oid[1])&0xff, w)
 	core.WriteByte(oid[2], w)
 	core.WriteByte(oid[3], w)
 	core.WriteByte(oid[4], w)
@@ -290,15 +293,17 @@ func MatchObjectIdentifier(r io.Reader, oid []byte) bool {
 	return true
 }
 
-// MacthOctetStream reads an octet stream and reports whether it is the string
-// given. The misspelling is in the name and not in this comment: it is exported,
-// so it cannot be corrected without breaking a caller, and there is one caller.
+// MatchOctetStream reads an octet stream and reports whether it is the string
+// given.
 //
 // The length on the wire is a count above the type's minimum, so the minimum is
 // added back before the comparison. The comparison is byte by byte, so the stream
-// is consumed even when it does not match, and a caller that gets false must
-// treat the message as abandoned.
-func MacthOctetStream(r io.Reader, s string, min int) bool {
+// is consumed even when it does not match, and a caller that gets false must treat
+// the message as abandoned rather than trying another value.
+//
+// This was called MacthOctetStream, which was a misspelling of the same function
+// and was exported, so the rename is a breaking change.
+func MatchOctetStream(r io.Reader, s string, min int) bool {
 	ln, _ := ReadLength(r)
 	size := int(ln) + min
 	if size != len(s) {
@@ -330,19 +335,20 @@ func ReadOctetStream(r io.Reader, min int) (string, error) {
 	return string(buf[min:]), nil
 }
 
-// ReadExcept reads one byte and panics if it is not the expected value, which
-// makes it a parser that stops the program rather than returning an error.
+// ReadExcept reads one byte and reports whether it is the expected value.
 //
-// That is deliberate and it is also the sharpest edge in this package: it is used
-// where an unexpected byte means the stream has been badly misread and every
-// later field would be nonsense, so carrying on would produce a wrong result
-// instead of a failure. A short read panics too.
-func ReadExcept(b byte, r io.Reader) {
+// An unexpected byte means the stream has been misread and every later field
+// would be nonsense, so a caller must treat the error as fatal to the message and
+// not as something to skip past. It returns an error rather than panicking: this
+// parses bytes that arrived over a network, and a parser that can end the process
+// on hostile input is not a parser this library should have.
+func ReadExcept(b byte, r io.Reader) error {
 	u, err := core.ReadUInt8(r)
 	if err != nil {
-		panic(fmt.Errorf("except %X,but read err", b))
+		return fmt.Errorf("per: expected %#02x, could not read: %w", b, err)
 	}
 	if byte(u) != b {
-		panic(errors.WithStack(fmt.Errorf("except %X,but read %X", b, u)))
+		return fmt.Errorf("per: expected %#02x, read %#02x", b, u)
 	}
+	return nil
 }

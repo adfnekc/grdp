@@ -194,15 +194,14 @@ func (t FastPathUpdateType) String() string {
 }
 
 // BITMAP_COMPRESSION is the flag in an update's bitmap flags that says the bitmap
-// data is compressed, which is what decides whether the compression flags byte and
-// the compressed data header are present.
+// data is compressed, which is what decides whether the compressed data header is
+// present.
 //
-// NO_BITMAP_COMPRESSION_HDR is commented out beside it. It exists in the protocol and
-// means the header is absent, which is a case this client does not handle: sending
-// it here would invite reading such an update wrongly rather than failing.
+// NO_BITMAP_COMPRESSION_HDR, which says the header is absent and the data starts
+// immediately, is defined beside the other bitmap flags in caps.go and is handled
+// where the update's rectangles are read.
 const (
 	BITMAP_COMPRESSION = 0x0001
-	//NO_BITMAP_COMPRESSION_HDR = 0x0400
 )
 
 // The compression types for the bulk compressor used on the slow path, which is the

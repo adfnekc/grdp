@@ -127,16 +127,6 @@ type LicenseBinaryBlob struct {
 	BlobData  []byte `struc:"sizefrom=WBlobLen"`
 }
 
-// NewLicenseBinaryBlob returns an empty blob.
-//
-// WBlobType is not stored, and nothing in this library calls this function: the
-// blob type and length are set by whoever packs the structure, since the length
-// is derived from the data. It is exported and unused, which is worth knowing
-// before trusting the argument to do anything.
-func NewLicenseBinaryBlob(WBlobType uint16) *LicenseBinaryBlob {
-	return &LicenseBinaryBlob{}
-}
-
 /*
 """
 @summary: License server product information

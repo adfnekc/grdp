@@ -272,17 +272,6 @@ type ConnectResponse struct {
 	userData         []byte
 }
 
-// NewConnectResponse returns a Connect-Response with the given GCC user data.
-//
-// A client never sends one: this exists for tests that need the server's side of
-// the exchange, and the parameters it holds are the ones a server would choose.
-func NewConnectResponse(userData []byte) *ConnectResponse {
-	return &ConnectResponse{0,
-		0,
-		NewDomainParameters(22, 3, 0, 1, 0, 1, 0xfff8, 2),
-		userData}
-}
-
 // ReadConnectResponse reads a Connect-Response, starting at its application tag.
 // The result code, the called connect id, the server's domain parameters and the
 // GCC user data are all read; the result is what says whether the connection was

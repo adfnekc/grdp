@@ -316,21 +316,26 @@ func (c *Channels) Register(t ChannelTransport) {
 // together. The flag for showing the header is copied from the channel's options,
 // because a channel that asked for it expects the header to be part of the data.
 //
-// Two things about what this returns are worth knowing: the count is always zero,
-// because the variable it returns is the one the loop counts down, and the error from
-// the sender is not returned at all. A caller cannot use either to tell whether the
-// message arrived.
+// The count returned is the number of payload bytes sent, not counting the eight
+// byte chunk headers. It used to return zero always, because it returned the very
+// variable the loop counted down, and it used to discard the sender's error, so a
+// caller had no way at all to tell whether a message had gone anywhere. A failure
+// part way through a chunked message returns the bytes sent before it, which is
+// what tells a caller that the message was partly delivered.
 func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 	cli, ok := c.channels[channel]
 	if !ok {
 		glog.Warn("No register channel:", channel)
-		return 0, fmt.Errorf("No register channel: %s", channel)
+		return 0, fmt.Errorf("no channel registered as %q", channel)
 	}
-	idx := 0
-	ln := len(s)
+	if c.channelSender == nil {
+		return 0, fmt.Errorf("channels: no channel sender, the connection is not ready")
+	}
+
+	sent := 0
 	b := &bytes.Buffer{}
-	for ln > 0 {
-		var flag uint32 = 0
+	for idx := 0; idx < len(s); {
+		var flag uint32
 		if cli.Options&CHANNEL_OPTION_SHOW_PROTOCOL != 0 {
 			flag |= CHANNEL_FLAG_SHOW_PROTOCOL
 		}
@@ -338,23 +343,25 @@ func (c *Channels) SendToChannel(channel string, s []byte) (int, error) {
 			flag |= CHANNEL_FLAG_FIRST
 		}
 
-		var ss []byte
-		if ln > CHANNEL_CHUNK_LENGTH {
-			ss = s[idx : idx+CHANNEL_CHUNK_LENGTH]
-			idx += CHANNEL_CHUNK_LENGTH
-		} else {
+		end := idx + CHANNEL_CHUNK_LENGTH
+		if end >= len(s) {
+			end = len(s)
 			flag |= CHANNEL_FLAG_LAST
-			ss = s[idx : idx+ln]
 		}
+		ss := s[idx:end]
+
 		glog.Debug("len:", len(ss), "flag:", flag)
-		ln -= len(ss)
 		b.Reset()
 		core.WriteUInt32LE(uint32(len(s)), b)
 		core.WriteUInt32LE(flag, b)
 		b.Write(ss)
-		c.channelSender.SendToChannel(channel, b.Bytes())
+		if _, err := c.channelSender.SendToChannel(channel, b.Bytes()); err != nil {
+			return sent, fmt.Errorf("channels: send on %q: %w", channel, err)
+		}
+		sent += len(ss)
+		idx = end
 	}
-	return ln, nil
+	return sent, nil
 }
 
 func (c *Channels) process(channel string, s []byte) {
