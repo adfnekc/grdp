@@ -391,19 +391,33 @@ func TestAVC420AdvertisedWithDecoder(t *testing.T) {
 
 // A decoder that can decode AVC444 also needs a 10.0 capability set, which is
 // the only version whose flags control AVC444.
-func TestAVC444AdvertisedWithDecoder(t *testing.T) {
+// A decoder that can decode AVC444 does not get a version 10 capability set, and
+// this test used to assert the opposite.
+//
+// The old behaviour was to add the 10.0 set, because AVC444 has no flag of its
+// own and that is the version whose flags control it. Advertising a version is a
+// promise to process everything that version implies, and this client implements
+// none of it. Measured against a Windows 10 host: with the 10.0 set the server
+// resets the connection as soon as the advertisement goes out, and without it the
+// session runs normally with the AVC420 flag on 8.1. So the set is not sent, and a
+// decoder claiming AVC444 is told that it will not be used.
+func TestAVC444NotAdvertisedEvenWithDecoder(t *testing.T) {
 	for _, codecID := range []uint16{codecAVC444, codecAVC444v2} {
 		dec := &stubAVCDecoder{supports: map[uint16]bool{codecID: true}}
 		sets := capsetsOf(advertise(t, dec))
-		if len(sets) != 3 {
-			t.Fatalf("codec 0x%04x: got %d capsets, want 3", codecID, len(sets))
+		if len(sets) != 2 {
+			t.Fatalf("codec 0x%04x: got %d capsets, want 2 (8.0 and 8.1)", codecID, len(sets))
 		}
-		last := sets[len(sets)-1]
-		if last.version != CapsVersion10 {
-			t.Errorf("codec 0x%04x: last capset version = 0x%08x, want 0x%08x", codecID, last.version, CapsVersion10)
+		for _, cs := range sets {
+			if cs.version == CapsVersion10 {
+				t.Errorf("codec 0x%04x: advertised the 10.0 capset, which resets the connection on a real server", codecID)
+			}
 		}
-		if last.flags&capsFlagThinClient == 0 {
-			t.Errorf("codec 0x%04x: 10.0 capset lost THINCLIENT, so the server may use RemoteFX Progressive", codecID)
+		if sets[0].version != CapsVersion8 || sets[1].version != CapsVersion81 {
+			t.Errorf("codec 0x%04x: versions are 0x%08x and 0x%08x, want 8.0 and 8.1", codecID, sets[0].version, sets[1].version)
+		}
+		if sets[1].flags&capsFlagAVC420Enabled != 0 {
+			t.Errorf("codec 0x%04x: AVC420 was offered by a decoder that does not claim it", codecID)
 		}
 	}
 }

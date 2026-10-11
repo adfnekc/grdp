@@ -222,7 +222,7 @@ without having been run against something that did not write the test.
 | Cursors on Windows | A real Windows 10 host: 41x39 shapes, hotspots at the arrow's tip, and the 24bpp I beam whose AND mask is set almost everywhere, which xrdp's two colour cursors never exercise |
 | Robustness | Fuzzing, which found two infinite loops and three panics; the corpus is kept |
 | The shape, glyph, nine grid and multi rectangle orders | FreeRDP's parsers and unit tests only: no reachable server sends them |
-| The AVC420 and AVC444 framing | FreeRDP's parsers and unit tests only: decoding needs a decoder this does not ship |
+| The AVC420 and AVC444 framing | FreeRDP's parsers and unit tests only: decoding needs a decoder this does not ship, and AVC444 is not offered to a server at all, because asking for it needs a capability version this client does not implement |
 
 ## Using it as a library
 

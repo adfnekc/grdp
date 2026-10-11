@@ -972,12 +972,21 @@ func (c *GfxClient) sendCapsAdvertise() error {
 		{CapsVersion8, capsFlagThinClient},
 		{CapsVersion81, flags81},
 	}
-	// AVC444 has no flag of its own: a server sends it only once the client
-	// advertises a 10.0 or later set without AVC_DISABLED. THINCLIENT is kept
-	// on that set too, so the server still prefers RemoteFX over the
-	// Progressive variant this client cannot decode.
+	// AVC444 is deliberately not offered, even when the installed decoder says it
+	// can decode it.
+	//
+	// It has no flag of its own: a server sends it only once the client
+	// advertises a 10.0 or later set, and advertising a version is a promise to
+	// process everything that version implies, which this client does not
+	// implement. Measured against a Windows 10 host: a client that adds the 10.0
+	// set has its connection reset as soon as the advertisement goes out, while
+	// one that stops at 8.1 with the AVC420 flag keeps the session. A decoder
+	// claiming AVC444 is therefore told that it will not be used, rather than
+	// being given a connection that dies.
 	if c.avcSupported(codecAVC444) || c.avcSupported(codecAVC444v2) {
-		sets = append(sets, capset{CapsVersion10, capsFlagThinClient})
+		glog.Warn("rdpgfx: the decoder claims AVC444, but this client will not offer it: " +
+			"AVC444 needs the version 10 capability set, and advertising a version promises " +
+			"to process what it implies, which this client does not implement")
 	}
 
 	length := headerSize + 2

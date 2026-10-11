@@ -269,6 +269,15 @@ at a server that disagreed, after unit tests had passed.
   cost was fixed rather than proportional. When something looks expensive, check
   whether it is on a per-packet path before deciding it is too small to matter.
 
+* **Advertising a capability version is a promise to process what it implies.**
+  A server is entitled to refuse a client that claims a version it does not
+  implement, and Windows 10 does more than refuse: adding the version 10.0
+  graphics capability set, which is what asking for AVC444 requires, makes it reset
+  the connection as soon as the advertisement goes out. Offering 8.0 and 8.1 with
+  the AVC420 flag keeps the session. The rule that follows is the one this
+  repository already applies to capabilities elsewhere: advertise what you
+  implement, and nothing else.
+
 * **Measure the path before changing the client.** A file transfer here ran at
   about a tenth of what the same network path does raw, and every client-side
   change that was tried against it left throughput where it was: removing the
