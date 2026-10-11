@@ -11,6 +11,9 @@ import (
 	"github.com/lunixbochs/struc"
 )
 
+// The PDU types in a share control header, which is what says what the rest of the
+// PDU is. These five are the ones on the slow path: the connection sequence, and the
+// data PDUs that carry everything else.
 const (
 	PDUTYPE_DEMANDACTIVEPDU  = 0x11
 	PDUTYPE_CONFIRMACTIVEPDU = 0x13
@@ -19,8 +22,14 @@ const (
 	PDUTYPE_SERVER_REDIR_PKT = 0x1A
 )
 
+// PduType2 is the second level of PDU type, which only exists inside a data PDU: the
+// share control header says the PDU is a data PDU and this says what it carries.
+//
+// The values are sparse and the two directions have separate ranges, so both a
+// server's updates and a client's input are in this one list.
 type PduType2 uint8
 
+// The data PDU types.
 const (
 	PDUTYPE2_UPDATE                      = 0x02
 	PDUTYPE2_CONTROL                     = 0x14
@@ -103,6 +112,10 @@ func (p PduType2) String() string {
 	return "Unknown"
 }
 
+// The control actions in a control PDU, which is how either side asks for the
+// session's control or gives it up. Only one side can hold it, so this is what a
+// takeover is: another client requesting control, which the server then asks this
+// one about.
 const (
 	CTRLACTION_REQUEST_CONTROL = 0x0001
 	CTRLACTION_GRANTED_CONTROL = 0x0002
@@ -110,6 +123,9 @@ const (
 	CTRLACTION_COOPERATE       = 0x0004
 )
 
+// The stream identifiers in a share data header, which name the channel within a
+// share that a data PDU belongs to. STREAM_LOW is what this client sends; the others
+// exist so that a server's value can be read rather than treated as unknown.
 const (
 	STREAM_UNDEFINED = 0x00
 	STREAM_LOW       = 0x01
@@ -117,8 +133,16 @@ const (
 	STREAM_HI        = 0x04
 )
 
+// FastPathUpdateType is the update type in a fast-path PDU header. It is this
+// level's equivalent of PduType2, and the two cover the same ground in different
+// framings: a bitmap update can arrive either way.
 type FastPathUpdateType uint8
 
+// The fast-path update types. The pointer ones are separate types rather than one
+// with a sub-field, which is why a shape and a position arrive as different PDUs.
+//
+// The list is not contiguous: 0x7 and 0xD are absent, and treating it as an index
+// into a table would be wrong.
 const (
 	FASTPATH_UPDATETYPE_ORDERS        = 0x0
 	FASTPATH_UPDATETYPE_BITMAP        = 0x1
@@ -165,12 +189,24 @@ func (t FastPathUpdateType) String() string {
 	return "Unknown"
 }
 
+// BITMAP_COMPRESSION is the flag in an update's bitmap flags that says the bitmap
+// data is compressed, which is what decides whether the compression flags byte and
+// the compressed data header are present.
+//
+// NO_BITMAP_COMPRESSION_HDR is commented out beside it. It exists in the protocol and
+// means the header is absent, which is a case this client does not handle: sending
+// it here would invite reading such an update wrongly rather than failing.
 const (
 	BITMAP_COMPRESSION = 0x0001
 	//NO_BITMAP_COMPRESSION_HDR = 0x0400
 )
 
-/* compression types */
+// The compression types for the bulk compressor used on the slow path, which is the
+// MPPC family.
+//
+// The three flags describe what a compressed block is: RDP_MPPC_COMPRESSED says it is
+// compressed at all, and RESET and FLUSH are instructions to the decompressor's
+// history rather than data, which is why they have to be acted on rather than skipped.
 const (
 	RDP_MPPC_BIG        = 0x01
 	RDP_MPPC_COMPRESSED = 0x20
@@ -179,6 +215,9 @@ const (
 	RDP_MPPC_DICT_SIZE  = 65536
 )
 
+// ShareDataHeader is the header of every slow-path data PDU. It names the share, the
+// stream and the PDU type, and it carries the uncompressed length, which is what a
+// decompressor needs when the compressed length is the only other thing it is told.
 type ShareDataHeader struct {
 	SharedId           uint32 `struc:"little"`
 	Padding1           uint8  `struc:"little"`
@@ -189,6 +228,13 @@ type ShareDataHeader struct {
 	CompressedLength   uint16 `struc:"little"`
 }
 
+// NewShareDataHeader returns a header for a data PDU of the given size, on the
+// stream this client uses.
+//
+// The uncompressed length is the size plus four, which counts the header of the
+// message inside the PDU: the length field is about the message rather than about the
+// data alone, and getting it wrong is a decompression failure rather than a length
+// check.
 func NewShareDataHeader(size int, type2 uint8, shareId uint32) *ShareDataHeader {
 	return &ShareDataHeader{
 		SharedId:           shareId,
@@ -198,11 +244,19 @@ func NewShareDataHeader(size int, type2 uint8, shareId uint32) *ShareDataHeader 
 	}
 }
 
+// PDUMessage is a slow-path PDU that can be sent: it knows its type for the share
+// control header and how to serialize itself.
 type PDUMessage interface {
 	Type() uint16
 	Serialize() []byte
 }
 
+// DemandActivePDU is the server's first protocol PDU, which offers the session and
+// lists the server's capabilities. The client answers with a ConfirmActivePDU.
+//
+// The capability sets are the important part: what the server advertises here decides
+// what the client may ask for in its own list, so a client that has not read this
+// cannot know what it is allowed to use.
 type DemandActivePDU struct {
 	SharedId                   uint32       `struc:"little"`
 	LengthSourceDescriptor     uint16       `struc:"little,sizeof=SourceDescriptor"`
@@ -214,10 +268,17 @@ type DemandActivePDU struct {
 	SessionId                  uint32       `struc:"little"`
 }
 
+// Type reports that this is a demand active PDU.
 func (d *DemandActivePDU) Type() uint16 {
 	return PDUTYPE_DEMANDACTIVEPDU
 }
 
+// Serialize returns the PDU. It is used by the tests and by the server side of an
+// exchange, not by a client, which reads this PDU rather than sending it.
+//
+// Each capability set goes out with its type and a length that counts the four byte
+// header of the set as well as the set, which is the length convention every
+// capability uses.
 func (d *DemandActivePDU) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	core.WriteUInt32LE(d.SharedId, buff)
@@ -275,6 +336,11 @@ func readDemandActivePDU(r io.Reader) (*DemandActivePDU, error) {
 	return d, nil
 }
 
+// ConfirmActivePDU is the client's answer to the server's demand: the same shape with
+// the client's capabilities in it, and this is where a client says what it can do.
+//
+// OriginatorId is what tells a server that this is the same client reconnecting
+// rather than a new one.
 type ConfirmActivePDU struct {
 	SharedId                   uint32       `struc:"little"`
 	OriginatorId               uint16       `struc:"little"`
@@ -286,10 +352,16 @@ type ConfirmActivePDU struct {
 	CapabilitySets             []Capability `struc:"sizefrom=NumberCapabilities"`
 }
 
+// Type reports that this is a confirm active PDU.
 func (*ConfirmActivePDU) Type() uint16 {
 	return PDUTYPE_CONFIRMACTIVEPDU
 }
 
+// Serialize returns the PDU, which is the message a client sends to accept the
+// session and state its capabilities.
+//
+// The combined capabilities length is computed from the sets and written before them,
+// so the sets have to be finalized before this is called.
 func (c *ConfirmActivePDU) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	core.WriteUInt32LE(c.SharedId, buff)
@@ -339,6 +411,8 @@ func (c *ConfirmActivePDU) Serialize() []byte {
 // 14000c000000000000000000
 // 1a00080000000000
 
+// NewConfirmActivePDU returns an empty PDU for a client to fill in, with the source
+// descriptor a client normally sends and no capability sets yet.
 func NewConfirmActivePDU() *ConfirmActivePDU {
 	return &ConfirmActivePDU{
 		OriginatorId:     0x03EA,
@@ -379,16 +453,21 @@ func readConfirmActivePDU(r io.Reader) (*ConfirmActivePDU, error) {
 	return p, nil
 }
 
+// DeactiveAllPDU ends the session. It is sent by whichever side is stopping, and a
+// client that receives one should treat the session as over rather than as dropped.
 type DeactiveAllPDU struct {
 	ShareId                uint32 `struc:"little"`
 	LengthSourceDescriptor uint16 `struc:"little,sizeof=SourceDescriptor"`
 	SourceDescriptor       []byte
 }
 
+// Type reports that this is a deactivate all PDU.
 func (*DeactiveAllPDU) Type() uint16 {
 	return PDUTYPE_DEACTIVATEALLPDU
 }
 
+// Serialize returns the PDU, which is its header and nothing else: the PDU carries no
+// data beyond the share control header that names it.
 func (d *DeactiveAllPDU) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	struc.Pack(buff, d)
@@ -401,15 +480,28 @@ func readDeactiveAllPDU(r io.Reader) (*DeactiveAllPDU, error) {
 	return p, err
 }
 
+// DataPDU is the slow-path PDU that carries everything after the connection
+// sequence: updates, pointer shapes, input and session messages.
+//
+// The header is the share data header and the data is whatever DataPDUData says it
+// is, which is decided by the PduType2 in that header rather than by anything in the
+// data itself.
 type DataPDU struct {
 	Header *ShareDataHeader
 	Data   DataPDUData
 }
 
+// Type reports that this is a data PDU.
 func (*DataPDU) Type() uint16 {
 	return PDUTYPE_DATAPDU
 }
 
+// Serialize returns the PDU: the share data header, then the data's own serialized
+// form.
+//
+// The length in the header is computed from the serialized data, so the data has to
+// be serialized before the header is written, which is why this builds the data first
+// and the header second even though they go out the other way round.
 func (d *DataPDU) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	struc.Pack(buff, d.Header)
@@ -417,6 +509,8 @@ func (d *DataPDU) Serialize() []byte {
 	return buff.Bytes()
 }
 
+// NewDataPDU returns a data PDU carrying the given data on the given share, with the
+// header filled in from the data's own type.
 func NewDataPDU(data DataPDUData, shareId uint32) *DataPDU {
 	dataBuff := &bytes.Buffer{}
 	struc.Pack(dataBuff, data)
@@ -479,19 +573,32 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 	return p, nil
 }
 
+// DataPDUData is the payload of a data PDU. Type2 is the second level PDU type that
+// goes in the share data header, and Unpack reads the payload once that header has
+// said what it is.
 type DataPDUData interface {
 	Type2() uint8
 	Unpack(io.Reader) error
 }
 
+// UpdateDataPDU is the slow-path update, which carries a list of update structures:
+// bitmap updates, pointer updates, palette updates and synchronize marks.
 type UpdateDataPDU struct {
 	UpdateType uint16
 	Udata      UpdateData
 }
 
+// Type2 reports that this is an update.
 func (*UpdateDataPDU) Type2() uint8 {
 	return PDUTYPE2_UPDATE
 }
+
+// Unpack reads the update list.
+//
+// The header's update type decides how many of the header's bytes are present: the
+// count is one or two bytes depending on whether the update type has its high bit
+// set, and reading the wrong width takes a byte from the first update and misaligns
+// everything after it.
 func (d *UpdateDataPDU) Unpack(r io.Reader) (err error) {
 	//slow path update
 	d.UpdateType, err = core.ReadUint16LE(r)
@@ -519,14 +626,25 @@ func (d *UpdateDataPDU) Unpack(r io.Reader) (err error) {
 	return nil
 }
 
+// BitmapUpdateDataPDU is the first update structure in an update: the bitmap update,
+// which carries one or more bitmaps and is what draws the screen on the slow path.
 type BitmapUpdateDataPDU struct {
 	NumberRectangles uint16 `struc:"little,sizeof=Rectangles"`
 	Rectangles       []BitmapData
 }
 
+// FastPathUpdateType reports that this is a bitmap update, in the fast path's own
+// numbering rather than the slow path's.
 func (*BitmapUpdateDataPDU) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_BITMAP
 }
+
+// Unpack reads a bitmap update: the header, then each rectangle's bounds and its
+// bitmap data.
+//
+// The bitmap lengths are bounded against what is left of the update before anything is
+// read from them, and a length that does not fit ends the update rather than being
+// trusted, which is what stops a corrupt length becoming an allocation.
 func (f *BitmapUpdateDataPDU) Unpack(r io.Reader) error {
 	var err error
 	f.NumberRectangles, err = core.ReadUint16LE(r)
@@ -558,38 +676,56 @@ func (f *BitmapUpdateDataPDU) Unpack(r io.Reader) error {
 	return err
 }
 
+// SynchronizeDataPDU is the server's synchronize mark, sent once after the
+// capabilities are exchanged and expected to be answered by the client.
+//
+// It carries the target user id, which the server uses to tell one session's input
+// from another's.
 type SynchronizeDataPDU struct {
 	MessageType uint16 `struc:"little"`
 	TargetUser  uint16 `struc:"little"`
 }
 
+// Type2 reports that this is a synchronize message.
 func (*SynchronizeDataPDU) Type2() uint8 {
 	return PDUTYPE2_SYNCHRONIZE
 }
 
+// NewSynchronizeDataPDU returns a synchronize message for the given target user,
+// which is what the client sends in answer to the server's own.
 func NewSynchronizeDataPDU(targetUser uint16) *SynchronizeDataPDU {
 	return &SynchronizeDataPDU{
 		MessageType: 1,
 		TargetUser:  targetUser,
 	}
 }
+
+// Unpack reads the target user id.
 func (d *SynchronizeDataPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, d)
 }
 
+// ControlDataPDU is the control message, which carries a control action: a request
+// for the session's control, a grant of it, a detach, or a note that the sender is
+// cooperating.
 type ControlDataPDU struct {
 	Action    uint16 `struc:"little"`
 	GrantId   uint16 `struc:"little"`
 	ControlId uint32 `struc:"little"`
 }
 
+// Type2 reports that this is a control message.
 func (*ControlDataPDU) Type2() uint8 {
 	return PDUTYPE2_CONTROL
 }
+
+// Unpack reads the action and its fields.
 func (d *ControlDataPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, d)
 }
 
+// FontListDataPDU is the server's list of the fonts it will use in drawing orders,
+// which the client answers by choosing the ones it has.
 type FontListDataPDU struct {
 	NumberFonts   uint16 `struc:"little"`
 	TotalNumFonts uint16 `struc:"little"`
@@ -597,24 +733,36 @@ type FontListDataPDU struct {
 	EntrySize     uint16 `struc:"little"`
 }
 
+// Type2 reports that this is a font list.
 func (*FontListDataPDU) Type2() uint8 {
 	return PDUTYPE2_FONTLIST
 }
+
+// Unpack reads the font entries, each of which is a count of characters and the index
+// of the font in the cache.
 func (d *FontListDataPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, d)
 }
 
+// ErrorInfoDataPDU is the server's report of why it disconnected, as a code. It
+// arrives before the session ends and is the most useful thing in a failed session
+// after the security layer's errors.
 type ErrorInfoDataPDU struct {
 	ErrorInfo uint32 `struc:"little"`
 }
 
+// Type2 reports that this is an error info message.
 func (*ErrorInfoDataPDU) Type2() uint8 {
 	return PDUTYPE2_SET_ERROR_INFO_PDU
 }
+
+// Unpack reads the error code.
 func (d *ErrorInfoDataPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, d)
 }
 
+// FontMapDataPDU is the client's answer to a font list: the mapping from the server's
+// font indexes to the indexes of the client's own fonts.
 type FontMapDataPDU struct {
 	NumberEntries   uint16 `struc:"little"`
 	TotalNumEntries uint16 `struc:"little"`
@@ -622,26 +770,49 @@ type FontMapDataPDU struct {
 	EntrySize       uint16 `struc:"little"`
 }
 
+// Type2 reports that this is a font map.
 func (*FontMapDataPDU) Type2() uint8 {
 	return PDUTYPE2_FONTMAP
 }
+
+// Unpack reads the mapping: a count, then one entry per server font.
 func (d *FontMapDataPDU) Unpack(r io.Reader) error {
 	return struc.Unpack(r, d)
 }
 
+// InfoType is the kind of logon information in a save session info message. The four
+// kinds carry different fields, so the value is what decides how the body is read.
+//
+// See MS-RDPBCGR 2.2.10.1.1.4.
 type InfoType uint32
 
+// The logon notification types in a save session info message.
+//
+// LOGON and LOGON_LONG carry the credentials fields in their short and long forms, and
+// the extended one carries the reconnect cookie: a client that does not read the
+// fourth can never use auto reconnect, because that is the only message the cookie
+// arrives in.
 const (
 	INFOTYPE_LOGON               = 0x00000000
 	INFOTYPE_LOGON_LONG          = 0x00000001
 	INFOTYPE_LOGON_PLAINNOTIFY   = 0x00000002
 	INFOTYPE_LOGON_EXTENDED_INFO = 0x00000003
 )
+
+// The extended logon flags, which say what an extended logon notification carries.
+// AUTORECONNECTCOOKIE is the one that matters: its presence is what says a cookie
+// follows, and the cookie's length is what says how much of the body is unread.
 const (
 	LOGON_EX_AUTORECONNECTCOOKIE = 0x00000001
 	LOGON_EX_LOGONERRORS         = 0x00000002
 )
 
+// LogonFields are the long form of the logon information: the domain, user name and
+// shell, each as a length and a string that may be encoded as Unicode.
+//
+// The fields are named after the Windows LogonInfo structure rather than being
+// rearranged, because the order they appear in is what the wire says and not a choice
+// this client makes.
 type LogonFields struct {
 	CbFileData uint32   `struc:"little"`
 	Len        uint32   //28 `struc:"little"`
@@ -649,6 +820,14 @@ type LogonFields struct {
 	LogonId    uint32   `struc:"little"`
 	random     [16]byte //16 `struc:"little"`
 }
+
+// SaveSessionInfo is the server's logon notification, which is how a session reports
+// that a logon succeeded, that it failed, or that a reconnect cookie has been
+// issued.
+//
+// What it carries depends entirely on its InfoType, which is why the four forms are
+// read by four separate methods rather than by one that switches: the fields have
+// nothing in common beyond the header.
 type SaveSessionInfo struct {
 	InfoType      uint32
 	Length        uint16
@@ -719,6 +898,12 @@ func (s *SaveSessionInfo) logonInfoExtended(r io.Reader) (err error) {
 	core.ReadBytes(570, r)
 	return err
 }
+
+// Unpack reads the logon notification, dispatching on the info type.
+//
+// An info type that is not one of the four is read as having no body rather than
+// being reported as an error, so a caller cannot tell an unknown notification from an
+// empty one here.
 func (s *SaveSessionInfo) Unpack(r io.Reader) (err error) {
 	s.InfoType, err = core.ReadUInt32LE(r)
 	switch s.InfoType {
@@ -742,6 +927,8 @@ func (*SaveSessionInfo) Type2() uint8 {
 	return PDUTYPE2_SAVE_SESSION_INFO
 }
 
+// PersistKeyPDU is the persistent bitmap cache key list, which the server sends when
+// it wants the client to keep cached bitmaps across sessions.
 type PersistKeyPDU struct {
 	NumEntriesCache0   uint16 `struc:"little"`
 	NumEntriesCache1   uint16 `struc:"little"`
@@ -767,6 +954,12 @@ type UpdateData interface {
 	Unpack(io.Reader) error
 }
 
+// BitmapCompressedDataHeader is the header in front of compressed bitmap data, which
+// is absent when the update's flags say so.
+//
+// The header is what makes the compressed data self-describing: it gives the length
+// and the uncompressed size, so a decompressor does not have to guess where the
+// bitmap ends.
 type BitmapCompressedDataHeader struct {
 	CbCompFirstRowSize uint16 `struc:"little"`
 	CbCompMainBodySize uint16 `struc:"little"`
@@ -774,6 +967,12 @@ type BitmapCompressedDataHeader struct {
 	CbUncompressedSize uint16 `struc:"little"`
 }
 
+// BitmapData is one bitmap in a bitmap update: where it goes, and its pixels in
+// whatever form the flags say.
+//
+// The data can be raw, RLE compressed or codec compressed, and the flags are what
+// decide which: the same field holds all three, and reading it as the wrong one
+// produces garbage rather than a failure.
 type BitmapData struct {
 	DestLeft         uint16 `struc:"little"`
 	DestTop          uint16 `struc:"little"`
@@ -788,16 +987,31 @@ type BitmapData struct {
 	BitmapDataStream []byte
 }
 
+// IsCompress reports whether the bitmap's data is compressed, which decides whether
+// there is a compressed data header in front of it and whether the data goes through
+// the bulk decompressor or is read as pixels.
 func (b *BitmapData) IsCompress() bool {
 	return b.Flags&BITMAP_COMPRESSION != 0
 }
 
+// FastPathBitmapUpdateDataPDU is the fast-path bitmap update, which is the same
+// update as the slow path carries in a different framing.
+//
+// The screen is cut into rectangles rather than sent whole, and each rectangle is
+// decoded on its own, which is why the region count and the per rectangle bounds are
+// read before any pixels are.
 type FastPathBitmapUpdateDataPDU struct {
 	Header           uint16 `struc:"little"`
 	NumberRectangles uint16 `struc:"little,sizeof=Rectangles"`
 	Rectangles       []BitmapData
 }
 
+// Unpack reads the update: the region count, then each rectangle's bounds and its
+// bitmap data, until the update is used up.
+//
+// Each rectangle is bounded before anything is allocated from it, so a length that
+// does not fit in what is left of the update is an error rather than an allocation of
+// whatever it claims.
 func (f *FastPathBitmapUpdateDataPDU) Unpack(r io.Reader) error {
 	var err error
 	f.Header, err = core.ReadUint16LE(r)
@@ -830,10 +1044,13 @@ func (f *FastPathBitmapUpdateDataPDU) Unpack(r io.Reader) error {
 	return err
 }
 
+// FastPathUpdateType reports that this is a bitmap update.
 func (*FastPathBitmapUpdateDataPDU) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_BITMAP
 }
 
+// FastPathColorPdu is a palette update on the fast path: the entries that changed and
+// the index they start at.
 type FastPathColorPdu struct {
 	CacheIdx uint16
 	X        uint16
@@ -846,19 +1063,28 @@ type FastPathColorPdu struct {
 	Data     []byte
 }
 
+// FastPathUpdateType reports that this is a palette update.
 func (*FastPathColorPdu) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_COLOR
 }
+
+// Unpack reads the palette entries.
 func (f *FastPathColorPdu) Unpack(r io.Reader) error {
 	return struc.Unpack(r, f)
 }
 
+// FastPathSurfaceCmds is a group of surface commands delivered on the fast path
+// instead of the dynamic channel, which is what a server may do once the client has
+// advertised surface command support.
 type FastPathSurfaceCmds struct {
 }
 
 func (*FastPathSurfaceCmds) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_SURFCMDS
 }
+
+// Unpack reads the surface commands and hands them to the same handler the dynamic
+// channel uses, so a surface arriving either way is drawn the same.
 func (f *FastPathSurfaceCmds) Unpack(r io.Reader) error {
 	cmdType, _ := core.ReadUint16LE(r)
 	switch cmdType {
@@ -868,6 +1094,13 @@ func (f *FastPathSurfaceCmds) Unpack(r io.Reader) error {
 	return nil
 }
 
+// FastPathUpdatePDU is a fast-path PDU that carries update data rather than input or
+// pointer traffic.
+//
+// Its header holds a fragmentation flag as well as the update type, because a large
+// update can be split across several PDUs. A fragment other than the last has to be
+// joined with the ones around it before it can be parsed, and parsing one on its own
+// gives a truncated update rather than an error.
 type FastPathUpdatePDU struct {
 	UpdateHeader     uint8
 	Fragmentation    uint8
@@ -876,10 +1109,20 @@ type FastPathUpdatePDU struct {
 	Data             UpdateData
 }
 
+// FASTPATH_OUTPUT_COMPRESSION_USED is the other flag in a fast-path header's option
+// bits, which says the payload is compressed with the bulk compressor. It is not the
+// same as the surface commands' own compression, and a reader that confuses the two
+// feeds the wrong data to the wrong decoder.
 const (
 	FASTPATH_OUTPUT_COMPRESSION_USED = 0x2
 )
 
+// The fragmentation flags in a fast-path header, which say whether the PDU carries a
+// whole update or one part of one.
+//
+// A large update can be split across several PDUs, and only LAST ends one, so a reader
+// that treats every PDU as complete parses a fragment and produces a truncated update
+// rather than an error.
 const (
 	FASTPATH_FRAGMENT_SINGLE = (0x0 << 4)
 	FASTPATH_FRAGMENT_LAST   = (0x1 << 4)
@@ -935,17 +1178,25 @@ func readFastPathUpdatePDU(r io.Reader, code uint8, state *OrderState) (*FastPat
 	return f, nil
 }
 
+// ShareControlHeader is the header in front of every slow-path PDU: its total length,
+// the PDU type, and the source or originator that sent it.
+//
+// The length counts the header, so it is what tells a reader where the PDU ends
+// without having to understand the PDU itself.
 type ShareControlHeader struct {
 	TotalLength uint16 `struc:"little"`
 	PDUType     uint16 `struc:"little"`
 	PDUSource   uint16 `struc:"little"`
 }
 
+// PDU is a slow-path PDU: the share control header, and the message it carries.
 type PDU struct {
 	ShareCtrlHeader *ShareControlHeader
 	Message         PDUMessage
 }
 
+// NewPDU wraps a message in a share control header, taking the type from the message
+// itself so that the two cannot disagree.
 func NewPDU(userId uint16, message PDUMessage) *PDU {
 	pdu := &PDU{}
 	pdu.ShareCtrlHeader = &ShareControlHeader{
@@ -999,6 +1250,13 @@ func (p *PDU) serialize() []byte {
 	return buff.Bytes()
 }
 
+// SlowPathInputEvent is one input event on the slow path, written straight to the
+// wire rather than through a serialize method: the fields are in the order they are
+// sent.
+//
+// The slow path carries a full event time and a message type per event, which the fast
+// path has no room for, and that is the whole difference between the two framings of
+// input.
 type SlowPathInputEvent struct {
 	EventTime         uint32 `struc:"little"`
 	MessageType       uint16 `struc:"little"`
@@ -1006,62 +1264,105 @@ type SlowPathInputEvent struct {
 	SlowPathInputData []byte `struc:"sizefrom=Size"`
 }
 
+// PointerEvent is a pointer event: the flags, which say whether this is a movement, a
+// button or a wheel, and the position.
+//
+// The flags are where the meaning is. A movement carries PTRFLAGS_MOVE and a button
+// carries PTRFLAGS_DOWN and the button, and mixing them makes a server drop the event
+// rather than interpret it.
 type PointerEvent struct {
 	PointerFlags uint16 `struc:"little"`
 	XPos         uint16 `struc:"little"`
 	YPos         uint16 `struc:"little"`
 }
 
+// Serialize returns the event in its fast-path form: pointer flags, then x and y
+// little endian. The event code is not written here, because a fast-path PDU carries
+// it in the event header rather than in the event.
 func (p *PointerEvent) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	struc.Pack(buff, p)
 	return buff.Bytes()
 }
 
+// SynchronizeEvent carries the state of the toggle keys: caps lock, num lock, scroll
+// lock and the kana lock.
+//
+// It has no fields of its own because the state travels in the event header's own low
+// bits on the fast path, which is why the caller passes a flag word to the send call
+// rather than filling a structure in.
 type SynchronizeEvent struct {
 	Pad2Octets  uint16 `struc:"little"`
 	ToggleFlags uint32 `struc:"little"`
 }
 
+// Serialize returns nothing, which is correct: the toggle state is not in the body of
+// this event but in the low bits of the fast-path event header, so the send path
+// writes the header from the flags and the body is empty.
 func (p *SynchronizeEvent) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	struc.Pack(buff, p)
 	return buff.Bytes()
 }
 
+// ScancodeKeyEvent is a key event carrying a PC scancode, which is what makes
+// shortcuts work: a modifier is a scancode and a key, and no character expresses
+// that.
 type ScancodeKeyEvent struct {
 	KeyboardFlags uint16 `struc:"little"`
 	KeyCode       uint16 `struc:"little"`
 	Pad2Octets    uint16 `struc:"little"`
 }
 
+// Serialize returns the scan code, then the keyboard flags.
+//
+// The flags are written in the low byte and the release flag in the high one, and the
+// extended flag belongs to the scan code's prefix rather than to this field, which is
+// the arrangement the fast path uses and not the one the slow path does.
 func (p *ScancodeKeyEvent) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	struc.Pack(buff, p)
 	return buff.Bytes()
 }
 
+// UnicodeKeyEvent is a key event carrying a character, which is the only way to send
+// what an input method produces: a composed character has no scan code.
 type UnicodeKeyEvent struct {
 	KeyboardFlags uint16 `struc:"little"`
 	Unicode       uint16 `struc:"little"`
 	Pad2Octets    uint16 `struc:"little"`
 }
 
+// Serialize returns the release flag, then the character little endian.
+//
+// The flag is a full two bytes here and a single byte in a scan code event, because
+// the event codes differ and the flags layout follows the event type.
 func (p *UnicodeKeyEvent) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	struc.Pack(buff, p)
 	return buff.Bytes()
 }
 
+// ClientInputEventPDU is a client's input on the slow path: a count and the events
+// themselves, each with its own event time, message type and flags.
+//
+// A single PDU can carry events of different types, which is what the input preamble
+// needs, so the count is the number of events and not the number of types.
 type ClientInputEventPDU struct {
 	NumEvents           uint16               `struc:"little,sizeof=SlowPathInputEvents"`
 	Pad2Octets          uint16               `struc:"little"`
 	SlowPathInputEvents []SlowPathInputEvent `struc:"little"`
 }
 
+// Type2 reports that this is an input message.
 func (*ClientInputEventPDU) Type2() uint8 {
 	return PDUTYPE2_INPUT
 }
+
+// Unpack reports that a client does not read this message.
+//
+// An input PDU only ever travels from a client to a server, so there is nothing to
+// parse on this side; the method exists because the interface requires it.
 func (*ClientInputEventPDU) Unpack(io.Reader) error {
 	return nil
 }
@@ -1117,6 +1418,8 @@ type PointerDataPDU struct {
 
 func (*PointerDataPDU) Type2() uint8 { return PDUTYPE2_POINTER }
 
+// Unpack reads a pointer update: the shape, the position, the cached shape reference
+// or the system pointer type, depending on the update type in the message.
 func (d *PointerDataPDU) Unpack(r io.Reader) error {
 	var err error
 	if d.MessageType, err = core.ReadUint16LE(r); err != nil {
@@ -1265,10 +1568,13 @@ type FastPathPointerPositionPDU struct {
 	YPos uint16
 }
 
+// FastPathUpdateType reports that this is a pointer position update.
 func (*FastPathPointerPositionPDU) FastPathUpdateType() uint8 {
 	return FASTPATH_UPDATETYPE_PTR_POSITION
 }
 
+// Unpack reads the pointer position, which is the whole update: the fast path has a
+// separate update type for a position, so nothing else follows it.
 func (f *FastPathPointerPositionPDU) Unpack(r io.Reader) error {
 	var err error
 	if f.XPos, err = core.ReadUint16LE(r); err != nil {
@@ -1292,8 +1598,16 @@ type FastPathPointerPDU struct {
 	Mask       []byte
 }
 
+// FastPathUpdateType reports the update type this PDU was built with, since the
+// pointer updates share one structure and are told apart by it.
 func (f *FastPathPointerPDU) FastPathUpdateType() uint8 { return f.UpdateType }
 
+// Unpack reads a pointer update, dispatching on the update type: a null or default
+// pointer has no body, a colour pointer is an update structure, and a cached one is a
+// cache index.
+//
+// The shape itself is read by unpackShape, which needs the colour depth from the
+// update, and that is why the two are separate rather than one method.
 func (f *FastPathPointerPDU) Unpack(r io.Reader) error {
 	var err error
 	switch f.UpdateType {
@@ -1360,5 +1674,10 @@ type FastPathNoopPDU struct {
 	Type uint8
 }
 
+// FastPathUpdateType reports the type this PDU was built with, which for a no-op is
+// null or default pointer.
 func (f *FastPathNoopPDU) FastPathUpdateType() uint8 { return f.Type }
-func (f *FastPathNoopPDU) Unpack(io.Reader) error    { return nil }
+
+// Unpack does nothing and reports no error, which is correct: the null and default
+// pointer updates are announcements with no body, and there is nothing to read.
+func (f *FastPathNoopPDU) Unpack(io.Reader) error { return nil }

@@ -314,6 +314,9 @@ const (
 	RAIL_LEVEL_HANDSHAKE_EX_SUPPORTED              = 0x00000080
 )
 
+// The input event codes, which say what an input event is. The two mouse ones share
+// one structure and are told apart by the pointer flags, which is why a caller sending
+// a mouse event has to say which of the two it means.
 const (
 	INPUT_EVENT_SYNC     = 0x0000
 	INPUT_EVENT_UNUSED   = 0x0002
@@ -323,6 +326,9 @@ const (
 	INPUT_EVENT_MOUSEX   = 0x8002
 )
 
+// The pointer flags, which are the whole meaning of a pointer event: a movement
+// carries MOVE, a button carries DOWN with the button, and a wheel carries the
+// rotation. The values are a bitmask and the groups are not meant to be combined.
 const (
 	PTRFLAGS_HWHEEL  = 0x0400
 	PTRFLAGS_WHEEL   = 0x0200
@@ -345,6 +351,12 @@ const (
 	WheelRotationMask = 0x01FF
 )
 
+// The toggle key states and the keyboard event flags.
+//
+// The four TS_SYNC values are the state of the locks as they appear in a synchronise
+// event: the fast path has room for five bits and the slow path for a full word, and
+// these four mean the same in both. The KBDFLAGS values are the keyboard event flags,
+// where RELEASE without DOWN is what a key up looks like.
 const (
 	// Toggle key states, as they appear in a synchronise event. The fast path
 	// has room for five bits and the slow path for a full word; the four below
