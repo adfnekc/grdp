@@ -97,6 +97,43 @@ browser.
   browser the only sensible place to decode? A 1080p stream is a lot of work per
   frame and the answer is a measurement, not an opinion.
 
+## The first attempt, and what it found
+
+Step 1 was tried. The tool is on this branch: a `avcCapture` decoder in
+`cmd/rdpcli` that claims every AVC codec without decoding, writes each access unit
+to a directory, and returns a blank surface so that a capture run draws black. It
+is reached with `-capture-avc DIR` alongside `-egfx`. `client.Client.Gfx()` was
+added so that a decoder can be installed before `Login`, and the graphics client
+is now created in `newRdpClient` rather than during the connection sequence,
+because what the client advertises is decided while it connects.
+
+**The server resets the connection as soon as the AVC capabilities are
+advertised.** Nothing arrives, no access unit is written, and the reset comes
+before any surface data: the trace is a channel opening, the capability
+advertisement going out, and then `read: connection reset by peer`. The control
+run, with the same settings and without `-capture-avc`, runs to its timeout with
+the session up. So the two are correlated, and the advertisement itself is what
+the server refuses.
+
+This is a more interesting result than a capture would have been: the client
+cannot currently ask for AVC at all against this target, so the decoder question
+cannot even be reached yet. What is not known is why the advertisement is
+refused. The candidates, in the order worth checking:
+
+* The capability versions offered. This client offers 8.0, 8.1, and 10.0 when
+  AVC444 is claimed; AVC420 rides on the 8.1 flag. A server may require a
+  different set or a different order.
+* The flags. `THINCLIENT` is set on every set, which is what makes a server
+  prefer RemoteFX, and it is not obvious that it may be combined with AVC.
+* Whether AVC444 needs something else as well. Multitransport and network
+  characteristics detection share the message channel that this client does not
+  have, and AVC444 is the codec that goes with that family.
+
+The way to settle it is FreeRDP's own capability advertisement, which is the
+reference for what a working client sends, and then sending exactly that. The
+first grep for it did not find the code, so this is where the next attempt starts
+rather than something already answered.
+
 ## Deliberately not decided
 
 Nothing here has been implemented. No dependency has been added. The branch exists

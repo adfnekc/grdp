@@ -76,7 +76,16 @@ type pendingEvent struct {
 }
 
 func newRdpClient(s *Setting) *RdpClient {
-	return &RdpClient{setting: s}
+	c := &RdpClient{setting: s}
+	// The graphics client exists from here, not from Login, because what the
+	// client advertises is decided during the connection sequence: an H.264
+	// decoder has to be installed before Login, and the codecs advertised are
+	// exactly the ones that decoder reports. Login registers this on the dynamic
+	// channel, which is what actually opens it.
+	if s != nil && s.EnableEGFX {
+		c.gfx = rdpgfx.NewGfxClient()
+	}
+	return c
 }
 
 // requestedProtocol maps the configured security protocol name to the X.224
@@ -166,10 +175,13 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 		c.mcs.SetClientDynvcProtocol()
 
 		if c.setting.EnableEGFX {
-			gfx := rdpgfx.NewGfxClient()
+			gfx := c.gfx
+			if gfx == nil {
+				gfx = rdpgfx.NewGfxClient()
+				c.gfx = gfx
+			}
 			gfx.SetSender(dvc.SendData)
 			dvc.Register(rdpgfx.DVCChannelName, gfx)
-			c.gfx = gfx
 		}
 		if c.setting.EnableDisplayControl {
 			// The static channel as well as the dynamic one: a server that

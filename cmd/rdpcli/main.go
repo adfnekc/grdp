@@ -262,6 +262,7 @@ func main() {
 	setClip := flag.String("set-clipboard", "", "publish this text on the shared clipboard once ready")
 	clipReq := flag.Duration("request-clipboard-after", 0, "ask the server for its clipboard text this long after ready (0 disables)")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
+	captureAVC := flag.String("capture-avc", "", "advertise the AVC codecs without decoding them and write every access unit to this directory")
 	requireCert := flag.Bool("require-verified-cert", false, "fail the login if the server certificate is not verified (Standard RDP Security only)")
 	flag.Parse()
 
@@ -278,6 +279,24 @@ func main() {
 	s.EnableClipboard = *clip
 
 	c := client.NewClient(*host, *user, *pass, client.TC_RDP, s)
+
+	var avc *avcCapture
+	if *captureAVC != "" {
+		captured, err := newAVCCapture(*captureAVC)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "capture:", err)
+			os.Exit(1)
+		}
+		avc = captured
+		// The decoder has to be installed before Login: what the client
+		// advertises is decided during the connection sequence.
+		if g := c.Gfx(); g != nil {
+			g.SetDecoder(avc)
+		} else {
+			fmt.Fprintln(os.Stderr, "capture: the graphics channel is not enabled, pass -egfx")
+			os.Exit(1)
+		}
+	}
 
 	ready := make(chan struct{}, 1)
 	failed := make(chan error, 1)
@@ -622,12 +641,18 @@ func main() {
 			fmt.Printf("received %d bitmap rectangles, closing\n", bitmapCount)
 			writeDump()
 			writeFrameDump(c, *frame)
+			if avc != nil {
+				avc.report(*captureAVC)
+			}
 			c.Close()
 			return
 		case <-timer.C:
 			fmt.Printf("timeout after %s (bitmap rectangles received: %d)\n", *wait, bitmapCount)
 			writeDump()
 			writeFrameDump(c, *frame)
+			if avc != nil {
+				avc.report(*captureAVC)
+			}
 			c.Close()
 			if bitmapCount == 0 {
 				os.Exit(4)

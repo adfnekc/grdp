@@ -544,6 +544,26 @@ func (c *Client) Files() *cliprdr.CliprdrClient {
 	return nil
 }
 
+// Gfx returns the EGFX graphics surface, or nil when the graphics channel is not
+// enabled or the session is not RDP.
+//
+// It is how an application installs an H.264 decoder for the AVC surface codecs:
+// [rdpgfx.GfxClient.SetDecoder] takes one, and the codecs the client advertises
+// are exactly those the decoder reports, so a client with no decoder leaves
+// AVC420 and AVC444 unadvertised and is never sent them. It has to be called
+// before Login, because the capabilities are sent during the connection
+// sequence.
+//
+// Nothing in this library implements that interface. Turning an H.264 bitstream
+// into pixels needs a decoder, and a pure Go one is the caller's to choose; see
+// docs/avc-decoding.md.
+func (c *Client) Gfx() *rdpgfx.GfxClient {
+	if r, ok := c.ctl.(*RdpClient); ok {
+		return r.gfx
+	}
+	return nil
+}
+
 // OnClipboardText reports text the server has put on the clipboard. It only
 // fires when the clipboard channel is enabled.
 func (c *Client) OnClipboardText(f func(text string)) {
