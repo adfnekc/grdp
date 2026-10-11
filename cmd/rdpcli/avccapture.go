@@ -41,9 +41,27 @@ func newAVCCapture(dir string) (*avcCapture, error) {
 	}, nil
 }
 
-// SupportsAVCCodec claims every AVC codec, which is what makes the server offer
-// them. A real decoder would claim only what it can decode.
-func (a *avcCapture) SupportsAVCCodec(codecID uint16) bool { return true }
+// The RDPGFX codec ids this tool knows about. They are unexported in
+// plugin/rdpgfx, and they reach a decoder as arguments rather than as constants.
+const (
+	codecIDAVC420   = 0x000B
+	codecIDAVC444   = 0x000E
+	codecIDAVC444v2 = 0x000F
+)
+
+// SupportsAVCCodec decides what the client advertises, and claiming AVC444 has a
+// side effect worth knowing about: it adds a version 10.0 capability set, and
+// advertising a version means promising to process what that version implies.
+// Claiming AVC420 alone keeps the advertisement to 8.0 and 8.1, which is the
+// version this client actually implements.
+func (a *avcCapture) SupportsAVCCodec(codecID uint16) bool {
+	switch codecID {
+	case codecIDAVC420:
+		return true
+	default:
+		return false
+	}
+}
 
 type streamDump struct {
 	Index   int      `json:"index"`

@@ -107,8 +107,35 @@ added so that a decoder can be installed before `Login`, and the graphics client
 is now created in `newRdpClient` rather than during the connection sequence,
 because what the client advertises is decided while it connects.
 
-**The server resets the connection as soon as the AVC capabilities are
-advertised.** Nothing arrives, no access unit is written, and the reset comes
+**First result: asking for AVC444 resets the connection, and the reason is the
+capability version.** Advertising AVC444 adds a version 10.0 capability set,
+because that is the version whose flags control AVC444, and this client sends it
+with only the THINCLIENT flag. Advertising a version is a promise to process what
+that version implies, and a server is entitled to refuse a client that claims one
+it does not implement.
+
+Measured, with the capture tool and nothing else changed:
+
+| What was advertised | Result |
+| --- | --- |
+| AVC444, which adds the 10.0 set | the connection is reset as soon as the advertisement goes out |
+| AVC420 only, which leaves the advertisement at 8.0 and 8.1 | the session runs to its timeout with no reset |
+
+The capability versions and flags this client sends were checked against
+FreeRDP's `include/freerdp/channels/rdpgfx.h` and match it exactly, so the values
+are not the fault. The version offered is, and the same evidence says the fix is
+either to implement what 10.0 requires or to stop offering it, which is what the
+tool does now by claiming AVC420 alone.
+
+**The server accepts AVC420 and then sends no AVC.** The session survives, the
+advertisement is accepted, and no access unit arrives. It also sent no bitmap
+updates at all in the same run, so nothing on the screen was changing and the
+server had nothing it considered worth encoding. A run that produced motion on the
+desktop was inconclusive: the session closed before the input, and no frames were
+received either way, so it neither supports nor rules out that the encoder is
+simply not present on this virtual machine.
+
+**The older observation, for the record:** Nothing arrives, no access unit is written, and the reset comes
 before any surface data: the trace is a channel opening, the capability
 advertisement going out, and then `read: connection reset by peer`. The control
 run, with the same settings and without `-capture-avc`, runs to its timeout with
