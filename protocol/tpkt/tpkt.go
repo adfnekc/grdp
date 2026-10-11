@@ -21,14 +21,23 @@ import (
  * @see http://msdn.microsoft.com/en-us/library/cc240621.aspx
  * @see http://msdn.microsoft.com/en-us/library/cc240589.aspx
  */
+// The two values of the action field, which is the low two bits of a fast-path
+// packet's first byte. X224 means the packet is an ordinary TPKT carrying a
+// T.125 PDU; FASTPATH means the rest of that byte is an update or event count.
 const (
 	FASTPATH_ACTION_FASTPATH = 0x0
 	FASTPATH_ACTION_X224     = 0x3
 )
 
-/**
- * TPKT layer of rdp stack
- */
+// TPKT is the layer that frames everything else. It reads the four byte header
+// that says how long the packet is, delivers the payload, and arms the next
+// read, so every PDU below it can be parsed from a whole buffer.
+//
+// It also owns the two things that are decided once per connection and affect
+// every later read: the security exchange, which decides what the loop is
+// reading through (TLS, CredSSP then TLS) and the fast-path framing, which
+// shares the connection with the T.125 channel and is told apart by the first
+// byte.
 type TPKT struct {
 	emission.Emitter
 	Conn             *core.SocketLayer
@@ -67,6 +76,14 @@ type TPKT struct {
 	awaitingVerdict bool
 }
 
+// New returns a TPKT layer over a connection, and arms the first read before
+// returning.
+//
+// The read is armed here rather than by whichever layer asks for something,
+// because the X.224 connection confirm is what decides whether there will be a
+// security exchange at all, and that reply arrives before any layer below has
+// been asked for anything. The ntlm exchange may be nil, which is the case for
+// a connection that will not use NLA.
 func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
 	t := &TPKT{
 		Emitter:    *emission.NewEmitter(),
@@ -184,6 +201,9 @@ type TLSError struct {
 	Err error
 }
 
+// Error reports a TLS handshake failure. It names the layer rather than the
+// certificate, because the wrapped error is the TLS library's own and says what
+// actually went wrong.
 func (e *TLSError) Error() string { return "nla: the TLS handshake failed: " + e.Err.Error() }
 
 // Unwrap exposes the underlying error.
@@ -202,6 +222,9 @@ type CredSSPError struct {
 	Err error
 }
 
+// Error reports a CredSSP failure that happened before the credentials were
+// offered, so the message says so rather than implying that the account was
+// rejected.
 func (e *CredSSPError) Error() string {
 	return "nla: the CredSSP exchange failed before the credentials were sent: " + e.Err.Error()
 }
@@ -222,6 +245,9 @@ type CredentialsError struct {
 	Err error
 }
 
+// Error reports that the server did not answer the credentials. That is the
+// shape a refused logon takes, which is why the message is about the reply
+// rather than about the password: only the stage knows which it was.
 func (e *CredentialsError) Error() string {
 	return "nla: the server did not answer the credentials: " + e.Err.Error()
 }
@@ -230,6 +256,19 @@ func (e *CredentialsError) Error() string {
 // TLS alert the server sent as it tore the connection down.
 func (e *CredentialsError) Unwrap() error { return e.Err }
 
+// StartNLA upgrades the connection with TLS and then runs the CredSSP exchange
+// up to the point where the credentials have been sent.
+//
+// It returns once the credentials are on their way, which is before the server
+// has said whether it accepted them: Windows does not answer a bad logon with an
+// NTLM status, it drops the TLS connection, and that alert arrives on the
+// ordinary read path after this function has returned. The window between the
+// two is recorded in awaitingVerdict so that the failure can still be told apart
+// from a TLS or session fault when it arrives.
+//
+// A failure here is typed: TLSError before anything has been sent, CredSSPError
+// for an exchange that failed, and CredentialsError once the credentials were
+// offered.
 func (t *TPKT) StartNLA() error {
 	if err := t.StartTLS(); err != nil {
 		glog.Info("start tls failed", err)
@@ -418,10 +457,17 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 	return nil
 }
 
+// Read reads from the connection with no TPKT framing at all, which is not how
+// a PDU arrives: the read loop parses the framing and emits each payload as a
+// "data" event. Use it only where the raw stream is wanted and the loop is not
+// running.
 func (t *TPKT) Read(b []byte) (n int, err error) {
 	return t.Conn.Read(b)
 }
 
+// Write writes a T.125 PDU as a TPKT: the X.224 action byte, a reserved byte,
+// and a big-endian length that counts the four byte header as well as the
+// payload.
 func (t *TPKT) Write(data []byte) (n int, err error) {
 	buff := &bytes.Buffer{}
 	core.WriteUInt8(FASTPATH_ACTION_X224, buff)
@@ -432,14 +478,24 @@ func (t *TPKT) Write(data []byte) (n int, err error) {
 	return t.Conn.Write(buff.Bytes())
 }
 
+// Close closes the connection. It does not stop the read loop, which notices the
+// closed connection and emits "close".
 func (t *TPKT) Close() error {
 	return t.Conn.Close()
 }
 
+// SetFastPathListener sets the handler for fast-path PDUs. They are delivered
+// separately from T.125 data because their framing is different: the first byte
+// carries an action and a count rather than a length, and the length itself has
+// its top bit set.
 func (t *TPKT) SetFastPathListener(f core.FastPathListener) {
 	t.fastPathListener = f
 }
 
+// SendFastPath writes a fast-path PDU, which is what carries updates and input
+// once the connection is up. secFlag is written into the top two bits of the
+// action byte and says how the payload is protected; the length has its top bit
+// set, which is how the receiving side tells this framing from a TPKT.
 func (t *TPKT) SendFastPath(secFlag byte, data []byte) (n int, err error) {
 	buff := &bytes.Buffer{}
 	core.WriteUInt8(FASTPATH_ACTION_FASTPATH|((secFlag&0x3)<<6), buff)

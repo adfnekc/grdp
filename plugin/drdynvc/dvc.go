@@ -17,6 +17,10 @@ import (
 	"github.com/adfnekc/grdp/plugin"
 )
 
+// ChannelName and ChannelOption identify the drdynvc channel itself, as opposed
+// to the dynamic channels that travel inside it: the name is what is asked for in
+// the channel join, and the option asks for the channel to be encrypted like the
+// rest of the session rather than left in the clear.
 const (
 	ChannelName   = plugin.DRDYNVC_SVC_CHANNEL_NAME
 	ChannelOption = plugin.CHANNEL_OPTION_INITIALIZED |
@@ -106,8 +110,13 @@ func (c *DvcClient) Register(name string, h DynChannel) {
 	c.byName[name] = h
 }
 
+// Sender sets the channel sender that outgoing dynamic channel traffic is
+// written through. It is called by the channel layer once the channel is open,
+// and until then nothing can be sent.
 func (c *DvcClient) Sender(f core.ChannelSender) { c.w = f }
 
+// GetType returns the channel's name and option, which is what the channel layer
+// needs in order to join it.
 func (c *DvcClient) GetType() (string, uint32) { return ChannelName, ChannelOption }
 
 // Send implements core.ChannelSender; it is how another layer writes to the

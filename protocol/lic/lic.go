@@ -142,15 +142,12 @@ type ServerLicenseRequest struct {
 	//ScopeList         ScopeList
 }
 
-/*
-@summary:  Send by client to ask new license for client.
-            RDPY doesn'support license reuse, need it in futur version
-@see: http://msdn.microsoft.com/en-us/library/cc241918.aspx
- 	#RSA and must be only RSA
-    #pure microsoft client ;-)
-    #http://msdn.microsoft.com/en-us/library/1040af38-c733-4fb3-acd1-8db8cc979eda#id10
-*/
-
+// ClientNewLicenseRequest is the client's answer to the licence request. It asks
+// for a new licence rather than reusing one, which is all this client does: the
+// preferred key exchange algorithm is RSA and must be, because the pre-master
+// secret inside the blob is encrypted with the public key from the server's
+// certificate, and the two name blobs are what the server records the licence
+// against.
 type ClientNewLicenseRequest struct {
 	PreferredKeyExchangeAlg  uint32            `struc:"little"`
 	PlatformId               uint32            `struc:"little"`
