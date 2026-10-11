@@ -269,6 +269,15 @@ at a server that disagreed, after unit tests had passed.
   cost was fixed rather than proportional. When something looks expensive, check
   whether it is on a per-packet path before deciding it is too small to matter.
 
+* **Measure the path before changing the client.** A file transfer here ran at
+  about a tenth of what the same network path does raw, and every client-side
+  change that was tried against it left throughput where it was: removing the
+  reflection, buffering the reads, pipelining the range requests, and declaring a
+  different connection type. What settled it was measuring the path on its own
+  first, sweeping the range size, and finding the shape of that curve. See
+  docs/transfer-performance.md for the numbers and for the four wrong theories
+  that cost more than the experiment did.
+
 * **A comment that describes a mistake is worth keeping.** Several times the fix
   left the old wrong assumption in place as a note, and twice a later reader
   nearly "fixed" working code back to the wrong version because a test asserted

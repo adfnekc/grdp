@@ -21,6 +21,10 @@ Forked from [tomatome/grdp](https://github.com/tomatome/grdp), itself forked fro
   recognising again.
 * [docs/input-verification.md](docs/input-verification.md) records how input is
   proved to have arrived rather than inferred from a screenshot.
+* [docs/transfer-performance.md](docs/transfer-performance.md) records what was
+  measured while trying to make a file transfer faster, which is mostly what
+  cannot be done from this side and why, including one change that helped and
+  four that were measured and reverted.
 
 Every package has a package doc, and every exported identifier has a doc comment;
 `go doc ./client` is a reasonable place to start.
