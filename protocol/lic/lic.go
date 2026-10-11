@@ -6,6 +6,13 @@ import (
 	"github.com/adfnekc/grdp/core"
 )
 
+// The licensing message types, from MS-RDPBCGR 2.2.4. The exchange is a small
+// state machine: the server sends a request, challenges the platform, and then
+// issues a licence, and either side can abort with ERROR_ALERT.
+//
+// This client answers the request and the challenge and accepts whatever licence
+// comes back. It never asks for an upgrade (UPGRADE_LICENSE) and never sends a
+// NEW_LICENSE_REQUEST, so two of these are defined but only ever read.
 const (
 	LICENSE_REQUEST             = 0x01
 	PLATFORM_CHALLENGE          = 0x02
@@ -38,14 +45,14 @@ const (
 	ST_RESEND_LAST_MESSAGE  = 0x00000004
 )
 
-/*
-"""
-@summary: Binary blob data type
-@see: http://msdn.microsoft.com/en-us/library/cc240481.aspx
-"""
-*/
+// BinaryBlobType is the tag on a licensing blob, which says what the bytes are
+// without needing the rest of the message to be understood.
 type BinaryBlobType uint16
 
+// The blob types. A certificate blob carries the server's licence certificate,
+// the two name blobs carry the client's user and machine name, and the encrypted
+// data and key exchange blobs describe the exchange that produces the licence
+// key.
 const (
 	BB_ANY_BLOB                 = 0x0000
 	BB_DATA_BLOB                = 0x0001
@@ -59,6 +66,9 @@ const (
 	BB_CLIENT_MACHINE_NAME_BLOB = 0x0010
 )
 
+// ErrorMessage is the body of an ERROR_ALERT, which is how either side ends the
+// licensing exchange. The state transition says whether the exchange is over or
+// whether the last message should be sent again.
 type ErrorMessage struct {
 	DwErrorCode        uint32
 	DwStateTransaction uint32
@@ -72,6 +82,13 @@ func readErrorMessage(r io.Reader) *ErrorMessage {
 	return m
 }
 
+// LicensePacket is the three byte header that precedes every licensing message,
+// and it is what the licensing phase dispatches on. WMsgSize counts the header,
+// so the body is that many bytes less four.
+//
+// LicensingMessage holds whatever the message type implies: an *ErrorMessage for
+// an alert, and the raw body for anything else, which the caller parses once it
+// knows what it is looking at.
 type LicensePacket struct {
 	BMsgtype         uint8
 	Flag             uint8
@@ -79,6 +96,13 @@ type LicensePacket struct {
 	LicensingMessage interface{}
 }
 
+// ReadLicensePacket reads one licensing message, header and all, and parses the
+// body it recognises.
+//
+// Only ERROR_ALERT is interpreted: a licence blob needs the certificate and the
+// encrypted exchange from the messages before it, so it is handed over as bytes.
+// A read error is not reported, because this runs inside the licensing phase,
+// where a short read ends the exchange anyway.
 func ReadLicensePacket(r io.Reader) *LicensePacket {
 	l := &LicensePacket{}
 	l.BMsgtype, _ = core.ReadUInt8(r)
@@ -95,18 +119,20 @@ func ReadLicensePacket(r io.Reader) *LicensePacket {
 	return l
 }
 
-/*
-"""
-@summary: Blob use by license manager to exchange security data
-@see: http://msdn.microsoft.com/en-us/library/cc240481.aspx
-"""
-*/
+// LicenseBinaryBlob is a typed, length prefixed blob, which is how the licensing
+// exchange carries certificates, the client's names and the encrypted data.
 type LicenseBinaryBlob struct {
 	WBlobType uint16 `struc:"little"`
 	WBlobLen  uint16 `struc:"little"`
 	BlobData  []byte `struc:"sizefrom=WBlobLen"`
 }
 
+// NewLicenseBinaryBlob returns an empty blob.
+//
+// WBlobType is not stored, and nothing in this library calls this function: the
+// blob type and length are set by whoever packs the structure, since the length
+// is derived from the data. It is exported and unused, which is worth knowing
+// before trusting the argument to do anything.
 func NewLicenseBinaryBlob(WBlobType uint16) *LicenseBinaryBlob {
 	return &LicenseBinaryBlob{}
 }

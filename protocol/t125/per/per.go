@@ -12,11 +12,18 @@ import (
 	"github.com/adfnekc/grdp/core"
 )
 
+// The minimum lengths of the two string types MCS uses, which are subtracted from
+// a length before it goes on the wire and added back when it is read: a PER length
+// is a count above the minimum the type allows, not the size itself. Getting that
+// the wrong way round shifts every string by the minimum.
 const (
 	MinSimpleNumericStringLen       = 1
 	MinH221NonStandardIdentifierLen = 4
 )
 
+// WriteInteger writes an unsigned integer, choosing the shortest of one, two and
+// four bytes that holds it. Unlike the BER integer beside it, this one writes no
+// tag: PER lengths and counts sit in the message with no type in front of them.
 func WriteInteger(n int, w io.Writer) {
 	if n <= 0xff {
 		WriteLength(1, w)
@@ -30,10 +37,12 @@ func WriteInteger(n int, w io.Writer) {
 	}
 }
 
+// ReadInteger16 reads a two byte big endian integer.
 func ReadInteger16(r io.Reader) (uint16, error) {
 	return core.ReadUint16BE(r)
 }
 
+// WriteInteger16 writes a two byte big endian integer.
 func WriteInteger16(value uint16, w io.Writer) {
 	core.WriteUInt16BE(value, w)
 }
@@ -50,6 +59,12 @@ func WriteChoice(choice uint8, w io.Writer) {
  * @param value {raw} value to convert to per format
  * @returns type objects per encoding value
  */
+// WriteLength writes a PER length: one byte below 128, and above it two bytes
+// with the top bit set to mark the length as two bytes wide.
+//
+// The value is not reduced by the type's minimum here. Two bytes are used as soon
+// as the length exceeds 127, which is where the top bit would otherwise be taken
+// for the mark.
 func WriteLength(value int, w io.Writer) {
 	if value > 0x7f {
 		core.WriteUInt16BE(uint16(value|0x8000), w)
@@ -58,6 +73,12 @@ func WriteLength(value int, w io.Writer) {
 	}
 }
 
+// ReadLength reads a PER length, which is one byte, or two bytes with the top bit
+// of the first set.
+//
+// The error on the first byte is swallowed and zero returned, which makes a short
+// read look like an empty string. That is how the callers treat it, and the
+// message has already ended by then.
 func ReadLength(r io.Reader) (uint16, error) {
 	b, err := core.ReadUInt8(r)
 	if err != nil {
@@ -79,6 +100,15 @@ func ReadLength(r io.Reader) (uint16, error) {
  * @param oid {array} oid to write
  * @returns {type.Component} per encoded object identifier
  */
+// WriteObjectIdentifier writes the one object identifier MCS connects with,
+// 0.0.20.127.0.0.1, which is encoded as five bytes of content behind a length of
+// five.
+//
+// The first byte is meant to be the first two components combined as
+// oid[0]*40+oid[1], and what is here is a bitwise AND of the two instead. The two
+// agree only because both components are zero, which is true of this identifier
+// and would not be true of another, so this is not a general encoder. The other
+// five bytes go out as they are, one octet per component.
 func WriteObjectIdentifier(oid []byte, w io.Writer) {
 	core.WriteUInt8(5, w)
 	core.WriteByte((oid[0]<<4)&(oid[1]&0x0f), w)
@@ -96,6 +126,12 @@ func WriteSelection(selection uint8, w io.Writer) {
 	core.WriteUInt8(selection, w)
 }
 
+// WriteNumericString writes a numeric string, two decimal digits to a byte, each
+// digit reduced modulo ten and offset by '0' back to a nibble. An odd length pads
+// the last byte with a zero digit rather than failing.
+//
+// The length that goes on the wire is the digit count less the minimum for the
+// type, which is why the caller passes that minimum in.
 func WriteNumericString(s string, minValue int, w io.Writer) {
 	length := len(s)
 	mLength := minValue
@@ -117,6 +153,12 @@ func WriteNumericString(s string, minValue int, w io.Writer) {
 	w.Write(buff.Bytes())
 }
 
+// ReadNumericString reads a numeric string and returns it as digits. The count on
+// the wire is a length above the minimum, so the minimum is added back, and each
+// byte becomes two characters because that is how the digits are packed.
+//
+// A read failure returns the empty string rather than an error, so a truncated
+// message is indistinguishable from an empty string to a caller.
 func ReadNumericString(minValue int, r io.Reader) string {
 	mLength, err := ReadLength(r)
 	if err != nil {
@@ -138,6 +180,8 @@ func ReadNumericString(minValue int, r io.Reader) string {
 	return s.String()
 }
 
+// WritePadding writes length zero bytes, which a PER encoding uses to fill an
+// alignment it has promised.
 func WritePadding(length int, w io.Writer) {
 	for i := 0; i < length; i++ {
 		core.WriteUInt8(uint8(0), w)
@@ -145,6 +189,7 @@ func WritePadding(length int, w io.Writer) {
 
 }
 
+// WriteNumberOfSet writes the count of a set of items as one byte.
 func WriteNumberOfSet(n int, w io.Writer) {
 	core.WriteUInt8(uint8(n), w)
 }
@@ -165,27 +210,41 @@ func WriteOctetStream(oStr string, minValue int, w io.Writer) {
 	w.Write([]byte(oStr)[:length])
 }
 
+// ReadChoice reads a choice as one byte. A read failure returns zero, which is a
+// valid choice in several of the messages this is used for, so a truncated read is
+// not distinguishable from a choice of zero here.
 func ReadChoice(r io.Reader) uint8 {
 	choice, _ := core.ReadUInt8(r)
 	return choice
 }
 
+// ReadEnumerates reads an enumerated value as one byte.
 func ReadEnumerates(r io.Reader) (uint8, error) {
 	return core.ReadUInt8(r)
 }
 
+// ReadSelection reads a selection as one byte.
 func ReadSelection(r io.Reader) (uint8, error) {
 	return core.ReadUInt8(r)
 }
 
+// ReadPadding reads one byte of padding and returns it, which is what a PER
+// encoding with an alignment the sender chose not to use looks like.
 func ReadPadding(r io.Reader) (uint8, error) {
 	return core.ReadUInt8(r)
 }
 
+// ReadNumberOfSet reads the count of a set of items, as one byte.
 func ReadNumberOfSet(r io.Reader) uint8 {
 	choice, _ := core.ReadUInt8(r)
 	return choice
 }
+
+// ReadInteger reads a length prefixed integer of one, two or four bytes.
+//
+// Any other length returns zero, and the length is logged rather than reported:
+// the callers of this are reading counts and identifiers inside a message they
+// have already decided to accept, so the return value has no error to carry.
 func ReadInteger(r io.Reader) uint32 {
 	size, _ := ReadLength(r)
 	switch size {
@@ -204,6 +263,10 @@ func ReadInteger(r io.Reader) uint32 {
 	return 0
 }
 
+// MatchObjectIdentifier reads an object identifier and reports whether it is the
+// one given, consuming it either way. It is how the MCS connect exchange checks
+// that the server is speaking T.124, and the length of five is part of the check:
+// the identifier this understands is always five bytes of content.
 func MatchObjectIdentifier(r io.Reader, oid []byte) bool {
 	size, _ := ReadLength(r)
 	if size != 5 {
@@ -226,6 +289,15 @@ func MatchObjectIdentifier(r io.Reader, oid []byte) bool {
 	}
 	return true
 }
+
+// MacthOctetStream reads an octet stream and reports whether it is the string
+// given. The misspelling is in the name and not in this comment: it is exported,
+// so it cannot be corrected without breaking a caller, and there is one caller.
+//
+// The length on the wire is a count above the type's minimum, so the minimum is
+// added back before the comparison. The comparison is byte by byte, so the stream
+// is consumed even when it does not match, and a caller that gets false must
+// treat the message as abandoned.
 func MacthOctetStream(r io.Reader, s string, min int) bool {
 	ln, _ := ReadLength(r)
 	size := int(ln) + min
@@ -242,6 +314,9 @@ func MacthOctetStream(r io.Reader, s string, min int) bool {
 	return true
 }
 
+// ReadOctetStream reads an octet stream and returns the part of it after the
+// first min bytes, because the minimum is the part the caller has already matched
+// against a known value and does not need back.
 func ReadOctetStream(r io.Reader, min int) (string, error) {
 	ln, err := ReadLength(r)
 	if err != nil {
@@ -255,6 +330,13 @@ func ReadOctetStream(r io.Reader, min int) (string, error) {
 	return string(buf[min:]), nil
 }
 
+// ReadExcept reads one byte and panics if it is not the expected value, which
+// makes it a parser that stops the program rather than returning an error.
+//
+// That is deliberate and it is also the sharpest edge in this package: it is used
+// where an unexpected byte means the stream has been badly misread and every
+// later field would be nonsense, so carrying on would produce a wrong result
+// instead of a failure. A short read panics too.
 func ReadExcept(b byte, r io.Reader) {
 	u, err := core.ReadUInt8(r)
 	if err != nil {

@@ -8,6 +8,9 @@ import (
 	"github.com/adfnekc/grdp/core"
 )
 
+// The class of a tag, in the top two bits of its identifier octet. Universal
+// means the tag is defined by the encoding rules themselves, and application
+// means it belongs to the protocol using them, which for MCS is T.125's own tags.
 const (
 	CLASS_MASK uint8 = 0xC0
 	CLASS_UNIV       = 0x00
@@ -16,12 +19,21 @@ const (
 	CLASS_PRIV       = 0xC0
 )
 
+// Whether a value is primitive or constructed, in bit 6 of the identifier octet.
+// A constructed tag is followed by its members rather than by its bytes, which is
+// what makes a sequence a sequence.
 const (
 	PC_MASK      uint8 = 0x20
 	PC_PRIMITIVE       = 0x00
 	PC_CONSTRUCT       = 0x20
 )
 
+// The tag number, in the low five bits of the identifier octet. Tags above thirty
+// do not fit and use a second octet, which is what ReadApplicationTag and
+// WriteApplicationTag handle.
+//
+// TAG_SEQUENCE and TAG_SEQUENCE_OF are the same value and the same encoding, so
+// two names exist only because the specifications name both.
 const (
 	TAG_MASK            uint8 = 0x1F
 	TAG_BOOLEAN               = 0x01
@@ -41,6 +53,9 @@ func berPC(pc bool) uint8 {
 	return PC_PRIMITIVE
 }
 
+// ReadEnumerated reads an ENUMERATED, which in DER is always one byte. A length
+// other than one is rejected rather than read as though it were, because an
+// enumerated with the wrong length means the stream is out of step.
 func ReadEnumerated(r io.Reader) (uint8, error) {
 	if !ReadUniversalTag(TAG_ENUMERATED, false, r) {
 		return 0, errors.New("invalid ber tag")
@@ -55,21 +70,35 @@ func ReadEnumerated(r io.Reader) (uint8, error) {
 	return core.ReadUInt8(r)
 }
 
+// WriteEnumerated writes an ENUMERATED as one byte.
 func WriteEnumerated(e uint8, w io.Writer) {
 	WriteUniversalTag(TAG_ENUMERATED, false, w)
 	WriteLength(1, w)
 	core.WriteUInt8(e, w)
 }
 
+// ReadUniversalTag reads an identifier octet and reports whether it is the
+// universal tag asked for, of the asked for primitive or constructed form. It
+// consumes the octet either way, so a caller that gets false must abandon the
+// message rather than try another tag: the octet has been read.
 func ReadUniversalTag(tag uint8, pc bool, r io.Reader) bool {
 	bb, _ := core.ReadUInt8(r)
 	return bb == (CLASS_UNIV|berPC(pc))|(TAG_MASK&tag)
 }
 
+// WriteUniversalTag writes the identifier octet of a universal tag.
 func WriteUniversalTag(tag uint8, pc bool, w io.Writer) {
 	core.WriteUInt8((CLASS_UNIV|berPC(pc))|(TAG_MASK&tag), w)
 }
 
+// ReadLength reads a DER length, which is one byte below 128 and a count
+// followed by that many bytes at or above it.
+//
+// Only one and two byte lengths are accepted, which is what CredSSP needs: a
+// message longer than 65535 bytes is not something this layer should be reading
+// anyway, and a length field that says otherwise is treated as a malformed
+// message rather than as a reason to allocate. The read error on the first octet
+// is not reported, because a short read has already ended the message.
 func ReadLength(r io.Reader) (int, error) {
 	ret := 0
 	size, _ := core.ReadUInt8(r)
@@ -96,6 +125,8 @@ func ReadLength(r io.Reader) (int, error) {
 	return ret, nil
 }
 
+// WriteLength writes a DER length, using the long form once the value no longer
+// fits in the short one.
 func WriteLength(size int, w io.Writer) {
 	if size > 0x7f {
 		core.WriteUInt8(0x82, w)
@@ -105,6 +136,13 @@ func WriteLength(size int, w io.Writer) {
 	}
 }
 
+// ReadInteger reads an INTEGER of one, two, three or four bytes big endian.
+//
+// Three bytes is not a size DER produces and the specification does not have: it
+// is here because a three byte integer is what some producers write, and the
+// value is assembled most significant byte first as though the bytes were a four
+// byte integer missing its first. Any other size is refused rather than guessed
+// at.
 func ReadInteger(r io.Reader) (int, error) {
 	if !ReadUniversalTag(TAG_INTEGER, false, r) {
 		return 0, errors.New("Bad integer tag")
@@ -129,6 +167,13 @@ func ReadInteger(r io.Reader) (int, error) {
 	}
 }
 
+// WriteInteger writes an INTEGER, choosing the shortest of one, two and four
+// bytes that holds the value.
+//
+// Negative values are not handled: the comparison that picks the size is a
+// comparison on an int, so a negative number takes the one byte branch and is
+// written as its low byte. CredSSP has no negative integer to send, and a caller
+// that finds one should not be using this.
 func WriteInteger(n int, w io.Writer) {
 	WriteUniversalTag(TAG_INTEGER, false, w)
 	if n <= 0xff {
@@ -143,12 +188,16 @@ func WriteInteger(n int, w io.Writer) {
 	}
 }
 
+// WriteOctetstring writes an OCTET STRING.
 func WriteOctetstring(str string, w io.Writer) {
 	WriteUniversalTag(TAG_OCTET_STRING, false, w)
 	WriteLength(len(str), w)
 	core.WriteBytes([]byte(str), w)
 }
 
+// ReadOctetstring reads an OCTET STRING and returns its bytes. The tag is checked
+// first, so a caller that gets an error should treat the stream as unusable: the
+// read has begun.
 func ReadOctetstring(r io.Reader) ([]byte, error) {
 	if !ReadUniversalTag(TAG_OCTET_STRING, false, r) {
 		return nil, errors.New("Bad string tag")
@@ -160,6 +209,9 @@ func ReadOctetstring(r io.Reader) ([]byte, error) {
 	return core.ReadBytes(size, r)
 }
 
+// WriteBoolean writes a BOOLEAN. DER has exactly one encoding for true, which is
+// 0xff, and this writes it: a 0x01 would be BER and would change the bytes a hash
+// is computed over.
 func WriteBoolean(b bool, w io.Writer) {
 	bb := uint8(0)
 	if b {
@@ -170,6 +222,10 @@ func WriteBoolean(b bool, w io.Writer) {
 	core.WriteUInt8(bb, w)
 }
 
+// ReadBoolean reads a BOOLEAN. DER has one encoding for each value, 0xff for true
+// and 0x00 for false, and both others that BER allows are rejected rather than
+// read as false: a boolean that is neither is a message that has been misread, and
+// 0x01 in particular is what BER permits and DER does not.
 func ReadBoolean(r io.Reader) (bool, error) {
 	if !ReadUniversalTag(TAG_BOOLEAN, false, r) {
 		return false, errors.New("Bad bool tag")
@@ -187,6 +243,13 @@ func ReadBoolean(r io.Reader) (bool, error) {
 	return false, fmt.Errorf("Bad bool value: %X", bb)
 }
 
+// ReadApplicationTag reads an application tag's identifier octet and returns the
+// length that follows it.
+//
+// Tags above thirty do not fit in the five bits available, so they are written as
+// a full five bits of ones followed by another octet holding the number. That is
+// why there are two forms here, and why the small form is the one that checks the
+// tag in the same octet.
 func ReadApplicationTag(tag uint8, r io.Reader) (int, error) {
 	bb, _ := core.ReadUInt8(r)
 	if tag > 30 {
@@ -205,6 +268,9 @@ func ReadApplicationTag(tag uint8, r io.Reader) (int, error) {
 	return ReadLength(r)
 }
 
+// WriteApplicationTag writes an application tag and the length of what follows,
+// using the two octet form for tags above thirty. MCS uses that form, so it is the
+// path that is actually exercised.
 func WriteApplicationTag(tag uint8, size int, w io.Writer) {
 	if tag > 30 {
 		core.WriteUInt8((CLASS_APPL|PC_CONSTRUCT)|TAG_MASK, w)
@@ -216,6 +282,10 @@ func WriteApplicationTag(tag uint8, size int, w io.Writer) {
 	}
 }
 
+// WriteEncodedDomainParams writes data that is already encoded as a SEQUENCE of
+// domain parameters, which the public key exchange in CredSSP carries. The inner
+// encoding is the caller's, since this layer does not know what the parameters
+// are; only the outer tag and length are written here.
 func WriteEncodedDomainParams(data []byte, w io.Writer) {
 	WriteUniversalTag(TAG_SEQUENCE, true, w)
 	WriteLength(len(data), w)
