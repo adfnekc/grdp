@@ -47,6 +47,13 @@ const (
 	FLAGSHI_VALID             = 0x8000
 )
 
+// The client info flags, which say what the client can do and what the server
+// should tell it about. They travel in the info PDU that follows the credentials.
+//
+// INFO_UNICODE is the one that decides the character set for everything else in the
+// PDU, including the credentials. INFO_MOUSE_HAS_WHEEL and INFO_FORCE_ENCRYPTED_CS_PDU
+// are what a client asks for rather than what it reports, and
+// INFO_CompressionTypeMask is a mask over three bits rather than a flag of its own.
 const (
 	INFO_MOUSE                  uint32 = 0x00000001
 	INFO_DISABLECTRLALTDEL             = 0x00000002
@@ -69,11 +76,18 @@ const (
 	INFO_CompressionTypeMask           = 0x00001E00
 )
 
+// The address families for the client address in the extended info. They are the
+// Windows values rather than the Unix ones, which is why INET is 2 here and not the
+// 2 that happens to be the same on both.
 const (
 	AF_INET  uint16 = 0x00002
 	AF_INET6        = 0x0017
 )
 
+// The performance flags, which ask the server to leave out the things that make a
+// session slow over a thin connection. Each one removes something from what the
+// server draws, so they trade appearance for bandwidth, and all of them being clear
+// is what a local connection wants.
 const (
 	PERF_DISABLE_WALLPAPER          uint32 = 0x00000001
 	PERF_DISABLE_FULLWINDOWDRAG            = 0x00000002
@@ -85,11 +99,21 @@ const (
 	PERF_ENABLE_DESKTOP_COMPOSITION        = 0x00000100
 )
 
+// The security flags in a fast-path PDU's action byte, which are read from the top
+// two bits and not from a separate field. SECURE_CHECKSUM is what changes the MAC
+// computation, and ENCRYPTED is what decides whether the payload has to be
+// decrypted: the two are independent, so a PDU can be encrypted without the secure
+// checksum.
 const (
 	FASTPATH_OUTPUT_SECURE_CHECKSUM = 0x1
 	FASTPATH_OUTPUT_ENCRYPTED       = 0x2
 )
 
+// ClientAutoReconnect is the auto reconnect cookie, which lets a session be picked
+// up again after a connection drops without asking for credentials a second time.
+//
+// SecVerifier is derived from the random value the server sent, so the cookie cannot
+// be replayed against another session.
 type ClientAutoReconnect struct {
 	CbAutoReconnectLen uint16
 	CbLen              uint32
@@ -98,6 +122,8 @@ type ClientAutoReconnect struct {
 	SecVerifier        []byte
 }
 
+// NewClientAutoReconnect returns a cookie for the given logon id, with the verifier
+// derived from the server's random value.
 func NewClientAutoReconnect(id uint32, random []byte) *ClientAutoReconnect {
 	return &ClientAutoReconnect{
 		CbAutoReconnectLen: 28,
@@ -108,6 +134,13 @@ func NewClientAutoReconnect(id uint32, random []byte) *ClientAutoReconnect {
 	}
 }
 
+// RDPExtendedInfo is the part of the info PDU that a client sends when it can send
+// one, which is everything after the credentials: the client's address and directory,
+// its time zone, and the auto reconnect cookie.
+//
+// ClientTimeZone is the Windows time zone structure, which is a fixed 172 bytes
+// whose contents this client leaves at zero. That is allowed: the field is for
+// display in the session, not for the connection.
 type RDPExtendedInfo struct {
 	ClientAddressFamily uint16 `struc:"little"`
 	CbClientAddress     uint16 `struc:"little,sizeof=ClientAddress"`
@@ -120,6 +153,9 @@ type RDPExtendedInfo struct {
 	AutoReconnect       *ClientAutoReconnect
 }
 
+// NewExtendedInfo returns extended info with empty address and directory strings and
+// a zero time zone, which is what this client sends. The auto reconnect cookie may
+// be nil, in which case the cookie is left out of the serialized form.
 func NewExtendedInfo(auto *ClientAutoReconnect) *RDPExtendedInfo {
 	return &RDPExtendedInfo{
 		ClientAddressFamily: AF_INET,
@@ -131,6 +167,12 @@ func NewExtendedInfo(auto *ClientAutoReconnect) *RDPExtendedInfo {
 	}
 }
 
+// Serialize returns the extended info as it goes on the wire. It is written by hand
+// rather than by the struct tags because the two strings are length prefixed with a
+// length that counts the NUL terminator, which the tags cannot express.
+//
+// The auto reconnect block is written only when there is one, and the field before it
+// is what says so on the wire.
 func (o *RDPExtendedInfo) Serialize() []byte {
 	buff := &bytes.Buffer{}
 	core.WriteUInt16LE(o.ClientAddressFamily, buff)
@@ -153,6 +195,13 @@ func (o *RDPExtendedInfo) Serialize() []byte {
 	return buff.Bytes()
 }
 
+// RDPInfo is the info PDU, which is the client's first message after the connection
+// is up: the credentials in UTF-16, the shell and working directory, and the flags
+// that describe the client.
+//
+// Every string is stored with the NUL terminator that the wire format requires and
+// the length fields count from it, so the serialized lengths are two less than the
+// slices: the terminator is not part of the count.
 type RDPInfo struct {
 	CodePage         uint32
 	Flag             uint32
@@ -169,6 +218,12 @@ type RDPInfo struct {
 	ExtendedInfo     *RDPExtendedInfo
 }
 
+// NewRDPInfo returns an info PDU with the flags a client normally sends and empty
+// credentials.
+//
+// The strings are set to a single NUL rather than to nothing, because the length
+// fields are computed by subtracting two from the slice length and a nil slice would
+// underflow. The credentials are filled in by the setters.
 func NewRDPInfo() *RDPInfo {
 	info := &RDPInfo{
 		Flag: INFO_MOUSE | INFO_UNICODE | INFO_MAXIMIZESHELL |
@@ -184,14 +239,25 @@ func NewRDPInfo() *RDPInfo {
 	return info
 }
 
+// SetClientAutoReconnect attaches an auto reconnect cookie to the info PDU.
 func (o *RDPInfo) SetClientAutoReconnect(auto *ClientAutoReconnect) {
 	o.ExtendedInfo.AutoReconnect = auto
 }
 
+// SetClientInfo adds the flags that ask the server to report logon results, which is
+// what makes a wrong password arrive as a message rather than as a silent disconnect
+// during the later exchange.
 func (o *RDPInfo) SetClientInfo() {
 	o.Flag |= INFO_LOGONNOTIFY | INFO_LOGONERRORS
 }
 
+// Serialize returns the info PDU: the code page, the flags, five lengths, the five
+// strings, and the extended info when the caller says to include it.
+//
+// The lengths are the slice lengths less two, because each string carries a NUL
+// terminator that the count does not include. hasExtended is the caller's decision
+// rather than something derived here, since the extended info is what a client sends
+// when it negotiated the ability to.
 func (o *RDPInfo) Serialize(hasExtended bool) []byte {
 	buff := &bytes.Buffer{}
 	core.WriteUInt32LE(o.CodePage, buff)                      // 0000000
@@ -212,6 +278,9 @@ func (o *RDPInfo) Serialize(hasExtended bool) []byte {
 	return buff.Bytes()
 }
 
+// SecurityHeader is the two flag words in front of an encrypted PDU. The high word
+// is only meaningful when the low one has FLAGSHI_VALID set, which is what makes the
+// second word optional on the wire.
 type SecurityHeader struct {
 	securityFlag   uint16
 	securityFlagHi uint16
@@ -235,6 +304,18 @@ var (
 	keyUpdatePad2 = bytes.Repeat([]byte{0x5C}, 48)
 )
 
+// SEC is the security layer: it encrypts what goes out, decrypts what comes in, and
+// owns the keys and the info PDU.
+//
+// It works with no encryption at all when the session runs over TLS or CredSSP,
+// which is the usual case now, and with the Standard RDP Security keys otherwise.
+// Which of the two it is decides whether the flags in a PDU header mean anything:
+// over TLS they are written but the payload is already protected by the transport.
+//
+// The licensing keys are deliberately separate from the session keys, because the
+// MAC over a licensing blob uses a different salt from the MAC over an ordinary PDU,
+// and confusing the two produces a session that connects and then fails at the
+// licence.
 type SEC struct {
 	emission.Emitter
 	transport   core.Transport
@@ -276,6 +357,10 @@ type SEC struct {
 	licenseKey    []byte
 }
 
+// NewSEC returns a security layer over a transport, with an empty info PDU and
+// encryption off until the server's security data says otherwise.
+//
+// The transport's close and error events are forwarded.
 func NewSEC(t core.Transport) *SEC {
 	sec := &SEC{
 		Emitter:   *emission.NewEmitter(),
@@ -291,10 +376,16 @@ func NewSEC(t core.Transport) *SEC {
 	return sec
 }
 
+// Read reads from the transport with nothing decrypted. Reading is handled by the
+// receive path, which decides from the header whether a PDU is encrypted, so this is
+// only for a caller that wants the raw stream.
 func (s *SEC) Read(data []byte) (n int, err error) {
 	return s.transport.Read(data)
 }
 
+// Write sends a PDU, encrypting it and prefixing a security header when encryption is
+// on, and sending it unchanged when it is not. Over TLS the second path is the one
+// taken, which is why the flags in a later PDU header are written but mean nothing.
 func (s *SEC) Write(b []byte) (n int, err error) {
 	if !s.enableEncryption {
 		return s.transport.Write(b)
@@ -303,6 +394,8 @@ func (s *SEC) Write(b []byte) (n int, err error) {
 	return s.transport.Write(data)
 }
 
+// Close closes the transport. It does not stop the receive path, which notices and
+// emits "close".
 func (s *SEC) Close() error {
 	return s.transport.Close()
 }
@@ -546,6 +639,9 @@ func (s *SEC) decrytData(b []byte) []byte {
 	return data
 }
 
+// Client is the security layer's client end, which runs the client half of the
+// connection: it sends the info PDU, answers the licence request, and holds the
+// channel sender and fast-path listener that the layers above write through.
 type Client struct {
 	*SEC
 	userId    uint16
@@ -555,6 +651,8 @@ type Client struct {
 	channelSender    core.ChannelSender
 }
 
+// NewClient returns a client over a transport. The connection sequence starts when
+// the transport emits "connect", not here, so the credentials can be set afterwards.
 func NewClient(t core.Transport) *Client {
 	c := &Client{
 		SEC: NewSEC(t),
@@ -563,11 +661,22 @@ func NewClient(t core.Transport) *Client {
 	return c
 }
 
+// SetClientAutoReconnect gives the client an auto reconnect cookie, built from the
+// logon id and the random value the server sent.
+//
+// The cookie is what lets a session be picked up again after a dropped connection
+// without a second logon, and the verifier inside it is derived from the server's
+// random value so that it cannot be replayed against another session.
 func (c *Client) SetClientAutoReconnect(id uint32, random []byte) {
 	auto := NewClientAutoReconnect(id, random)
 	c.info.SetClientAutoReconnect(auto)
 }
 
+// SetAlternateShell sets the program to run instead of Explorer when the session
+// starts, and sets the flag that tells the server the field is there.
+//
+// The string is UTF-16 with a NUL terminator, which is the form every string in this
+// PDU takes.
 func (c *Client) SetAlternateShell(shell string) {
 	buff := &bytes.Buffer{}
 	for _, ch := range utf16.Encode([]rune(shell)) {
@@ -578,6 +687,11 @@ func (c *Client) SetAlternateShell(shell string) {
 	c.info.Flag |= INFO_RAIL
 }
 
+// SetUser sets the user name in the info PDU, in UTF-16 with a terminator.
+//
+// Nothing checks it: a name that is wrong is not rejected here, and the server is
+// what decides, which is why the failure a caller sees for a bad account comes from
+// the security exchange rather than from this.
 func (c *Client) SetUser(user string) {
 	buff := &bytes.Buffer{}
 	for _, ch := range utf16.Encode([]rune(user)) {
@@ -587,6 +701,10 @@ func (c *Client) SetUser(user string) {
 	c.info.UserName = buff.Bytes()
 }
 
+// SetPwd sets the password in the info PDU, in UTF-16 with a terminator.
+//
+// The password is stored because the PDU has to carry it. It is not logged, and a
+// test in this repository fails the build if a log call is handed a password field.
 func (c *Client) SetPwd(pwd string) {
 	buff := &bytes.Buffer{}
 	for _, ch := range utf16.Encode([]rune(pwd)) {
@@ -596,6 +714,10 @@ func (c *Client) SetPwd(pwd string) {
 	c.info.Password = buff.Bytes()
 }
 
+// SetDomain sets the domain in the info PDU, in UTF-16 with a terminator.
+//
+// An empty domain is sent as a single terminator rather than as nothing, since the
+// length field counts from it.
 func (c *Client) SetDomain(domain string) {
 	buff := &bytes.Buffer{}
 	for _, ch := range utf16.Encode([]rune(domain)) {
@@ -638,12 +760,22 @@ func (c *Client) connect(clientData []interface{}, serverData []interface{}, use
 	c.transport.Once("sec", c.recvLicenceInfo)
 }
 
+// ClientCoreData returns the core data that was sent in the Connect-Initial.
+//
+// It type asserts what it finds, so it panics if the connection has not reached the
+// point where the data was sent rather than returning nil.
 func (c *Client) ClientCoreData() *gcc.ClientCoreData {
 	return c.clientData[0].(*gcc.ClientCoreData)
 }
+
+// ClientSecurityData returns the security data that was sent, and panics if the
+// connection has not got that far.
 func (c *Client) ClientSecurityData() *gcc.ClientSecurityData {
 	return c.clientData[1].(*gcc.ClientSecurityData)
 }
+
+// ClientNetworkData returns the network data that was sent, and panics if the
+// connection has not got that far.
 func (c *Client) ClientNetworkData() *gcc.ClientNetworkData {
 	return c.clientData[2].(*gcc.ClientNetworkData)
 }
@@ -651,6 +783,13 @@ func (c *Client) ClientNetworkData() *gcc.ClientNetworkData {
 func (c *Client) serverCoreData() *gcc.ServerCoreData {
 	return c.serverData[0].(*gcc.ServerCoreData)
 }
+
+// ServerSecurityData returns the server's security data, which is what says which
+// encryption the session settled on.
+//
+// It panics rather than returning nil if the connect sequence has not run, and it
+// reads the second element of the server's data, so a server that sent its blocks in
+// another order would make this a wrong type rather than an error.
 func (c *Client) ServerSecurityData() *gcc.ServerSecurityData {
 	return c.serverData[1].(*gcc.ServerSecurityData)
 }
@@ -792,6 +931,12 @@ func generateKeys(clientRandom, serverRandom []byte, method uint32) ([]byte, []b
 
 }
 
+// ClientSecurityExchangePDU is the message that carries the client random value at
+// the start of the security exchange, which is what the session keys are derived
+// from along with the server's.
+//
+// The random value is encrypted with the server's public key, so what travels is the
+// encrypted form and the padding that brings it up to the key's block size.
 type ClientSecurityExchangePDU struct {
 	Length                uint32 `struc:"little"`
 	EncryptedClientRandom []byte `struc:"little"`
@@ -1115,10 +1260,21 @@ func (c *Client) recvData(channel string, s []byte) {
 	}
 	c.Emit("data", data)
 }
+
+// SetFastPathListener sets the handler for fast-path PDUs, which are delivered
+// separately from the T.125 data path because their framing and their security flags
+// are their own.
 func (c *Client) SetFastPathListener(f core.FastPathListener) {
 	c.fastPathListener = f
 }
 
+// RecvFastPath decrypts a fast-path PDU if its flags say it was encrypted, and hands
+// it to the listener.
+//
+// The two flags decide independently: ENCRYPTED says whether to decrypt, and
+// SECURE_CHECKSUM changes how the MAC is checked, so a PDU can be one without the
+// other. The listener is called without a nil check, so it must be set before a
+// fast-path PDU can arrive.
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 	data := s
 	if c.enableEncryption && secFlag&FASTPATH_OUTPUT_ENCRYPTED != 0 {
@@ -1127,10 +1283,19 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 	c.fastPathListener.RecvFastPath(secFlag, data)
 }
 
+// SetChannelSender sets what SendToChannel writes through. It is called by the
+// channel layer once the channels are joined.
 func (c *Client) SetChannelSender(f core.ChannelSender) {
 	c.channelSender = f
 }
 
+// SendToChannel sends a message on a static virtual channel, encrypted when
+// encryption is on and in the clear when it is not.
+//
+// With encryption the payload is protected and a security header is written in front
+// of it; without it the message goes to the channel unchanged, since over TLS the
+// transport has already protected it. The two paths therefore produce different bytes
+// for the same call, and which one runs depends on the session and not on the caller.
 func (c *Client) SendToChannel(channel string, b []byte) (int, error) {
 	if !c.enableEncryption {
 		glog.Debug("Sec Client write", glog.Hex(b))
