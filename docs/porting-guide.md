@@ -60,6 +60,36 @@ rectangles and one rectangle can cover everything; the merge rules are in the
 `addDirty` documentation, and the short version is that neighbouring regions come
 as one and a region covering most of the screen comes as the whole screen.
 
+**Show it on your own clock, not as updates arrive.** A server sends one frame as
+a burst of updates, and a display shows whole states. A caller that presents each
+update as it arrives is showing the parts of one frame at different times, which
+is what tearing is. `TakeDirty` is the same merged set as `OnFrame` but accumulated
+since the last time it was asked, so a caller can show the framebuffer at a
+display's cadence instead:
+
+    tick := time.NewTicker(time.Second / 60)
+    for range tick.C {
+        dirty := c.TakeDirty()
+        if len(dirty) == 0 {
+            continue                    // a still screen costs nothing
+        }
+        for _, r := range dirty {
+            encode(pix, fb.Stride(), r)
+        }
+        present()
+    }
+
+Taking consumes what it returns, so a region is never shown twice and never
+forgotten. The merge rules are the same as `OnFrame`'s, including collapsing to the
+whole screen once the changes cover most of it, which is what makes this cheap on a
+busy screen.
+
+This is the model the reference clients use: FreeRDP's X11 client accumulates the
+invalid regions and paints them in one pass when the frame is done, under one X11
+lock, rather than painting as updates arrive. See docs/frame-boundaries.md for the
+measurements, including that a bitmap session sends no frame markers at all, so the
+cadence is the only boundary available.
+
 That is the intended way to read a screen. `OnBitmap`, `Screen` and
 `OnOrdersFrame` still work and are deprecated where the framebuffer supersedes
 them.

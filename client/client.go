@@ -433,6 +433,30 @@ func (c *Client) Framebuffer() *Framebuffer {
 	return nil
 }
 
+// TakeDirty returns the area of the framebuffer that has changed since the last
+// call, merged into whole rectangles, and forgets it.
+//
+// It is for a caller that shows the screen on its own clock rather than as
+// updates arrive, which is what a display does and what removes tearing: the
+// parts of one frame are applied as they arrive and then shown together. A
+// caller that shows each update as it arrives is showing parts of a frame at
+// different times, which is the fault this exists to avoid.
+//
+// The rectangles are merged and clipped to Framebuffer().Bounds() exactly as
+// OnFrame's are, so they can be encoded or uploaded without checking them, and
+// when the changes cover most of the frame the whole frame is returned as one
+// rectangle. Calling it consumes what it returns: a caller that presents only
+// what it is told about will not be told twice.
+//
+// The result is nil when nothing has changed, which is the common case for a
+// still screen at a display's cadence.
+func (c *Client) TakeDirty() []image.Rectangle {
+	if r, ok := c.ctl.(*RdpClient); ok {
+		return r.takeDirty()
+	}
+	return nil
+}
+
 // OnFrame registers f to be called once per batch of updates, after every
 // rectangle in the batch has been composited, with the areas that changed.
 //

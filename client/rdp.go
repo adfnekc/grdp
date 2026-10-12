@@ -7,6 +7,7 @@ import (
 	"image"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adfnekc/grdp/core"
@@ -47,6 +48,14 @@ type RdpClient struct {
 
 	// Set when drawing orders are enabled; nil otherwise.
 	screen *orders.Screen
+
+	// dirtySincePresent is the area changed since the last TakeDirty, merged the
+	// same way a single batch is. It exists so that a caller showing the
+	// framebuffer on its own clock can ask what to show rather than having to
+	// union the per batch updates itself, which every such caller would have to
+	// get right and would get wrong in the same way.
+	dirtyMu           sync.Mutex
+	dirtySincePresent []image.Rectangle
 
 	// disp is the display control channel, set when Setting.EnableDisplayControl
 	// is on. It is how the desktop size is changed without reconnecting.
@@ -149,6 +158,10 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	c.mcs = t125.NewMCSClient(c.x224)
 	c.sec = sec.NewClient(c.mcs)
 	c.pdu = pdu.NewClient(c.sec)
+	// The same batches OnFrame reports are accumulated here, so that a caller
+	// showing the screen on its own clock and a caller showing it as updates
+	// arrive are looking at one account of what changed rather than two.
+	c.pdu.On("frame", c.accumulateDirty)
 	c.channels = plugin.NewChannels(c.sec)
 
 	// EGFX is the modern drawing path. It only makes sense once the dynamic
@@ -517,6 +530,35 @@ func (c *RdpClient) MouseDown(button int, x, y int) {
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
+}
+
+// accumulateDirty adds one batch of changed regions to the set waiting to be
+// presented, merging it with what is already there.
+func (c *RdpClient) accumulateDirty(data interface{}) {
+	batch, ok := data.([]image.Rectangle)
+	if !ok {
+		return
+	}
+	fb := c.framebuffer()
+	if fb == nil {
+		return
+	}
+	bounds := fb.Bounds()
+
+	c.dirtyMu.Lock()
+	defer c.dirtyMu.Unlock()
+	for _, r := range batch {
+		c.dirtySincePresent = addDirty(c.dirtySincePresent, r, bounds)
+	}
+}
+
+// takeDirty returns the area changed since the last call and forgets it.
+func (c *RdpClient) takeDirty() []image.Rectangle {
+	c.dirtyMu.Lock()
+	defer c.dirtyMu.Unlock()
+	out := c.dirtySincePresent
+	c.dirtySincePresent = nil
+	return out
 }
 
 // framebuffer returns the wrapper around this session's pixel buffer, or nil
