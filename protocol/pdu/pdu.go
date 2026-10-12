@@ -489,6 +489,10 @@ func (c *Client) recvPDU(s []byte) {
 				c.Emit("pointer", d.Data.(*PointerDataPDU))
 			case PDUTYPE2_UPDATE:
 				up := d.Data.(*UpdateDataPDU)
+				// TEMPORARY instrumentation for the frame boundary study: what the
+				// slow path actually carries. For master this becomes a real
+				// branch rather than a log line.
+				glog.Debugf("slowpath update ms=%d type=%d", time.Now().UnixMilli(), up.UpdateType)
 				p := up.Udata
 				if up.UpdateType == FASTPATH_UPDATETYPE_BITMAP {
 					c.Emit("bitmap", p.(*BitmapUpdateDataPDU).Rectangles)

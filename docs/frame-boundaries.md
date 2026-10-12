@@ -44,6 +44,30 @@ This is Windows behaving normally for a session carrying bitmap updates, not a
 fault to report. A client that waits for a frame marker in this session mode waits
 forever.
 
+The slow path was counted too, because frame markers can arrive that way as well
+and the first measurement only looked at fast path update codes. Over the same
+twenty seconds, the slow path carried **no updates of any kind**. So neither path
+carries a frame marker, and the answer to "did the server send us any" is no, on
+both paths, measured.
+
+Three gaps matter if a server ever does send one, and two of them are defects here
+rather than in the session:
+
+* The **alternate secondary order** frame marker is read and dropped. The frame id
+  is parsed and thrown away.
+* The **slow path** has no branch for a surface command update at all. It handles
+  bitmap and orders update types only, so a frame marker arriving on the slow path
+  is parsed and silently discarded. This was found while counting slow path
+  updates, and it is a defect whether or not this server ever sends one.
+* **Neither reaches a caller**: the fast path emits a `frame-marker` event that the
+  `client` package does not expose, and the other two do not emit anything.
+
+And there is no way for the client to ask for them in this session mode. The
+capability sets say what a client can process, not what it would prefer; both sides
+advertise surface command support with the frame marker flag set and the server
+still draws with bitmap updates. The way to change which stream the server uses is
+to open the graphics channel, which is EGFX, and that is a different decision.
+
 ## How the updates arrive instead
 
 Measured with `-gaps` on this branch, which stamps every bitmap update as it
