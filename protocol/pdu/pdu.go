@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/adfnekc/grdp/core"
 	"github.com/adfnekc/grdp/emission"
@@ -508,9 +509,20 @@ func (c *Client) recvPDU(s []byte) {
 // security flags from the TPKT layer rather than from the PDU, since the fast-path
 // header does not carry them.
 func (c *Client) RecvFastPath(secFlag byte, s []byte) {
+	// TEMPORARY instrumentation for the frame boundary study on
+	// explore/frame-boundaries: how many updates one fast path PDU carries and
+	// when it arrived. For master this becomes an event, or goes away.
+	updates := 0
+	start := time.Now()
+	defer func() {
+		glog.Debugf("fastpath batch ms=%d bytes=%d updates=%d",
+			start.UnixMilli(), len(s), updates)
+	}()
+
 	glog.Trace("PDU RecvFastPath", glog.Hex(s))
 	r := bytes.NewReader(s)
 	for r.Len() > 0 {
+		updates++
 		updateHeader, err := core.ReadUInt8(r)
 		if err != nil {
 			return

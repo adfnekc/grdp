@@ -111,6 +111,20 @@ already correct. This is about when it is shown.
 * It **buys coherence with latency**, four milliseconds in the common case and up
   to the maximum wait in the worst. That is the trade, and it is a choice worth
   having explicitly rather than by accident.
+* **Three structural signals were looked for and none exists**, which is what
+  makes this a heuristic rather than a decision: the frame markers are not sent,
+  one PDU carries one update so the PDU boundary groups nothing, and the
+  fragmentation flags delimit an update rather than a frame. Anyone proposing a
+  cleaner solution should be able to say which signal they are using, because
+  after this measurement there are three candidates fewer.
+
+* **Coalescing is close to a pure loss when the content is continuous.** With no
+  quiet moment to key on, the window degenerates to the maximum wait, and every
+  part of a moving picture that arrived inside it is a part that could have been
+  shown already. A presenter that detects that pattern, gaps almost all below a
+  millisecond and large covered regions, should stop coalescing and show what it
+  has. That is a measurable detector and it is not in the design above yet.
+
 * **EGFX is different, and that is the one honest argument for it.** Its stream is
   organised in frames and carries markers, so the boundary is real rather than
   inferred. But it costs cgo and a hardware codec, and it gives up a single static
