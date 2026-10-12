@@ -475,6 +475,27 @@ func (c *Client) OnOrdersFrame(f func(dirty image.Rectangle)) {
 	})
 }
 
+// OnFrameMarker reports a frame boundary the server sent.
+//
+// There are two forms on the wire, a surface command and an alternate secondary
+// drawing order, and both arrive here as one type because they mean the same
+// thing. The fast path order form used to be read and dropped, and the slow path
+// had no branch for a surface command update at all.
+//
+// A server is not obliged to send either. A session that draws with bitmap
+// updates sends none, measured against a Windows 10 host over twenty seconds:
+// 1175 bitmap updates, no orders and no surface commands, while both ends
+// advertised surface command support with the frame marker flag set. So a caller
+// that needs frame boundaries must not wait for one in that session mode, and has
+// to infer them from timing instead.
+func (c *Client) OnFrameMarker(f func(pdu.FrameMarker)) {
+	c.ctl.On("frame-marker", func(data interface{}) {
+		if m, ok := data.(pdu.FrameMarker); ok {
+			f(m)
+		}
+	})
+}
+
 // OnSurfaceFrame reports each completed EGFX frame and the surfaces it
 // touched. The pixel data lives on the surfaces, so callers that need it
 // should copy what they need before returning.

@@ -112,6 +112,29 @@ type SurfaceBitsCommand struct {
 	Bitmap     BitmapDataEx
 }
 
+// FrameMarker is a frame boundary the server sent, in whichever of the two forms
+// it arrived.
+//
+// There are two: a surface command (CMDTYPE_FRAME_MARKER, which carries an action
+// and a frame id) and an alternate secondary drawing order
+// (ORDER_TYPE_FRAME_MARKER, which carries an action only). Both mean the same
+// thing, and a caller that wants to know where frames begin should not have to
+// care which one the server chose, so both arrive as this.
+//
+// A server is not obliged to send either. A session that draws with bitmap updates
+// sends neither, which was measured over twenty seconds against a Windows 10 host:
+// 1175 bitmap updates, no orders, no surface commands.
+type FrameMarker struct {
+	// Action is the frame action, which both forms carry.
+	Action uint32
+	// FrameID is the frame id, which only the surface command form carries. It is
+	// zero for an order.
+	FrameID uint32
+	// FromOrder is true when the marker arrived as a drawing order rather than as
+	// a surface command.
+	FromOrder bool
+}
+
 // FrameMarkerCommand is a CMDTYPE_FRAME_MARKER command, which brackets a
 // group of surface bits commands.
 type FrameMarkerCommand struct {

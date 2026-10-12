@@ -613,6 +613,12 @@ func (d *UpdateDataPDU) Unpack(r io.Reader) (err error) {
 		p = &BitmapUpdateDataPDU{}
 	case FASTPATH_UPDATETYPE_PALETTE:
 	case FASTPATH_UPDATETYPE_SYNCHRONIZE:
+	case FASTPATH_UPDATETYPE_SURFCMDS:
+		// A surface command update on the slow path. It was not handled at all,
+		// so the reader returned "Unsupport slow update type 0x4" and the whole
+		// data PDU was lost, frame markers included. The dispatch above has a
+		// branch for it that could never be reached until this existed.
+		p = &SurfaceCommandsPDU{}
 	}
 	if p != nil {
 		err = p.Unpack(r)

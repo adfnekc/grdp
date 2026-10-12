@@ -181,6 +181,17 @@ func (o *OrderPdu) HasBounds() bool {
 
 // Altsec is an alternate secondary order, which is a different encoding from the primary orders: a separate type space, with sizes rather than field flags.
 type Altsec struct {
+	// FrameMarkerAction is the action field of an alternate secondary frame
+	// marker order, and FrameMarker says whether this order was one. The action
+	// is what the server sends to bracket a frame: MS-RDPBCGR's
+	// TS_FRAME_MARKER_ORDER, four bytes, and FreeRDP reads exactly that much
+	// (update_read_frame_marker_order).
+	//
+	// It used to be read and thrown away, so a session that carried frame
+	// markers had no way to know where its frames began. Nothing in this
+	// library sends them in a bitmap session, but a graphics session does.
+	FrameMarker       bool
+	FrameMarkerAction uint32
 }
 
 // Secondary is a secondary order: the cache orders, which fill the caches the primary orders then draw from.
@@ -367,7 +378,15 @@ func (o *OrderPdu) processAltsecOrder(r io.Reader) error {
 	case ORDER_TYPE_WINDOW:
 	case ORDER_TYPE_COMPDESK_FIRST:
 	case ORDER_TYPE_FRAME_MARKER:
-		core.ReadUInt32LE(r)
+		// Four bytes of action, which is what FreeRDP reads for this order, and
+		// the stream is left in step whether or not the value is kept.
+		action, err := core.ReadUInt32LE(r)
+		if err != nil {
+			return fmt.Errorf("orders: frame marker order: %w", err)
+		}
+		if orderType == ORDER_TYPE_FRAME_MARKER {
+			o.Altsec = &Altsec{FrameMarker: true, FrameMarkerAction: action}
+		}
 	}
 
 	return nil

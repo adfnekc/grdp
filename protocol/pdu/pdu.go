@@ -492,9 +492,43 @@ func (c *Client) recvPDU(s []byte) {
 				if up.UpdateType == FASTPATH_UPDATETYPE_BITMAP {
 					c.Emit("bitmap", p.(*BitmapUpdateDataPDU).Rectangles)
 				} else if up.UpdateType == FASTPATH_UPDATETYPE_ORDERS {
-					c.Emit("orders", p.(*FastPathOrdersPDU).OrderPdus)
+					c.emitOrders(p.(*FastPathOrdersPDU).OrderPdus)
+				} else if up.UpdateType == FASTPATH_UPDATETYPE_SURFCMDS {
+					// The slow path carried only bitmap and orders until now, so a
+					// surface command update arriving this way was parsed and then
+					// silently discarded, frame markers included.
+					c.emitSurfaceCommands(p.(*SurfaceCommandsPDU).Commands)
 				}
 			}
+		}
+	}
+}
+
+// emitOrders delivers a batch of drawing orders, and any frame marker among them.
+//
+// A frame marker can arrive as an alternate secondary order instead of as a
+// surface command, and it is the only frame boundary a session that draws with
+// orders has. It used to be read and dropped here.
+func (c *Client) emitOrders(pdus []OrderPdu) {
+	c.Emit("orders", pdus)
+	for i := range pdus {
+		if a := pdus[i].Altsec; a != nil && a.FrameMarker {
+			c.Emit("frame-marker", FrameMarker{Action: a.FrameMarkerAction, FromOrder: true})
+		}
+	}
+}
+
+// emitSurfaceCommands delivers a batch of surface commands, and any frame marker
+// among them, in the one form a caller has to handle.
+func (c *Client) emitSurfaceCommands(cmds []SurfaceCommand) {
+	for _, cmd := range cmds {
+		if cmd.Bits != nil {
+			c.Emit("surface-bits", cmd.Bits)
+		} else if cmd.Marker != nil {
+			c.Emit("frame-marker", FrameMarker{
+				Action:  uint32(cmd.Marker.FrameAction),
+				FrameID: cmd.Marker.FrameID,
+			})
 		}
 	}
 }
@@ -572,17 +606,11 @@ func (c *Client) RecvFastPath(secFlag byte, s []byte) {
 		if updateCode == FASTPATH_UPDATETYPE_BITMAP {
 			c.Emit("bitmap", p.Data.(*FastPathBitmapUpdateDataPDU).Rectangles)
 		} else if updateCode == FASTPATH_UPDATETYPE_ORDERS {
-			c.Emit("orders", p.Data.(*FastPathOrdersPDU).OrderPdus)
+			c.emitOrders(p.Data.(*FastPathOrdersPDU).OrderPdus)
 		} else if updateCode == FASTPATH_UPDATETYPE_PTR_POSITION {
 			c.Emit("pointer-position", p.Data.(*FastPathPointerPositionPDU))
 		} else if updateCode == FASTPATH_UPDATETYPE_SURFCMDS {
-			for _, cmd := range p.Data.(*SurfaceCommandsPDU).Commands {
-				if cmd.Bits != nil {
-					c.Emit("surface-bits", cmd.Bits)
-				} else if cmd.Marker != nil {
-					c.Emit("frame-marker", cmd.Marker)
-				}
-			}
+			c.emitSurfaceCommands(p.Data.(*SurfaceCommandsPDU).Commands)
 		} else if updateCode == FASTPATH_UPDATETYPE_PTR_NULL || updateCode == FASTPATH_UPDATETYPE_PTR_DEFAULT {
 			// These carry no payload at all: the update code is the whole
 			// message. They are the two system pointers the specification
