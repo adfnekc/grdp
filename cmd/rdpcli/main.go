@@ -262,6 +262,7 @@ func main() {
 	setClip := flag.String("set-clipboard", "", "publish this text on the shared clipboard once ready")
 	clipReq := flag.Duration("request-clipboard-after", 0, "ask the server for its clipboard text this long after ready (0 disables)")
 	logLevel := flag.Int("log", int(glog.INFO), "log level 0=TRACE..5=NONE")
+	gapFlag := flag.Bool("gaps", false, "measure the arrival times of bitmap updates and report how they group")
 	requireCert := flag.Bool("require-verified-cert", false, "fail the login if the server certificate is not verified (Standard RDP Security only)")
 	flag.Parse()
 
@@ -529,8 +530,16 @@ func main() {
 		defer func() { fmt.Printf("cursor: %d position updates\n", cursorPositions) }()
 	}
 
+	var gaps *gapStats
+	if *gapFlag {
+		gaps = &gapStats{}
+		defer gaps.report()
+	}
 	c.OnBitmap(func(bs []client.Bitmap) {
 		bitmapCount += len(bs)
+		if gaps != nil {
+			gaps.update(len(bs))
+		}
 		if *rects {
 			for _, b := range bs {
 				nz := 0
