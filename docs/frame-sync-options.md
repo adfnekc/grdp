@@ -86,6 +86,28 @@ approximate it: the sink stops showing states it has no reason to show, and it
 stops paying for a full frame encode each time it does. Neither needs a frame
 boundary, which matters because there is none to be had in this session mode.
 
+## Chosen: A, and what it needed
+
+A is the decision. The library side of it is in on master as of `client.TakeDirty`:
+the persistent surface and the merging already existed, and what was missing was the
+area changed since a caller last showed the screen. It returns that, merged by the
+same rules `OnFrame` uses and consumed by the call, so a caller can show the
+framebuffer at a display's cadence instead of as updates arrive.
+
+    dirty := c.TakeDirty()
+    if len(dirty) == 0 { continue }        // a still screen costs nothing
+    for _, r := range dirty { encode(pix, fb.Stride(), r) }
+    present()
+
+C is still worth doing and is a change on the other side of the connection rather
+than in this library: if the gateway encodes a full frame per call rather than only
+the rectangles it was given, the encode cost is paid whether or not the call was
+needed. What `TakeDirty` returns is exactly the region list that makes the cheaper
+version possible.
+
+D and F remain as described: use the markers when a session has them, and take the
+clock from the sink, which for a browser means `requestAnimationFrame`.
+
 ## What has to be answered before choosing
 
 1. **Does the gateway encode a full frame per update?** The selftest output seen
