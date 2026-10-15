@@ -84,6 +84,29 @@ forgotten. The merge rules are the same as `OnFrame`'s, including collapsing to 
 whole screen once the changes cover most of it, which is what makes this cheap on a
 busy screen.
 
+**If pushing is expensive, cap the rate instead of waiting for the frame.** A
+server sends one screen as a burst of updates, and a caller that pushes each one
+pushes the pieces of one frame separately, which is exactly the tearing the
+cadence above avoids. `Setting.FrameInterval` caps how many of those pushes there
+are, and the policy keeps the latency: the first report of a burst goes out
+immediately, the interval only starts then, and what arrived inside it is merged
+into one report at its end.
+
+    s.FrameInterval = client.FrameTier30   // or SetFrameInterval while running
+
+Measured against the local xrdp, typing 28 characters into an xterm:
+
+| tier | server updates | reports | mean gap | worst gap |
+| --- | --- | --- | --- | --- |
+| off, every batch | 44 | 44 | 32ms | 58ms |
+| 33ms, about 30Hz | 45 | 2 | 34ms | 34ms |
+| 16ms, about 60Hz | 44 | 3 | 17ms | 17ms |
+
+The three rows push the same screen. The second is 22 times fewer pushes for the
+same content, and its worst gap is *better* than the unthrottled one, because the
+burst was coalesced rather than delivered as 44 separate partial frames. Nothing
+is dropped: a test walks the same invariant at every tier.
+
 This is the model the reference clients use: FreeRDP's X11 client accumulates the
 invalid regions and paints them in one pass when the frame is done, under one X11
 lock, rather than painting as updates arrive. See docs/frame-boundaries.md for the

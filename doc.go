@@ -65,10 +65,22 @@
 //   - EGFX, with Setting.EnableEGFX. A dynamic virtual channel carries surfaces
 //     and codec data, and the client composites. Again the server stops sending
 //     bitmap updates.
+//   - RemoteFX, with Setting.EnableRemoteFx, which is different in kind: it is a
+//     bitmap codec rather than a drawing path, so the server keeps sending bitmap
+//     updates and only changes how it compresses them. It buys a frame boundary
+//     in the data, which plain bitmap updates do not give.
 //
-// The last two cannot be mixed with the first in one session, which is why both
-// are off by default: turning one on and meeting a codec that is not implemented
-// gives a blank screen rather than a degraded one.
+// The first three cannot be mixed in one session, which is why they are off by
+// default: turning one on and meeting a codec that is not implemented gives a
+// blank screen rather than a degraded one. RemoteFX is safer, since the decoder
+// is verified byte for byte, but it has never been run against a server that
+// answers with it.
+//
+//   - Setting.FrameInterval caps how often a caller is told what changed, and is
+//     unlike all of the above because it changes nothing about the session: the
+//     server draws the same way, and only the reporting rate at the client end
+//     moves. It is the one that fixes tearing without needing the server to
+//     offer anything, which makes it the one to reach for first.
 //
 // # What it does not do
 //

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/adfnekc/grdp/codec"
@@ -141,6 +142,12 @@ type Client struct {
 	ctl     Control
 	tc      int
 	setting *Setting
+
+	// frameThrottle backs OnFrameThrottled, created when it is first asked for
+	// or when a tier is set, because a front end can set the tie before it
+	// registers anything and the first report should already respect it.
+	frameThrottle     *frameThrottle
+	frameThrottleOnce sync.Once
 }
 
 func init() {
@@ -455,6 +462,89 @@ func (c *Client) TakeDirty() []image.Rectangle {
 		return r.takeDirty()
 	}
 	return nil
+}
+
+// OnFrameThrottled registers f to be called when the screen has changed, at
+// most once per Setting.FrameInterval.
+//
+// It is OnFrame behind a rate limit, for a caller that pushes the screen
+// somewhere and would rather send one frame than the twelve rectangles of it
+// that the server happened to split. The policy keeps the latency: the first
+// report of a burst is delivered immediately, the interval only starts then,
+// and what arrived inside it is merged into one report at its end. Nothing is
+// ever held for more than one interval, and a still screen reports nothing.
+//
+// What f is given is the union of everything that changed since the last report,
+// merged and clipped to Framebuffer().Bounds() the same way OnFrame's batches
+// are, so it never has to stitch rectangles together itself.
+//
+// The difference from OnFrame is that the pixels are not frozen for the duration
+// of the call. A report can arrive on the throttle's own timer while the session
+// is still decoding, so a region can contain pixels from a moment later than the
+// batch that caused the report. That is the trade a rate limit buys and it is
+// the same trade a delay makes visible: if an exact snapshot is needed, copy the
+// pixels out in the callback, or use OnFrame and do the limiting on the caller's
+// side.
+//
+// Change the tier while the session runs with SetFrameInterval. A callback
+// registered here can also run on the throttle's timer goroutine, so anything
+// that can block belongs on another one.
+func (c *Client) OnFrameThrottled(f func(dirty []image.Rectangle)) {
+	if c == nil || c.ctl == nil {
+		return
+	}
+	throttle := c.ensureFrameThrottle()
+	// A second registration replaces the callback rather than adding one, and it
+	// is done under the same lock add takes, so a report cannot be dispatched to
+	// a callback being swapped out from under it.
+	throttle.mu.Lock()
+	throttle.f = f
+	throttle.mu.Unlock()
+}
+
+// ensureFrameThrottle creates the rate limiter on first use and returns it.
+//
+// Both entry points go through it, so a front end that sets the tier before it
+// registers anything, and one that registers before it picks a tier, end up with
+// exactly one throttle fed from the same event OnFrame listens to. The two can
+// therefore never disagree about what changed.
+func (c *Client) ensureFrameThrottle() *frameThrottle {
+	c.frameThrottleOnce.Do(func() {
+		c.frameThrottle = newFrameThrottle(nil, c.FramebufferBounds, c.frameInterval())
+		c.ctl.On("frame", c.frameThrottle.add)
+	})
+	return c.frameThrottle
+}
+
+// SetFrameInterval changes the cap used by OnFrameThrottle while the session
+// runs. FrameTierOff turns the limit off, which restores the per batch behaviour.
+//
+// It is the front end's knob: a caller that lets a viewer choose between a
+// smooth setting and a slow link setting needs nothing more than this, and the
+// change takes effect from the next window rather than from a reconnect.
+func (c *Client) SetFrameInterval(d time.Duration) {
+	if c == nil || c.ctl == nil {
+		return
+	}
+	c.ensureFrameThrottle().setInterval(d)
+}
+
+// FramebufferBounds returns the desktop size, or an empty rectangle before the
+// session is connected. The frame throttle asks for it rather than storing it,
+// because a resize can change it mid session.
+func (c *Client) FramebufferBounds() image.Rectangle {
+	if fb := c.Framebuffer(); fb != nil {
+		return fb.Bounds()
+	}
+	return image.Rectangle{}
+}
+
+// frameInterval returns the configured tier, defaulting to off.
+func (c *Client) frameInterval() time.Duration {
+	if c.setting != nil && c.setting.FrameInterval > 0 {
+		return c.setting.FrameInterval
+	}
+	return FrameTierOff
 }
 
 // OnFrame registers f to be called once per batch of updates, after every
@@ -830,6 +920,22 @@ type Setting struct {
 	// real RemoteFX server settles which one it picks, treat an RLGR3 server as
 	// unsupported.
 	EnableRemoteFx bool
+
+	// FrameInterval caps how often OnFrameThrottled reports changes, and is the
+	// only thing the drawing path's refresh rate depends on.
+	//
+	// The default, FrameTierOff, reports every batch of updates as it arrives,
+	// exactly as OnFrame has always done. Setting a tier trades latency for
+	// rate: the first report of a burst still happens immediately, and only the
+	// updates that arrive inside the interval are held and merged into one
+	// report at its end. See Client.OnFrameThrottled.
+	//
+	// It is a duration rather than a fixed choice because the right value
+	// depends on the link and the display: 60Hz is FrameTier60, a slow link
+	// wants FrameTier30 or lower, and a caller that finds it wants to change it
+	// while the session runs should use Client.SetFrameInterval, which is the
+	// same knob from the front end.
+	FrameInterval time.Duration
 }
 
 // NewSetting returns a Setting with the default desktop size (1024x768), the

@@ -273,6 +273,18 @@ Opt-ins, all off by default because each changes what is negotiated:
   picks EGFX stops sending bitmap updates entirely.
 * `Setting.EnableOrders` advertises MEMBLT and renders the drawing orders that
   follow. It changes how the server draws, and the two paths cannot be mixed.
+* `Setting.EnableRemoteFx` advertises RemoteFX alongside NSCodec. Unlike the two
+  above this is a bitmap codec, not a drawing path, so the server keeps sending
+  bitmap updates and only changes how it compresses them. The reason to want it:
+  RemoteFX brackets every frame, so a frame arrives whole and can be shown whole.
+  The decoder is byte for byte against libfreerdp; what has never been run is a
+  server that answers with RemoteFX.
+* `Setting.FrameInterval` caps how often `OnFrameThrottled` reports a change, and
+  changes nothing about the session. It is the one that addresses tearing without
+  needing the server to offer anything, and it is worth trying before the three
+  above. Measured against a local xrdp: the same screen took 44 pushes unthrottled
+  and 2 at 30Hz, and the worst gap was *shorter*, because the burst of updates was
+  coalesced instead of arriving as 44 partial frames.
 
 `OnBitmap`, `Screen`, `OnOrdersFrame` and `OnSurfaceFrame` still work for callers
 that want the raw updates or the orders machinery, and are deprecated where

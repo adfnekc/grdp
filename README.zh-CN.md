@@ -202,6 +202,14 @@ c.TypeText("中文", 8*time.Millisecond)  // 发的是字符，所以输入法�
   因为选了 EGFX 的服务端**完全停发位图更新** ✓
 * `Setting.EnableOrders` —— 广告 MEMBLT 并渲染随后的绘图订单 ✓。它改变服务端的绘制方式 ✓，
   两条路径**不能混用** ✓
+* `Setting.EnableRemoteFx` —— 在 NSCodec 之外**另外广告 RemoteFX** ✓。与上面两条不同 ✓：它是
+  **位图编解码器而非绘制路径** ✓，服务端照旧发位图更新 ✓，只换压缩方式 ✓。理由 ✓：RFX 给每一帧
+  打了起止边界 ✓，帧**整块到达** ✓ 也能整块显示 ✓。解码器与 libfreerdp **逐字节**比对 ✓；
+  没跑过的是**会用 RFX 应答的服务器** ✓
+* `Setting.FrameInterval` —— 限制 `OnFrameThrottled` 的上报频率 ✓，**完全不改会话** ✓，只改客户端
+  多快被通知一次 ✓。这是**唯一不依赖服务器配合**就能缓解撕裂的一项 ✓。实测（本地 xrdp）✓：
+  同一屏 **不限速 44 次推送** → **30Hz 仅 2 次** ✓，而且最大间隔反而**更短** ✓（突发被合并 ✓，
+  而不是 44 张半成品各推一次 ✓）
 
 `OnBitmap`、`Screen`、`OnOrdersFrame`、`OnSurfaceFrame` 仍然可用 ✓（想拿原始更新或订单机制的话 ✓），
 在 `Framebuffer`/`OnFrame` 已取代它们的地方标了 **deprecated** ✓。

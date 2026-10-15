@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -253,6 +254,8 @@ func main() {
 	unicodeHold := flag.Duration("unicode-hold", 0, "how long to hold each Unicode key down (0 sends the release immediately)")
 	slowInput := flag.Bool("slow-input", false, "send input over the slow path (disables fast-path input)")
 	pointerLog := flag.Bool("pointer", false, "log server-side pointer updates (position and shape)")
+	throttle := flag.Duration("throttle", 0, "report frames at most this often: 16ms for 60Hz, 33ms for 30. 0 reports every batch, the default")
+	throttleLog := flag.Bool("throttle-log", false, "log how many reports the tier coalesced batches into")
 	cursorLog := flag.Bool("cursor", false, "log decoded pointer shapes and system cursors")
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
 	ordersFlag := flag.Bool("orders", false, "advertise and render drawing orders (bitmap cache and MEMBLT)")
@@ -278,8 +281,81 @@ func main() {
 	s.EnableRemoteFx = *rfxFlag
 	s.EnableDisplayControl = *dispFlag || *resize != ""
 	s.EnableClipboard = *clip
+	s.FrameInterval = *throttle
+
+	// The tier's own account of what it did: how many reports it emitted out of
+	// how many batches, and the gaps between them. Without this the tier is a
+	// knob with no evidence behind it.
+	//
+	// What is deliberately not here is a per region latency. It would have to be
+	// measured inside the rate limiter, which does not know it either, and a
+	// number invented from the interval would be the kind of thing this client
+	// exists to expose.
+	var (
+		tierMu      sync.Mutex
+		batchCount  int
+		reportCount int
+		lastReport  time.Time
+		gapSum      time.Duration
+		gapMax      time.Duration
+	)
+	tierStart := time.Now()
+	// tierNote prints the tier's effect once the session is over. The first
+	// report's delay is reported separately, because the policy is that the
+	// first report of a burst is immediate: if that number were a full interval
+	// the tier would be behaving like a plain delay rather than a rate limit.
+	var firstAfter time.Duration
+	tierNote := func() {
+		tierMu.Lock()
+		defer tierMu.Unlock()
+		if reportCount == 0 {
+			fmt.Printf("tier: %d batch(es) changed the screen, and no report came out\n", batchCount)
+			return
+		}
+		fmt.Printf("tier: %d batches -> %d reports (%.1f batches per report)", batchCount, reportCount,
+			float64(batchCount)/float64(reportCount))
+		if firstAfter > 0 {
+			fmt.Printf(", first report after %v", firstAfter.Round(time.Millisecond))
+		}
+		if reportCount > 1 {
+			fmt.Printf(", mean gap %v, worst gap %v",
+				(gapSum / time.Duration(reportCount-1)).Round(time.Millisecond),
+				gapMax.Round(time.Millisecond))
+		}
+		fmt.Println()
+	}
 
 	c := client.NewClient(*host, *user, *pass, client.TC_RDP, s)
+
+	// Count every batch, whether or not the tier reports it, so the two can be
+	// compared. A tier that reports every batch is not doing anything, and a
+	// tier that reports nothing is dropping the screen.
+	c.OnFrame(func(dirty []image.Rectangle) {
+		tierMu.Lock()
+		batchCount++
+		tierMu.Unlock()
+	})
+
+	if *throttleLog {
+		c.OnFrameThrottled(func(dirty []image.Rectangle) {
+			now := time.Now()
+			tierMu.Lock()
+			reportCount++
+			if !lastReport.IsZero() {
+				if gap := now.Sub(lastReport); true {
+					gapSum += gap
+					if gap > gapMax {
+						gapMax = gap
+					}
+				}
+			} else {
+				firstAfter = now.Sub(tierStart)
+			}
+			lastReport = now
+			tierMu.Unlock()
+			fmt.Printf("report %3d: %2d regions\n", reportCount, len(dirty))
+		})
+	}
 
 	ready := make(chan struct{}, 1)
 	failed := make(chan error, 1)
@@ -289,6 +365,12 @@ func main() {
 	done := make(chan struct{}, 1)
 
 	rfxSurfaces := 0
+
+	// The tier's numbers are printed once, when the session ends, rather than
+	// per report: the point of the run is the summary, and a per report line per
+	// report is the thing being measured.
+	defer tierNote()
+
 	_ = rfxSurfaces
 	var fb *image.RGBA
 	if *dump != "" {
