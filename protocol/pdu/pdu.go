@@ -231,6 +231,40 @@ func (c *Client) SetOrderSupport(enabled bool) {
 
 }
 
+// SetRemoteFxSupport declares that the client can decode RemoteFX bitmaps in
+// addition to NSCodec, by adding RDPCodecIDRemoteFX to the bitmap codecs
+// capability set.
+//
+// It is off by default because it has never been exercised against a server that
+// speaks RemoteFX. NSCodec is always advertised either way: it is the codec the
+// bitmap path is verified against, and advertising RemoteFX does not withdraw it,
+// so a server offered both may use either.
+//
+// What enabling it changes is the shape of the traffic, not only of the
+// compressed parts: after the confirm active PDU a server offered RemoteFX may
+// put its screen traffic through surface bits commands carrying a codec id
+// instead of bitmap updates. The decoder handles those, but no session in that
+// shape has been run here.
+//
+// One thing a caller should know before switching it on. The entropy coder a
+// RemoteFX frame used is not recorded in the data, so it can only come from the
+// negotiated capability, and that negotiation is not parsed yet. Both entropy
+// coders are advertised, so a server may pick RLGR3, and decoding RLGR3 data with
+// RLGR1 produces a wrong image rather than an error. See codec.RFXMode.
+func (c *Client) SetRemoteFxSupport(enabled bool) {
+	if c.clientCapabilities == nil {
+		// The switch is called during login, but a client built before its
+		// capability set exists is a caller setting the flag in any order.
+		return
+	}
+	if !enabled {
+		c.clientCapabilities[CAPSETTYPE_BITMAP_CODECS] = NewNSCodecCapability()
+		return
+	}
+	c.clientCapabilities[CAPSETTYPE_BITMAP_CODECS] = NewBitmapCodecsCapability(
+		RDPCodecIDNSCodec, RDPCodecIDRemoteFX)
+}
+
 func (c *Client) connect(data *gcc.ClientCoreData, userId uint16, channelId uint16) {
 	glog.Debug("pdu connect:", userId, ",", channelId)
 	c.clientCoreData = data

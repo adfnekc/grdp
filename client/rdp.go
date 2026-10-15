@@ -219,6 +219,15 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 		c.pdu.SetOrderSupport(true)
 	}
 
+	// RemoteFX, which is separate from the two above and from EGFX. It is a
+	// bitmap codec capability, so advertising it changes what the server
+	// compresses with but leaves the drawing path alone, whereas MEMBLT changes
+	// the path and the graphics pipeline replaces it. A caller that wants
+	// RemoteFX frame boundaries on the bitmap path needs neither of those two.
+	if c.setting != nil && c.setting.EnableRemoteFx {
+		c.pdu.SetRemoteFxSupport(true)
+	}
+
 	// The framebuffer exists for every session, whichever way the server draws.
 	// Bitmap updates, surface bits and orders all land in it, so a caller has
 	// one place to read pixels from instead of one per drawing path, and the

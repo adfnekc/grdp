@@ -807,6 +807,29 @@ type Setting struct {
 	// it off the session is drawn from bitmap updates, which is correct, just
 	// larger on the wire.
 	EnableOrders bool
+
+	// EnableRemoteFx advertises that the client can decode RemoteFX bitmaps as
+	// well as NSCodec, by adding the RemoteFX codec to the bitmap codecs
+	// capability set.
+	//
+	// It is off by default for the same reason as EGFX: it changes how the server
+	// draws the session, and it has not been exercised against a server that
+	// speaks RemoteFX. A server offered it may answer with surface bits commands
+	// carrying a RemoteFX codec id instead of bitmap updates. The decoder is in
+	// place, so this is what makes that reachable rather than what implements it.
+	//
+	// The reason a caller wants it: RemoteFX brackets every frame it sends, so a
+	// frame arrives as one unit and can be shown as one unit, which plain bitmap
+	// updates do not give. See Client.OnFrameMarker and Client.TakeDirty for what
+	// a caller can do with a boundary once it has one.
+	//
+	// One caveat is not resolvable offline, and it is why this is a switch rather
+	// than a default: the entropy coder a RemoteFX frame used is not recorded in
+	// the data, both RLGR1 and RLGR3 are advertised, and decoding RLGR3 data as
+	// RLGR1 yields a wrong image rather than an error. Until a session against a
+	// real RemoteFX server settles which one it picks, treat an RLGR3 server as
+	// unsupported.
+	EnableRemoteFx bool
 }
 
 // NewSetting returns a Setting with the default desktop size (1024x768), the
