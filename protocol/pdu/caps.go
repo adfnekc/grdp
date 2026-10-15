@@ -784,17 +784,29 @@ var codecGUIDRemoteFX = [16]byte{
 // TS_RFX_CAPS / TS_RFX_CAPSET block types and capability values
 // (MS-RDPRFX 2.2.2.1).
 const (
-	rfxBlockCaps        = 0xCBC0
-	rfxBlockCapset      = 0xCBC1
-	rfxCapsetType       = 0xCFC0
-	rfxVersion10        = 0x0100
-	rfxTile64x64        = 0x0040
-	rfxColConvICT       = 0x01
-	rfxXformDWT53A      = 0x01
-	rfxEntropyRLGR1     = 0x01
-	rfxEntropyRLGR3     = 0x04
-	rfxCaptureNonCAC    = 0x00000001
-	rfxClientCapsLength = 49
+	rfxBlockCaps     = 0xCBC0
+	rfxBlockCapset   = 0xCBC1
+	rfxCapsetType    = 0xCFC0
+	rfxVersion10     = 0x0100
+	rfxTile64x64     = 0x0040
+	rfxColConvICT    = 0x01
+	rfxXformDWT53A   = 0x01
+	rfxEntropyRLGR1  = 0x01
+	rfxEntropyRLGR3  = 0x04
+	rfxCaptureNonCAC = 0x00000001
+	// The three nested lengths of TS_RFX_CLNT_CAPS_CONTAINER, counted so the
+	// builder can derive them instead of writing six numbers that must agree.
+	rfxContainerHeaderLen = 12 // length, captureFlags, capsLength
+	rfxCapsHeaderLen      = 8  // blockType, blockLen, numCapsets
+	rfxCapsetHeaderLen    = 13 // blockType, blockLen, codecId, capsetType, numIcaps, icapLen
+	rfxICAPLen            = 8  // one TS_RFX_ICAP: version, tileSize, flags and three selectors
+	// Where the ICAP list starts once the container, caps and capset headers are
+	// written. The tests walk the same number back out of the bytes.
+	rfxICAPListStart = rfxContainerHeaderLen + rfxCapsHeaderLen + rfxCapsetHeaderLen
+	// ICAPCount is how many entropy coders are declared, and it is 1 because the
+	// client decodes with codec.RFXMode, which is RLGR1. Raising it means also
+	// removing the reason the count was 1: see rfxClientCapabilityContainer.
+	ICAPCount = 1
 )
 
 // NewNSCodecCapability builds the Bitmap Codecs capability set advertising
@@ -808,10 +820,17 @@ func NewNSCodecCapability() *BitmapCodecsCapability {
 // NewRemoteFXCapability builds the Bitmap Codecs capability set advertising
 // only RemoteFX.
 //
-// This has not been exercised against a server that speaks RemoteFX, so it is
-// deliberately not part of the default capability set. The decoder itself is
-// verified against reference data, so enabling this is what makes RemoteFX
-// reachable through Set Surface Bits.
+// Deliberately not part of the default capability set, for two reasons. A server
+// offered it may answer with surface bits commands instead of bitmap updates,
+// which changes the shape of the session, and no session in that shape has been
+// run against a server here. Use NewBitmapCodecsCapability with both ids, or
+// Client.SetRemoteFxSupport, to advertise it alongside the verified one.
+//
+// What has been exercised: the capability exchange itself, against a live xrdp,
+// which logs "RemoteFX, codec id 3, properties len 41" for it and completes the
+// session. What has not: a server that answers with RemoteFX data, which is the
+// part that would settle codec.RFXMode. The decoder is verified against reference
+// data either way.
 func NewRemoteFXCapability() *BitmapCodecsCapability {
 	return NewBitmapCodecsCapability(RDPCodecIDRemoteFX)
 }
@@ -836,7 +855,7 @@ func NewBitmapCodecsCapability(codecIDs ...uint8) *BitmapCodecsCapability {
 			c.SupportedBitmapCodecs.Array = append(c.SupportedBitmapCodecs.Array, BitmapCodec{
 				GUID:             codecGUIDRemoteFX,
 				ID:               RDPCodecIDRemoteFX,
-				PropertiesLength: rfxClientCapsLength,
+				PropertiesLength: uint16(len(rfxClientCapabilityContainer())),
 				Properties:       rfxClientCapabilityContainer(),
 			})
 		}
@@ -845,39 +864,73 @@ func NewBitmapCodecsCapability(codecIDs ...uint8) *BitmapCodecsCapability {
 	return c
 }
 
-// rfxClientCapabilityContainer builds the 49 byte TS_RFX_CLNT_CAPS_CONTAINER
-// that a client sends for RemoteFX: it lists the two entropy coders it can
-// decode, and nothing else, since the remaining parameters are fixed.
+// rfxClientCapabilityContainer builds the 41 byte TS_RFX_CLNT_CAPS_CONTAINER a
+// client sends for RemoteFX, listing the entropy coders it can decode and nothing
+// else, since the remaining parameters are fixed.
 func rfxClientCapabilityContainer() []byte {
-	b := make([]byte, 0, rfxClientCapsLength)
+	b := make([]byte, 0, rfxContainerHeaderLen+rfxCapsHeaderLen+rfxCapsetHeaderLen+8)
 	u16 := func(v uint16) { b = append(b, byte(v), byte(v>>8)) }
 	u32 := func(v uint32) {
 		b = append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
 	}
 
-	u32(rfxClientCapsLength) // length
-	u32(rfxCaptureNonCAC)    // captureFlags
-	u32(37)                  // capsLength
+	// TS_RFX_ICAP, one per entropy coder supported.
+	//
+	// RLGR1 only, and that is a deliberate reduction rather than an oversight.
+	// The entropy coder that produced a RemoteFX frame is not recorded in the
+	// frame, so it can only be known from the negotiated capability, and that
+	// negotiation has not been parsed yet: codec.RFXMode is a package level
+	// default that no session updates. Advertising RLGR3 as well therefore
+	// leaves the client open to being sent data it cannot decode's, and the
+	// measured cost of guessing wrong is nil error and a mean pixel error of 75
+	// out of 255, which is a wrong picture rather than a failed one.
+	//
+	// MS-RDPRFX 2.1.1 makes RLGR1 the mode a server must be able to send, so
+	// declaring only it costs nothing and removes the guess. RLGR3 stays
+	// supported by the decoder, which the reference vectors exercise, for a
+	// caller that sets codec.RFXMode deliberately and reads the caps itself.
+	// One TS_RFX_ICAP per declared entropy coder, RLGR1 only. Adding a second one
+	// means the client must decode it, and knowing which one a frame used requires
+	// the negotiation parsed; the comment above explains why that is not there.
+	icaps := make([]byte, 0, rfxICAPLen*ICAPCount)
+	putICAP := func(entropy byte) {
+		icaps = append(icaps,
+			byte(rfxVersion10&0xff), byte(rfxVersion10>>8), // version, little endian
+			byte(rfxTile64x64&0xff), byte(rfxTile64x64>>8), // tileSize, little endian
+			0x00,           // flags: no progressive, no lossless
+			rfxColConvICT,  // colour conversion, ICT
+			rfxXformDWT53A, // transform, DWT 5/3
+			entropy)        // the entropy coder this ICAP is for
+	}
+	for i := 0; i < ICAPCount; i++ {
+		putICAP(rfxEntropyRLGR1)
+	}
+	if len(icaps) != rfxICAPLen*ICAPCount {
+		panic("pdu: the RFX ICAP list does not match its declared size")
+	}
+
+	// The lengths below are derived rather than written, because every one of them
+	// has to agree: a TS_RFX_CAPSET whose blockLen does not count its own header
+	// and the ICAPs that follow it is a server side parse failure, and the values
+	// here were five separate constants that could drift apart.
+	capsetLen := rfxCapsetHeaderLen + len(icaps)
+	capsLen := rfxCapsHeaderLen + capsetLen
+
+	u32(uint32(rfxContainerHeaderLen + capsLen)) // length, the whole container
+	u32(rfxCaptureNonCAC)                        // captureFlags
+	u32(uint32(capsLen))                         // capsLength, the blocks that follow
 	// TS_RFX_CAPS
 	u16(rfxBlockCaps)
-	u32(8) // blockLen
-	u16(1) // numCapsets
+	u32(uint32(rfxCapsHeaderLen)) // blockLen
+	u16(1)                        // numCapsets
 	// TS_RFX_CAPSET
 	u16(rfxBlockCapset)
-	u32(29)             // blockLen
-	b = append(b, 0x01) // codecId, MUST be 0x01
+	u32(uint32(capsetLen)) // blockLen
+	b = append(b, 0x01)    // codecId, MUST be 0x01
 	u16(rfxCapsetType)
-	u16(2) // numIcaps
-	u16(8) // icapLen
-	// TS_RFX_ICAP, one per entropy coder.
-	for _, entropy := range []byte{rfxEntropyRLGR1, rfxEntropyRLGR3} {
-		u16(rfxVersion10)
-		u16(rfxTile64x64)
-		b = append(b, 0x00) // flags
-		b = append(b, rfxColConvICT)
-		b = append(b, rfxXformDWT53A)
-		b = append(b, entropy)
-	}
+	u16(uint16(len(icaps) / rfxICAPLen)) // numIcaps
+	u16(uint16(rfxICAPLen))              // icapLen, TS_RFX_ICAP
+	b = append(b, icaps...)
 	return b
 }
 

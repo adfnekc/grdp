@@ -256,6 +256,7 @@ func main() {
 	cursorLog := flag.Bool("cursor", false, "log decoded pointer shapes and system cursors")
 	egfx := flag.Bool("egfx", false, "enable the EGFX (RDPGFX) dynamic channel")
 	ordersFlag := flag.Bool("orders", false, "advertise and render drawing orders (bitmap cache and MEMBLT)")
+	rfxFlag := flag.Bool("rfx", false, "also advertise RemoteFX among the bitmap codecs (a session using it has not been run against a server here)")
 	dispFlag := flag.Bool("display-control", false, "open the Display Control channel (needed for -resize)")
 	resize := flag.String("resize", "", "ask the server to resize to WxH once the session is ready")
 	clip := flag.Bool("clipboard", false, "enable the clipboard channel and log text received")
@@ -274,6 +275,7 @@ func main() {
 	s.RequireVerifiedCertificate = *requireCert
 	s.EnableEGFX = *egfx
 	s.EnableOrders = *ordersFlag
+	s.EnableRemoteFx = *rfxFlag
 	s.EnableDisplayControl = *dispFlag || *resize != ""
 	s.EnableClipboard = *clip
 
@@ -286,6 +288,8 @@ func main() {
 	var gfxFrames, gfxSurfaces, orderFrames int
 	done := make(chan struct{}, 1)
 
+	rfxSurfaces := 0
+	_ = rfxSurfaces
 	var fb *image.RGBA
 	if *dump != "" {
 		fb = image.NewRGBA(image.Rect(0, 0, *width, *height))

@@ -33,9 +33,18 @@ func Decompress(codecID uint8, data []byte, width, height, bpp int) ([]byte, err
 }
 
 // RFXMode is the entropy coder used for RemoteFX payloads. RemoteFX data does
-// not say which coder it used, so this has to match what was negotiated: a
-// client advertises both ICAPs and the server picks one. RLGR1 is the safer
-// default because every server supports it.
+// not say which coder it used, so this has to match what was negotiated, and the
+// negotiation cannot be read yet, so it has to match what was advertised.
 //
-// Change it before decoding if the session negotiated RLGR3.
+// The capability this library advertises declares RLGR1 alone
+// (pdu.rfxClientCapabilityContainer), which is the mode a server must be able
+// to send, so leaving this at RLGR1 is correct for a session negotiated with
+// this library.
+//
+// Setting it to RLGR3 without changing that capability is how to get a wrong
+// image rather than an error: a frame decoded with the other coder returns no
+// error and lands a mean pixel error of 75 out of 255 against the reference
+// decoder. That is measured, from the vectors in codec/testdata. To use RLGR3 a
+// caller has to advertise it too, which means this package's counterpart is no
+// longer the single thing to change.
 var RFXMode = RLGR1
