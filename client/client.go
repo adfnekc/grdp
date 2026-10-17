@@ -539,6 +539,22 @@ func (c *Client) FramebufferBounds() image.Rectangle {
 	return image.Rectangle{}
 }
 
+// FrameInterval returns the cap in effect for OnFrameThrottled, or FrameTierOff
+// when there is none.
+//
+// It is exported because a front end that lets a viewer choose the tier has to be
+// able to show which one is in effect, and the setting it came from can have been
+// changed at runtime by SetFrameInterval.
+func (c *Client) FrameInterval() time.Duration {
+	if c == nil {
+		return FrameTierOff
+	}
+	if c.frameThrottle != nil {
+		return c.frameThrottle.currentInterval()
+	}
+	return c.frameInterval()
+}
+
 // frameInterval returns the configured tier, defaulting to off.
 func (c *Client) frameInterval() time.Duration {
 	if c.setting != nil && c.setting.FrameInterval > 0 {

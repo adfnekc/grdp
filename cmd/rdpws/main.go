@@ -64,18 +64,22 @@ type gateway struct {
 	mu    sync.Mutex
 	conns map[*websocket.Conn]bool
 	dirty []image.Rectangle
+
+	// batches and reports are the tier's effect, counted so the page can show
+	// it. A batch is one group of changes the server sent; a report is one that
+	// made it through the rate limit. The ratio is what the tier bought.
+	batches int
+	reports int
 	// frames counts what has been encoded, which is what the selftest asserts
 	// on: a gateway that connected and produced nothing is not working.
 	frames    int
 	lastFrame []byte
 }
 
-// addDirty accumulates the regions that changed since the last encode.
-//
-// The library has already merged and clipped them, so the only work here is to
-// fold the new ones into what has not been sent yet. A gateway that encoded
-// every callback would send a frame per update, and an update is often a few
-// hundred pixels of a text cursor.
+// addDirty queues regions to be encoded, and is how a whole frame redraw is
+// requested rather than the rate limited path: the tier decides when the server's
+// changes are encoded, and a page that has just resized its canvas needs the
+// whole desktop now rather than at the next report.
 func (g *gateway) addDirty(rects []image.Rectangle) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -84,8 +88,36 @@ func (g *gateway) addDirty(rects []image.Rectangle) {
 	}
 }
 
+// countBatch records one group of changes arriving from the server, whether or
+// not the tier reports it, so the page can show what the tier is doing rather
+// than asking the viewer to believe it.
+func (g *gateway) countBatch() {
+	g.mu.Lock()
+	g.batches++
+	g.mu.Unlock()
+}
+
 // send writes a binary message to every connected browser, dropping any that is
 // too slow rather than blocking the session on a browser tab.
+// sendText writes a JSON message to every connected browser, dropping any that
+// is too slow, the same way send does for frames.
+func (g *gateway) sendText(msg string) {
+	g.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(g.conns))
+	for c := range g.conns {
+		conns = append(conns, c)
+	}
+	g.mu.Unlock()
+	for _, c := range conns {
+		if err := c.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			g.mu.Lock()
+			delete(g.conns, c)
+			g.mu.Unlock()
+			c.Close()
+		}
+	}
+}
+
 func (g *gateway) send(msg []byte) {
 	g.mu.Lock()
 	conns := make([]*websocket.Conn, 0, len(g.conns))
@@ -141,6 +173,62 @@ func (g *gateway) encodeFrame(r image.Rectangle, fb *client.Framebuffer) ([]byte
 	binary.LittleEndian.PutUint16(msg[6:8], uint16(w))
 	binary.LittleEndian.PutUint16(msg[8:10], uint16(h))
 	return append(msg, jpg.Bytes()...), nil
+}
+
+// sendRegions encodes the regions the tier reported and sends each as a frame.
+// The regions have already been merged and clipped by the library, so there is
+// nothing to fold together here.
+func (g *gateway) sendRegions(regions []image.Rectangle) {
+	fb := g.client.Framebuffer()
+	if fb == nil {
+		return
+	}
+	for _, r := range regions {
+		msg, err := g.encodeFrame(r, fb)
+		if err != nil {
+			log.Printf("encode %v: %v", r, err)
+			continue
+		}
+		if msg == nil {
+			continue
+		}
+		g.mu.Lock()
+		g.frames++
+		g.lastFrame = msg
+		g.mu.Unlock()
+		g.send(msg)
+	}
+}
+
+// sendStats tells every browser what the tier is doing, once a second. It is
+// what makes the control on the page worth having: the numbers are the server's
+// own updates against the frames actually pushed, so a viewer can see that a
+// lower tier pushes fewer frames for the same screen rather than taking it on
+// trust.
+func (g *gateway) sendStats() {
+	g.mu.Lock()
+	batches, reports := g.batches, g.reports
+	g.batches, g.reports = 0, 0
+	g.mu.Unlock()
+	msg, err := json.Marshal(map[string]interface{}{
+		"type":    "stats",
+		"updates": batches,
+		"pushes":  reports,
+		"fps":     g.currentFPS(),
+	})
+	if err != nil {
+		return
+	}
+	g.sendText(string(msg))
+}
+
+// currentFPS is the tier in the units the page shows and sets.
+func (g *gateway) currentFPS() int {
+	if d := g.client.FrameInterval(); d <= 0 {
+		return 0
+	} else {
+		return int(time.Second / d)
+	}
 }
 
 // flush encodes everything accumulated since the last call and sends it.
@@ -207,6 +295,9 @@ type input struct {
 	Scroll int    `json:"scroll"`
 	Scan   int    `json:"scan"`
 	Text   string `json:"text"`
+	// FPS is the refresh tier for the "tier" message: frames per second to cap
+	// pushing at, or 0 for no cap.
+	FPS int `json:"fps"`
 }
 
 // scancodes the browser's key events are mapped to. A gateway normally sends
@@ -248,6 +339,17 @@ func (g *gateway) handleInput(raw []byte) {
 		if err := c.TypeText(in.Text, 8*time.Millisecond); err != nil {
 			log.Printf("text: %v", err)
 		}
+	case "tier":
+		// The front end picks the refresh rate. It is the knob this example
+		// exists to demonstrate, so it is a message rather than a flag: the
+		// page can compare tiers without a reconnect, and the numbers that come
+		// back are the server's own updates against the frames pushed.
+		var d time.Duration
+		if in.FPS > 0 {
+			d = time.Second / time.Duration(in.FPS)
+		}
+		g.client.SetFrameInterval(d)
+		g.sendStats()
 	case "refresh":
 		// The page asks for a whole frame, which it needs after clearing its
 		// canvas: resizing a canvas clears it, so a browser that has just been
@@ -259,6 +361,10 @@ func (g *gateway) handleInput(raw []byte) {
 			g.mu.Lock()
 			g.dirty = client.MergeDirty(g.dirty, bounds, bounds)
 			g.mu.Unlock()
+			// Flushed here rather than left to the tier. A page that has just
+			// cleared its canvas is showing nothing, so waiting for the next
+			// report would leave it blank for up to one interval for no reason.
+			g.flush()
 		}
 	default:
 		log.Printf("input: unknown type %q", in.Type)
@@ -333,6 +439,13 @@ func main() {
 	setting.Width, setting.Height = *width, *height
 	setting.Protocol = *proto
 	setting.EnableClipboard = true
+	// -fps is the initial tier, and it becomes the library's rate limit rather
+	// than this program's own timer. Zero or less means no cap: every batch of
+	// changes is reported as it arrives, which is the library's default and the
+	// thing to compare the tiers against.
+	if *fps > 0 {
+		setting.FrameInterval = time.Second / time.Duration(*fps)
+	}
 	// EGFX and orders are off by default and stay off here: this example is
 	// about the gateway, and the default bitmap path is the one that works
 	// against everything.
@@ -368,14 +481,28 @@ func main() {
 	}
 	fmt.Println("session ready")
 
-	// Encoding on a timer rather than per update is the frame pacing: a
-	// server that sends a hundred small updates a second should not become a
-	// hundred JPEGs, and a browser that draws them all should not have to.
+	// The tier is the frame pacing, and the library does it: the first report of
+	// a burst is immediate, so a keystroke appears without waiting for a tick,
+	// and only what arrives inside the interval is merged into the next one. A
+	// gateway that encoded every update would send a JPEG per text cursor blink.
+	for _, r := range []image.Rectangle{} {
+		_ = r
+	}
+	g.client.OnFrame(func(dirty []image.Rectangle) {
+		g.countBatch()
+	})
+	g.client.OnFrameThrottled(func(dirty []image.Rectangle) {
+		g.mu.Lock()
+		g.reports++
+		g.mu.Unlock()
+		g.sendRegions(dirty)
+	})
+	// Tell the page what the tier is, and keep telling it the effect.
 	go func() {
-		tick := time.NewTicker(time.Second / time.Duration(*fps))
+		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
 		for range tick.C {
-			g.flush()
+			g.sendStats()
 		}
 	}()
 
@@ -412,12 +539,17 @@ const page = `<!doctype html>
   #wrap { position: relative; display: inline-block; }
   canvas { display: block; cursor: none; }
   #cursor { position: absolute; pointer-events: none; image-rendering: pixelated; }
-  #bar { padding: 6px 8px; }
+  #bar { padding: 6px 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #tiers button { background: #333; color: #ddd; border: 1px solid #555; padding: 3px 8px; cursor: pointer; }
+  #tiers button.on { background: #4a6; color: #000; border-color: #4a6; }
+  #rate { color: #9c9; font-variant-numeric: tabular-nums; }
   input { width: 24em; background: #333; color: #eee; border: 1px solid #555; padding: 3px; }
 </style></head><body>
 <div id="bar">
   <span id="status">connecting…</span>
-  &nbsp;<input id="text" placeholder="type here (any script) and press Enter" autofocus>
+  <span id="tiers"></span>
+  <span id="rate"></span>
+  <input id="text" placeholder="type here (any script) and press Enter" autofocus>
 </div>
 <div id="wrap">
   <canvas id="screen" width="1024" height="768"></canvas>
@@ -443,10 +575,32 @@ function fit() {
 }
 window.addEventListener('resize', fit);
 
+// The tier control. Each button is a cap on how often the gateway pushes a
+// frame; 0 is no cap, which is every batch of changes the server sends. The
+// numbers next to it are the server's updates against the frames actually
+// pushed, per second, so a lower tier can be seen to push fewer frames for the
+// same screen rather than taken on trust.
+const TIERS = [0, 60, 30, 15];
+const tiers = document.getElementById('tiers');
+const rate = document.getElementById('rate');
+for (const fps of TIERS) {
+  const b = document.createElement('button');
+  b.textContent = fps === 0 ? 'no cap' : fps + ' fps';
+  b.dataset.fps = String(fps);
+  b.onclick = () => send({type: 'tier', fps: fps});
+  tiers.appendChild(b);
+}
+function showTier(fps) {
+  for (const b of tiers.children) b.classList.toggle('on', Number(b.dataset.fps) === fps);
+}
+
 ws.onmessage = (ev) => {
   if (typeof ev.data === 'string') {
     const msg = JSON.parse(ev.data);
-    if (msg.type === 'size') {
+    if (msg.type === 'stats') {
+      showTier(msg.fps);
+      rate.textContent = msg.updates + ' updates/s → ' + msg.pushes + ' pushes/s';
+    } else if (msg.type === 'size') {
       natural = {w: msg.w, h: msg.h};
       if (screen.width !== msg.w || screen.height !== msg.h) {
         // Resizing a canvas clears it, so ask for a whole frame instead of
